@@ -5,8 +5,7 @@ import * as path from 'path'
 import { createClient } from './client'
 
 import { getSystemPrompt } from './prompt/prompt'
-import { getMemoryPrompt } from './memory/memory'
-import { getUserMessage } from './memory/memory'
+import { getMemoryPrompt, getUserMessage, MEMORY_FILE_PATH } from './memory/memory'
 
 import { ToolRegistrar } from './tools/toolregistrar'
 
@@ -86,8 +85,7 @@ async function* streamResponse(
 // 返回 true 表示 memory.md 被成功写入，false 表示整理失败
 async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]): Promise<boolean> {
   console.log('[agent] Memory 整理...')
-  const memoryPath = path.join(process.cwd(), 'memory.md')
-  const contentBefore = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, 'utf-8') : ''
+  const contentBefore = fs.existsSync(MEMORY_FILE_PATH) ? fs.readFileSync(MEMORY_FILE_PATH, 'utf-8') : ''
 
   const historyText = conversationHistory
     .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
@@ -116,7 +114,7 @@ async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]):
     messages.push({ role: 'user', content: toolResults })
   }
 
-  const contentAfter = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, 'utf-8') : ''
+  const contentAfter = fs.existsSync(MEMORY_FILE_PATH) ? fs.readFileSync(MEMORY_FILE_PATH, 'utf-8') : ''
   if (contentAfter === contentBefore) {
     console.log('[agent] Memory 整理失败：memory.md 未被写入，保留当前上下文')
     return false
