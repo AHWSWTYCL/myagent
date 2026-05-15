@@ -25,6 +25,6 @@ export class Tool {
   }
 
   execute(args: any): string {
-    return `Executing ${this.name} with args ${JSON.stringify(args)}`;
+    throw new Error(`Tool "${this.name}" does not implement execute()`)
   }
 }

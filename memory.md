@@ -1,7 +1,11 @@
-## 项目：myagent（/Users/wangshanwu/Desktop/Playgrounds/myagent）
-TypeScript + Anthropic SDK 的 agent，入口 src/agent.ts，支持流式输出、工具调用、记忆整理。
+# Memory
 
-## 流式实现评估结论
-核心流式逻辑正确：异步生成器 streamResponse 逐字 yield text delta，最后 yield finalMessage，时序无误。
-⚠️ agentLoop 用 `{ ...context }` 解构，messages 是引用（正常），但若未来修改 systemPrompt 会有潜在 bug。
-⚠️ done 后补 `\n` 可能导致多余空行，不影响功能。
+## 项目
+- 路径：`/Users/wangshanwu/Desktop/Playgrounds/myagent`
+- TypeScript + Anthropic SDK，实现一个 AI agent
+
+## BashTool 黑名单（已实现）
+- 文件：`src/tools/bashtool.ts`
+- 在 `execute()` 前调用 `checkBlacklist()`，命中则返回 `[BLOCKED]` 提示
+- 8 条正则规则：`rm -rf`、删根目录、`mkfs`、`dd` 写裸盘、覆盖 `/etc` 系统文件、fork bomb、shutdown/reboot、curl|sh
+- 局限：链式命令可拆分绕过，变量展开无法拦截，生产环境应用沙箱隔离

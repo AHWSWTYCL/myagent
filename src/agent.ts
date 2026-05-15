@@ -13,6 +13,8 @@ import { ToolRegistrar } from './tools/toolregistrar'
 const toolRegistrar = new ToolRegistrar()
 toolRegistrar.registerTool(new (await import('./tools/readtool')).ReadTool())
 toolRegistrar.registerTool(new (await import('./tools/writetool')).WriteTool())
+toolRegistrar.registerTool(new (await import('./tools/listdirtool')).ListDirTool())
+toolRegistrar.registerTool(new (await import('./tools/bashtool')).BashTool())
 
 const client = createClient()
 
@@ -21,8 +23,9 @@ console.log('[agent] System prompt loaded\n' + baseSystemPrompt)
 
 
 async function checkPermission(toolName: string): Promise<boolean> {
-  if (toolName === 'write_file') {
-    let answer = await question('The agent wants to write a file. Do you allow this? (yes/no) ')
+  if (toolName === 'write_file' || toolName === 'bash') {
+    const label = toolName === 'bash' ? 'run a bash command' : 'write a file'
+    let answer = await question(`The agent wants to ${label}. Do you allow this? (yes/no) `)
     answer = answer.trim().toLowerCase()
     return answer === 'yes' || answer === 'y'
   }
@@ -80,13 +83,16 @@ async function* streamResponse(
   yield { type: 'done', message: finalMessage }
 }
 
-async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]) {
+// 返回 true 表示 memory.md 被成功写入，false 表示整理失败
+async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]): Promise<boolean> {
   console.log('[agent] Memory 整理...')
+  const memoryPath = path.join(process.cwd(), 'memory.md')
+  const contentBefore = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, 'utf-8') : ''
+
   const historyText = conversationHistory
     .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
     .join('\n')
 
-  // 记忆整理不需要流式，直接用 create()
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: `以下是最近的对话记录，请整理：\n\n${historyText}` },
   ]
@@ -99,7 +105,7 @@ async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]) 
       system: getMemoryPrompt(),
     })
     messages.push({ role: 'assistant', content: response.content })
-    if (response.stop_reason === 'end_turn') break
+    if (response.stop_reason !== 'tool_use') break
 
     const toolResults: Anthropic.ToolResultBlockParam[] = []
     for (const block of response.content) {
@@ -109,7 +115,14 @@ async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]) 
     }
     messages.push({ role: 'user', content: toolResults })
   }
+
+  const contentAfter = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, 'utf-8') : ''
+  if (contentAfter === contentBefore) {
+    console.log('[agent] Memory 整理失败：memory.md 未被写入，保留当前上下文')
+    return false
+  }
   console.log('[agent] Memory 整理完毕')
+  return true
 }
 
 async function extractMemory(): Promise<string> {
@@ -149,7 +162,7 @@ async function agentLoop(context: { messages: Anthropic.MessageParam[]; systemPr
 
     messages.push({ role: 'assistant', content: response.content })
 
-    if (response.stop_reason === 'end_turn') {
+    if (response.stop_reason !== 'tool_use') {
       return messages
     }
 
@@ -200,16 +213,27 @@ async function repl() {
     }
     if (!input.trim()) continue
     context.messages.push({ role: 'user', content: input })
-    const history = await agentLoop(context)
+
+    let history: Anthropic.MessageParam[] | null = null
+    try {
+      history = await agentLoop(context)
+    } catch (err) {
+      console.error(`[agent] Error: ${err}`)
+      // 回滚刚加入的 user 消息，避免下一轮发送残缺的对话历史
+      context.messages.pop()
+      continue
+    }
 
     // 当 messages 积累超过阈值时触发记忆整理
     // 用 messages.length 而不是 turnCount，避免 tool use 产生的额外消息导致计数对不上
     if (history && history.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
-      await consolidateMemory(history)
-      const newMemory = await extractMemory()
-      context = {
-        messages: [],
-        systemPrompt: buildSystemPromptWithMemory(newMemory),
+      const consolidated = await consolidateMemory(history)
+      if (consolidated) {
+        const newMemory = await extractMemory()
+        context = {
+          messages: [],
+          systemPrompt: buildSystemPromptWithMemory(newMemory),
+        }
       }
     }
   }

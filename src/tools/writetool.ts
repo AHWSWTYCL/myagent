@@ -1,4 +1,6 @@
 import fs from 'fs'
+import path from 'path'
+import { cwd } from 'process'
 import { Tool } from "./tool";
 
 export class WriteTool extends Tool {
@@ -34,13 +36,20 @@ export class WriteTool extends Tool {
     }
 
     execute(args: any): string {
-        const path = args.path;
+        const filePath = args.path;
         const content = args.content;
+
+        const resolvedPath = path.resolve(filePath);
+        const workDir = cwd();
+        if (!resolvedPath.startsWith(workDir + path.sep) && resolvedPath !== workDir) {
+            return JSON.stringify({ success: false, message: `Path ${filePath} is outside the working directory` });
+        }
+
         try {
-            fs.writeFileSync(path, content);
-            return JSON.stringify({ success: true, message: `Wrote ${content.length} bytes to ${path}` });
+            fs.writeFileSync(resolvedPath, content);
+            return JSON.stringify({ success: true, message: `Wrote ${content.length} bytes to ${resolvedPath}` });
         } catch (err) {
-            return JSON.stringify({ success: false, message: `Error writing file at ${path}: ${err}` });
+            return JSON.stringify({ success: false, message: `Error writing file at ${resolvedPath}: ${err}` });
         }
     }
 }   
