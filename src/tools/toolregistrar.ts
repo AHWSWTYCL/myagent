@@ -1,5 +1,6 @@
-import { ToolRegistry } from "./toolregistry";
-import { Tool } from "./tool";
+import Anthropic from "@anthropic-ai/sdk";
+import { ToolRegistry } from "./toolregistry.js";
+import { Tool } from "./tool.js";
 
 export class ToolRegistrar {
     private registry: ToolRegistry;
@@ -16,7 +17,12 @@ export class ToolRegistrar {
         return this.registry.getTool(name);
     }
 
-    getAllTools(): Tool[] {
-        return this.registry.getAllTools();
+    getAllTools(): Anthropic.Tool[] {
+        const tools = this.registry.getAllTools();
+        return tools.map(tool => ({
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema
+        }));
     }
 }

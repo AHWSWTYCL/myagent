@@ -8,7 +8,7 @@ export class Tool {
     return 'A tool for executing a specific task';
   }
 
-  get input_schema(): object {
+  get input_schema(): { type: 'object'; properties: object; required: string[] } {
     return {
       type: 'object',
       properties: {},

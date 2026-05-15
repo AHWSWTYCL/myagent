@@ -11,7 +11,7 @@ export class ReadTool extends Tool {
         return 'Read a file from the filesystem and return its contents';
     }
 
-    get input_schema(): object {
+    get input_schema(): { type: 'object'; properties: object; required: string[] } {
         return {
             type: 'object' as const,
             properties: {

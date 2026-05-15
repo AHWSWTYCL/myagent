@@ -11,17 +11,14 @@ export class WriteTool extends Tool {
         return 'Useful for when you need to write a file. Input should be a file path and content.';
     }
 
-    get input_schema(): object {
+    get input_schema(): { type: 'object'; properties: object; required: string[] } {
         return {
-            type: 'object' as const,
+            type: 'object',
             properties: {
-                type: 'object' as const,
-                properties: {
-                    path: { type: 'string', description: 'Absolute or relative file path' },
-                    content: { type: 'string', description: 'Content to write' },
-                },
-                required: ['path', 'content'],
-            }
+                path: { type: 'string', description: 'Absolute or relative file path' },
+                content: { type: 'string', description: 'Content to write' },
+            },
+            required: ['path', 'content'],
         }
     }
 

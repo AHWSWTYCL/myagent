@@ -1,47 +1,19 @@
 import Anthropic from '@anthropic-ai/sdk'
-import fs from 'fs'
 import * as readline from 'readline'
-import { createClient } from './client.js'
+import { createClient } from './client'
+
+import { ToolRegistrar } from './tools/toolregistrar'
+
+const toolRegistrar = new ToolRegistrar()
+toolRegistrar.registerTool(new (await import('./tools/readtool')).ReadTool())
+toolRegistrar.registerTool(new (await import('./tools/writetool')).WriteTool())
 
 const client = createClient()
-
-const tools: Anthropic.Tool[] = [
-  {
-    name: 'read_file',
-    description: 'Read a file from the filesystem and return its contents',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        path: { type: 'string', description: 'Absolute or relative file path' },
-      },
-      required: ['path'],
-    },
-  },
-  {
-    name: 'write_file',
-    description: 'Write content to a file, creating it if it does not exist',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        path: { type: 'string', description: 'Absolute or relative file path' },
-        content: { type: 'string', description: 'Content to write' },
-      },
-      required: ['path', 'content'],
-    },
-  },
-]
 
 function executeTool(name: string, input: unknown): string {
   const args = input as Record<string, string>
   try {
-    if (name === 'read_file') {
-      return fs.readFileSync(args.path, 'utf-8')
-    }
-    if (name === 'write_file') {
-      fs.writeFileSync(args.path, args.content)
-      return `OK — wrote ${args.content.length} bytes to ${args.path}`
-    }
-    return `Unknown tool: ${name}`
+    return toolRegistrar.getTool(name)?.execute(args) ?? 'Unknown tool'
   } catch (err) {
     return `Error: ${err}`
   }
@@ -58,7 +30,7 @@ async function agentLoop(task: string) {
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 4096,
-      tools,
+      tools: toolRegistrar.getAllTools(),
       messages,
     })
 
