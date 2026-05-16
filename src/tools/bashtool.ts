@@ -56,7 +56,7 @@ export class BashTool extends Tool {
         return null
     }
 
-    execute(args: any): string {
+    async execute(args: any): Promise<string> {
         const command: string = args.command
 
         const blocked = this.checkBlacklist(command)

@@ -24,7 +24,7 @@ export class Tool {
     };
   }
 
-  execute(args: any): string {
+  async execute(args: any): Promise<string> {
     throw new Error(`Tool "${this.name}" does not implement execute()`)
   }
 }

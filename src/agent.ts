@@ -6,6 +6,7 @@ import { createClient } from './client'
 
 import { getSystemPrompt } from './prompt/prompt'
 import { getMemoryPrompt, getUserMessage, MEMORY_FILE_PATH } from './memory/memory'
+import { runAgentLoop, runAgentLoopStream } from './utils/runagent'
 
 import { ToolRegistrar } from './tools/toolregistrar'
 
@@ -14,6 +15,10 @@ toolRegistrar.registerTool(new (await import('./tools/readtool')).ReadTool())
 toolRegistrar.registerTool(new (await import('./tools/writetool')).WriteTool())
 toolRegistrar.registerTool(new (await import('./tools/listdirtool')).ListDirTool())
 toolRegistrar.registerTool(new (await import('./tools/bashtool')).BashTool())
+toolRegistrar.registerTool(new (await import('./tools/agenttool')).AgentTool())
+toolRegistrar.registerTool(new (await import('./tools/planneragenttool')).PlannerAgentTool())
+toolRegistrar.registerTool(new (await import('./tools/generatortool')).GeneratorTool())
+toolRegistrar.registerTool(new (await import('./tools/verifiertool')).VerifierTool())
 
 const client = createClient()
 
@@ -37,50 +42,15 @@ async function executeTool(name: string, input: unknown, skipPermissionCheck: bo
     if (!skipPermissionCheck && !await checkPermission(name)) {
       return 'Permission denied'
     }
-    return toolRegistrar.getTool(name)?.execute(args) ?? 'Unknown tool'
+    return await (toolRegistrar.getTool(name)?.execute(args) ?? Promise.resolve('Unknown tool'))
   } catch (err) {
     return `Error: ${err}`
   }
 }
 
 const MAX_TURNS = 20
-const MEMORY_CONSOLIDATE_THRESHOLD = 10
+const MEMORY_CONSOLIDATE_THRESHOLD = 100
 
-// 流式事件类型
-type StreamEvent =
-  | { type: 'text'; text: string }
-  | { type: 'done'; message: Anthropic.Message }
-
-/**
- * 异步生成器：调用 SDK stream，逐字 yield 文本 delta，最后 yield 完整 message。
- * 调用方可以边收 text 事件边打印，收到 done 事件后拿完整 message 继续逻辑。
- */
-async function* streamResponse(
-  messages: Anthropic.MessageParam[],
-  systemPrompt: string,
-): AsyncGenerator<StreamEvent> {
-  const stream = client.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
-    tools: toolRegistrar.getAllTools(),
-    messages,
-    system: systemPrompt,
-  })
-
-  // 逐个 text delta yield 出去，调用方实时打印
-  for await (const event of stream) {
-    if (
-      event.type === 'content_block_delta' &&
-      event.delta.type === 'text_delta'
-    ) {
-      yield { type: 'text', text: event.delta.text }
-    }
-  }
-
-  // 流结束后，yield 完整 message（包含 stop_reason、tool_use 等）
-  const finalMessage = await stream.finalMessage()
-  yield { type: 'done', message: finalMessage }
-}
 
 // 返回 true 表示 memory.md 被成功写入，false 表示整理失败
 async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]): Promise<boolean> {
@@ -91,28 +61,15 @@ async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]):
     .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
     .join('\n')
 
-  const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: `以下是最近的对话记录，请整理：\n\n${historyText}` },
-  ]
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4096,
-      tools: toolRegistrar.getAllTools(),
-      messages,
-      system: getMemoryPrompt(),
-    })
-    messages.push({ role: 'assistant', content: response.content })
-    if (response.stop_reason !== 'tool_use') break
-
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-    for (const block of response.content) {
-      if (block.type !== 'tool_use') continue
-      const result = await executeTool(block.name, block.input, true)
-      toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
-    }
-    messages.push({ role: 'user', content: toolResults })
-  }
+  await runAgentLoop({
+    client,
+    model: 'claude-sonnet-4-6',
+    system: getMemoryPrompt(),
+    tools: toolRegistrar.getAllTools(),
+    messages: [{ role: 'user', content: `以下是最近的对话记录，请整理：\n\n${historyText}` }],
+    maxTurns: MAX_TURNS,
+    executeTool: (name, input) => executeTool(name, input, true),
+  })
 
   const contentAfter = fs.existsSync(MEMORY_FILE_PATH) ? fs.readFileSync(MEMORY_FILE_PATH, 'utf-8') : ''
   if (contentAfter === contentBefore) {
@@ -143,44 +100,18 @@ function buildSystemPromptWithMemory(memory: string): string {
 async function agentLoop(context: { messages: Anthropic.MessageParam[]; systemPrompt: string }): Promise<Anthropic.MessageParam[] | null> {
   const { messages, systemPrompt } = { ...context }
 
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
-    // 消费生成器：收到 text 就实时打印，收到 done 就拿完整 message
-    let response: Anthropic.Message | null = null
-    for await (const event of streamResponse(messages, systemPrompt)) {
-      if (event.type === 'text') {
-        process.stdout.write(event.text)
-      } else {
-        response = event.message
-      }
-    }
+  await runAgentLoopStream({
+    client,
+    model: 'claude-sonnet-4-6',
+    system: systemPrompt,
+    tools: toolRegistrar.getAllTools(),
+    messages,
+    maxTurns: MAX_TURNS,
+    executeTool,
+    onText: delta => process.stdout.write(delta),
+  })
+  process.stdout.write('\n')
 
-    if (!response) break
-    // text 流结束后补一个换行
-    process.stdout.write('\n')
-
-    messages.push({ role: 'assistant', content: response.content })
-
-    if (response.stop_reason !== 'tool_use') {
-      return messages
-    }
-
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-    for (const block of response.content) {
-      if (block.type !== 'tool_use') continue
-
-      console.log(`  [tool] ${block.name}(${JSON.stringify(block.input)})`)
-      const result = await executeTool(block.name, block.input)
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: block.id,
-        content: result,
-      })
-    }
-
-    messages.push({ role: 'user', content: toolResults })
-  }
-
-  console.log('[agent] Reached max turns, stopping.')
   return messages
 }
 
@@ -193,8 +124,20 @@ function question(prompt: string): Promise<string> {
   return new Promise((resolve) => rl.question(prompt, resolve))
 }
 
+function printBanner() {
+  console.log(`
+    / \\__
+   (    @\\___
+   /         O
+  /   (_____/
+ /_____/   U
+
+  🐶 myagent — Ready. Type a task (ctrl+c to exit).
+`)
+}
+
 async function repl() {
-  console.log('[myagent] Ready. Type a task (ctrl+c to exit).\n')
+  printBanner()
 
   const memory = await extractMemory()
   let context: { messages: Anthropic.MessageParam[]; systemPrompt: string } = {

@@ -35,7 +35,7 @@ export class WriteTool extends Tool {
         }
     }
 
-    execute(args: any): string {
+    async execute(args: any): Promise<string> {
         const filePath = args.path;
         const content = args.content;
 

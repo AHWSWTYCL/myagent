@@ -31,7 +31,7 @@ export class ReadTool extends Tool {
         }
     }
 
-    execute(args: any): string {
+    async execute(args: any): Promise<string> {
         const path = args.path;
         try {
             const content = fs.readFileSync(path, 'utf-8');
