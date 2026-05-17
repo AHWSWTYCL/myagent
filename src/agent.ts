@@ -9,6 +9,21 @@ import { getMemoryPrompt, getUserMessage, MEMORY_FILE_PATH } from './memory/memo
 import { runAgentLoop, runAgentLoopStream } from './utils/runagent'
 
 import { ToolRegistrar } from './tools/toolregistrar'
+import { HookManager } from './hooks/hook.js'
+import { LoggerHook } from './hooks/loggerhook.js'
+import { PermissionHook } from './hooks/permissionhook.js'
+import { SkillManager } from './skills/skillmanager.js'
+import { CodeReviewSkill } from './skills/codereviewskill.js'
+import { GitSkill } from './skills/gitskill.js'
+import { CommandRegistry } from './commands/commandregistry.js'
+import { CommandParser } from './commands/commandparser.js'
+import { HelpCommand } from './commands/helpcommand.js'
+import { SkillCommand } from './commands/skillcommand.js'
+
+const skillManager = new SkillManager()
+skillManager.registerBuiltin(new CodeReviewSkill())
+skillManager.registerBuiltin(new GitSkill())
+await skillManager.loadFromDisk()
 
 const toolRegistrar = new ToolRegistrar()
 toolRegistrar.registerTool(new (await import('./tools/readtool')).ReadTool())
@@ -16,33 +31,49 @@ toolRegistrar.registerTool(new (await import('./tools/writetool')).WriteTool())
 toolRegistrar.registerTool(new (await import('./tools/listdirtool')).ListDirTool())
 toolRegistrar.registerTool(new (await import('./tools/bashtool')).BashTool())
 toolRegistrar.registerTool(new (await import('./tools/agenttool')).AgentTool())
-toolRegistrar.registerTool(new (await import('./tools/planneragenttool')).PlannerAgentTool())
-toolRegistrar.registerTool(new (await import('./tools/generatortool')).GeneratorTool())
-toolRegistrar.registerTool(new (await import('./tools/verifiertool')).VerifierTool())
+toolRegistrar.registerTool(new (await import('./tools/builtin/planneragenttool')).PlannerAgentTool())
+toolRegistrar.registerTool(new (await import('./tools/builtin/generatortool')).GeneratorTool())
+toolRegistrar.registerTool(new (await import('./tools/builtin/verifiertool')).VerifierTool())
+toolRegistrar.registerTool(new (await import('./tools/memorytool')).MemoryTool())
+toolRegistrar.registerTool(new (await import('./tools/useskilltool')).UseSkillTool(skillManager))
 
 const client = createClient()
 
 const baseSystemPrompt = getSystemPrompt()
 console.log('[agent] System prompt loaded\n' + baseSystemPrompt)
 
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+})
 
-async function checkPermission(toolName: string): Promise<boolean> {
-  if (toolName === 'write_file' || toolName === 'bash') {
-    const label = toolName === 'bash' ? 'run a bash command' : 'write a file'
-    let answer = await question(`The agent wants to ${label}. Do you allow this? (yes/no) `)
-    answer = answer.trim().toLowerCase()
-    return answer === 'yes' || answer === 'y'
-  }
-  return true
+function question(prompt: string): Promise<string> {
+  return new Promise((resolve) => rl.question(prompt, resolve))
 }
 
-async function executeTool(name: string, input: unknown, skipPermissionCheck: boolean = false): Promise<string> {
+const commandRegistry = new CommandRegistry()
+commandRegistry.register(new HelpCommand(commandRegistry))
+commandRegistry.register(new SkillCommand(skillManager, rl))
+const commandParser = new CommandParser(commandRegistry)
+
+const hookManager = new HookManager()
+hookManager.register(new LoggerHook())
+hookManager.register(new PermissionHook(rl))
+
+async function executeTool(name: string, input: unknown, skipHooks: boolean = false): Promise<string> {
   const args = input as Record<string, string>
   try {
-    if (!skipPermissionCheck && !await checkPermission(name)) {
-      return 'Permission denied'
+    if (!skipHooks) {
+      const preResult = await hookManager.runOnToolCall({ toolName: name, toolInput: input })
+      if (preResult.action === 'block') {
+        return `Permission denied: ${preResult.reason}`
+      }
     }
-    return await (toolRegistrar.getTool(name)?.execute(args) ?? Promise.resolve('Unknown tool'))
+    const result = await (toolRegistrar.getTool(name)?.execute(args) ?? Promise.resolve('Unknown tool'))
+    if (!skipHooks) {
+      await hookManager.runOnToolResult({ toolName: name, toolInput: input, toolResult: result })
+    }
+    return result
   } catch (err) {
     return `Error: ${err}`
   }
@@ -93,8 +124,8 @@ async function extractMemory(): Promise<string> {
 }
 
 function buildSystemPromptWithMemory(memory: string): string {
-  if (!memory) return baseSystemPrompt
-  return `${baseSystemPrompt}\n\n## 历史记忆\n${memory}`
+  const base = memory ? `${baseSystemPrompt}\n\n## 历史记忆\n${memory}` : baseSystemPrompt
+  return `${base}${skillManager.buildPromptFragment()}`
 }
 
 async function agentLoop(context: { messages: Anthropic.MessageParam[]; systemPrompt: string }): Promise<Anthropic.MessageParam[] | null> {
@@ -113,15 +144,6 @@ async function agentLoop(context: { messages: Anthropic.MessageParam[]; systemPr
   process.stdout.write('\n')
 
   return messages
-}
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-})
-
-function question(prompt: string): Promise<string> {
-  return new Promise((resolve) => rl.question(prompt, resolve))
 }
 
 function printBanner() {
@@ -153,6 +175,12 @@ async function repl() {
       break
     }
     if (!input.trim()) continue
+
+    if (commandParser.isCommand(input)) {
+      await commandParser.dispatch(input)
+      continue
+    }
+
     context.messages.push({ role: 'user', content: input })
 
     let history: Anthropic.MessageParam[] | null = null

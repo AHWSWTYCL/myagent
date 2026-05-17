@@ -1,9 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { createClient } from '../client'
-import { runAgentLoopStream } from '../utils/runagent'
-import { extractLastText, makePrefixedOnText } from '../utils/agentutils'
-import { ToolRegistrar } from './toolregistrar'
-import { Tool } from './tool'
+import { createClient } from '../../client'
+import { runAgentLoopStream } from '../../utils/runagent'
+import { extractLastText, makePrefixedOnText } from '../../utils/agentutils'
+import { ToolRegistrar } from '../toolregistrar'
+import { Tool } from '../tool'
 
 const MAX_ITERATIONS = 3
 
@@ -50,10 +50,10 @@ export class PlannerAgentTool extends Tool {
     const task: string = args.task
     const client = createClient()
 
-    const ReadTool = (await import('./readtool')).ReadTool
-    const WriteTool = (await import('./writetool')).WriteTool
-    const ListDirTool = (await import('./listdirtool')).ListDirTool
-    const BashTool = (await import('./bashtool')).BashTool
+    const ReadTool = (await import('../readtool')).ReadTool
+    const WriteTool = (await import('../writetool')).WriteTool
+    const ListDirTool = (await import('../listdirtool')).ListDirTool
+    const BashTool = (await import('../bashtool')).BashTool
 
     // Planner: read-only tools for codebase research
     const plannerRegistrar = new ToolRegistrar()

@@ -1,9 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { createClient } from '../client'
-import { runAgentLoopStream } from '../utils/runagent'
-import { extractLastText, makePrefixedOnText } from '../utils/agentutils'
-import { ToolRegistrar } from './toolregistrar'
-import { Tool } from './tool'
+import { createClient } from '../../client'
+import { runAgentLoopStream } from '../../utils/runagent'
+import { extractLastText, makePrefixedOnText } from '../../utils/agentutils'
+import { ToolRegistrar } from '../toolregistrar'
+import { Tool } from '../tool'
 
 const GENERATOR_SYSTEM = `你是一个资深开发者。
 严格按照给定的计划，使用工具完成任务（读写文件、执行命令等）。
@@ -41,10 +41,10 @@ export class GeneratorTool extends Tool {
     const client = createClient()
 
     const registrar = new ToolRegistrar()
-    registrar.registerTool(new (await import('./readtool')).ReadTool())
-    registrar.registerTool(new (await import('./writetool')).WriteTool())
-    registrar.registerTool(new (await import('./listdirtool')).ListDirTool())
-    registrar.registerTool(new (await import('./bashtool')).BashTool())
+    registrar.registerTool(new (await import('../readtool')).ReadTool())
+    registrar.registerTool(new (await import('../writetool')).WriteTool())
+    registrar.registerTool(new (await import('../listdirtool')).ListDirTool())
+    registrar.registerTool(new (await import('../bashtool')).BashTool())
 
     const executeTool = async (name: string, input: unknown): Promise<string> => {
       try {
