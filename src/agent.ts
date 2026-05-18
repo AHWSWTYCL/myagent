@@ -5,7 +5,8 @@ import * as path from 'path'
 import { createClient } from './client'
 
 import { getSystemPrompt } from './prompt/prompt'
-import { getMemoryPrompt, getUserMessage, MEMORY_FILE_PATH } from './memory/memory'
+import { getMemoryPrompt, readCategory } from './memory/memory'
+import { recallRelevantMemory } from './memory/recall'
 import { runAgentLoop, runAgentLoopStream } from './utils/runagent'
 
 import { ToolRegistrar } from './tools/toolregistrar'
@@ -36,6 +37,7 @@ toolRegistrar.registerTool(new (await import('./tools/builtin/generatortool')).G
 toolRegistrar.registerTool(new (await import('./tools/builtin/verifiertool')).VerifierTool())
 toolRegistrar.registerTool(new (await import('./tools/memorytool')).MemoryTool())
 toolRegistrar.registerTool(new (await import('./tools/useskilltool')).UseSkillTool(skillManager))
+toolRegistrar.registerTool(new (await import('./tasks/tasktool')).TaskTool())
 
 const client = createClient()
 
@@ -54,6 +56,7 @@ function question(prompt: string): Promise<string> {
 const commandRegistry = new CommandRegistry()
 commandRegistry.register(new HelpCommand(commandRegistry))
 commandRegistry.register(new SkillCommand(skillManager, rl))
+commandRegistry.register(new (await import('./tasks/taskcommand')).TaskCommand())
 const commandParser = new CommandParser(commandRegistry)
 
 const hookManager = new HookManager()
@@ -82,11 +85,12 @@ async function executeTool(name: string, input: unknown, skipHooks: boolean = fa
 const MAX_TURNS = 20
 const MEMORY_CONSOLIDATE_THRESHOLD = 100
 
-
-// 返回 true 表示 memory.md 被成功写入，false 表示整理失败
+/** 记忆整理：将对话历史分类归档到各记忆文件，并更新 INDEX.md */
 async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]): Promise<boolean> {
   console.log('[agent] Memory 整理...')
-  const contentBefore = fs.existsSync(MEMORY_FILE_PATH) ? fs.readFileSync(MEMORY_FILE_PATH, 'utf-8') : ''
+
+  // 快照：记录整理前的 INDEX.md 内容
+  const indexBefore = readCategory('index')
 
   const historyText = conversationHistory
     .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
@@ -102,33 +106,25 @@ async function consolidateMemory(conversationHistory: Anthropic.MessageParam[]):
     executeTool: (name, input) => executeTool(name, input, true),
   })
 
-  const contentAfter = fs.existsSync(MEMORY_FILE_PATH) ? fs.readFileSync(MEMORY_FILE_PATH, 'utf-8') : ''
-  if (contentAfter === contentBefore) {
-    console.log('[agent] Memory 整理失败：memory.md 未被写入，保留当前上下文')
+  // 检查 INDEX.md 是否被更新（update_index 是整理的最后一步）
+  const indexAfter = readCategory('index')
+  if (indexAfter === indexBefore) {
+    console.log('[agent] Memory 整理失败：INDEX.md 未被更新，保留当前上下文')
     return false
   }
   console.log('[agent] Memory 整理完毕')
   return true
 }
 
-async function extractMemory(): Promise<string> {
-  console.log('[agent] 提取记忆...')
-  const userMessage = getUserMessage()
-  if (!userMessage) {
-    console.log('[agent] 没有用户记忆')
-    return ''
-  }
-  console.log(userMessage.trim())
-  console.log('[agent] 用户记忆提取完毕')
-  return userMessage
-}
-
-function buildSystemPromptWithMemory(memory: string): string {
-  const base = memory ? `${baseSystemPrompt}\n\n## 历史记忆\n${memory}` : baseSystemPrompt
+/** 将记忆片段注入 system prompt */
+function buildSystemPromptWithMemory(memoryFragment: string): string {
+  const base = memoryFragment
+    ? `${baseSystemPrompt}\n\n## 相关记忆\n${memoryFragment}`
+    : baseSystemPrompt
   return `${base}${skillManager.buildPromptFragment()}`
 }
 
-async function agentLoop(context: { messages: Anthropic.MessageParam[]; systemPrompt: string }): Promise<Anthropic.MessageParam[] | null> {
+async function agentLoop(context: { messages: Anthropic.MessageParam[]; systemPrompt: string }): Promise<void> {
   const { messages, systemPrompt } = { ...context }
 
   await runAgentLoopStream({
@@ -142,8 +138,6 @@ async function agentLoop(context: { messages: Anthropic.MessageParam[]; systemPr
     onText: delta => process.stdout.write(delta),
   })
   process.stdout.write('\n')
-
-  return messages
 }
 
 function printBanner() {
@@ -161,11 +155,8 @@ function printBanner() {
 async function repl() {
   printBanner()
 
-  const memory = await extractMemory()
-  let context: { messages: Anthropic.MessageParam[]; systemPrompt: string } = {
-    messages: [],
-    systemPrompt: buildSystemPromptWithMemory(memory),
-  }
+  // 不再启动时加载所有记忆，改为每轮动态召回
+  const messages: Anthropic.MessageParam[] = []
 
   while (true) {
     let input: string
@@ -181,28 +172,33 @@ async function repl() {
       continue
     }
 
-    context.messages.push({ role: 'user', content: input })
+    messages.push({ role: 'user', content: input })
 
-    let history: Anthropic.MessageParam[] | null = null
+    // ── 动态召回与当前 query 相关的记忆 ──
+    console.log('[agent] 召回相关记忆...')
+    const relevantMemory = await recallRelevantMemory(input)
+    if (relevantMemory) {
+      console.log('[agent] ✓ 找到相关记忆，注入 system prompt')
+    } else {
+      console.log('[agent] - 未找到相关记忆')
+    }
+    const systemPrompt = buildSystemPromptWithMemory(relevantMemory)
+
     try {
-      history = await agentLoop(context)
+      await agentLoop({ messages, systemPrompt })
     } catch (err) {
       console.error(`[agent] Error: ${err}`)
       // 回滚刚加入的 user 消息，避免下一轮发送残缺的对话历史
-      context.messages.pop()
+      messages.pop()
       continue
     }
 
     // 当 messages 积累超过阈值时触发记忆整理
-    // 用 messages.length 而不是 turnCount，避免 tool use 产生的额外消息导致计数对不上
-    if (history && history.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
-      const consolidated = await consolidateMemory(history)
+    if (messages.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
+      const consolidated = await consolidateMemory(messages)
       if (consolidated) {
-        const newMemory = await extractMemory()
-        context = {
-          messages: [],
-          systemPrompt: buildSystemPromptWithMemory(newMemory),
-        }
+        // 整理成功后清空对话历史（记忆已归档到文件），下一轮再从文件召回
+        messages.length = 0
       }
     }
   }
