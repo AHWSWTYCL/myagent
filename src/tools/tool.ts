@@ -24,6 +24,11 @@ export class Tool {
     };
   }
 
+  /** Whether this tool is safe to run concurrently with other tools (no side effects, no permission prompts). */
+  get parallelSafe(): boolean {
+    return false
+  }
+
   async execute(args: any): Promise<string> {
     throw new Error(`Tool "${this.name}" does not implement execute()`)
   }

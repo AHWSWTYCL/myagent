@@ -8,6 +8,8 @@ export interface RunAgentOptions {
   messages: Anthropic.MessageParam[]
   maxTurns?: number
   executeTool: (name: string, input: unknown) => Promise<string>
+  /** Names of tools that are safe to execute concurrently (no side effects, no permission prompts). */
+  parallelSafeTools?: Set<string>
 }
 
 export interface UsageAccum {
@@ -18,7 +20,7 @@ export interface UsageAccum {
 }
 
 export async function runAgentLoop(opts: RunAgentOptions): Promise<Anthropic.MessageParam[]> {
-  const { client, model, system, tools, messages, maxTurns = 20, executeTool } = opts
+  const { client, model, system, tools, messages, maxTurns = 20, executeTool, parallelSafeTools } = opts
 
   for (let turn = 0; turn < maxTurns; turn++) {
     const response = await client.messages.create({
@@ -31,16 +33,53 @@ export async function runAgentLoop(opts: RunAgentOptions): Promise<Anthropic.Mes
     messages.push({ role: 'assistant', content: response.content })
     if (response.stop_reason !== 'tool_use') break
 
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-    for (const block of response.content) {
-      if (block.type !== 'tool_use') continue
-      const result = await executeTool(block.name, block.input)
-      toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
-    }
+    const toolBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
+    const toolResults = await executeToolsWithParallelism(toolBlocks, executeTool, undefined, parallelSafeTools)
     messages.push({ role: 'user', content: toolResults })
   }
 
   return messages
+}
+
+async function executeToolsWithParallelism(
+  blocks: Anthropic.ToolUseBlock[],
+  executeTool: (name: string, input: unknown) => Promise<string>,
+  onToolStart?: (name: string, input: unknown) => void,
+  parallelSafeTools: Set<string> = new Set(),
+): Promise<Anthropic.ToolResultBlockParam[]> {
+  // Partition into groups that can run in parallel vs must run serially.
+  // We preserve the original order in the result array regardless.
+  type Entry = { block: Anthropic.ToolUseBlock; index: number }
+  const parallel: Entry[] = []
+  const serial: Entry[] = []
+
+  blocks.forEach((block, index) => {
+    if (parallelSafeTools.has(block.name)) {
+      parallel.push({ block, index })
+    } else {
+      serial.push({ block, index })
+    }
+  })
+
+  const results: Anthropic.ToolResultBlockParam[] = new Array(blocks.length)
+
+  // Run parallel-safe tools concurrently.
+  await Promise.all(
+    parallel.map(async ({ block, index }) => {
+      onToolStart?.(block.name, block.input)
+      const result = await executeTool(block.name, block.input)
+      results[index] = { type: 'tool_result', tool_use_id: block.id, content: result }
+    }),
+  )
+
+  // Run serial tools one at a time (preserving order).
+  for (const { block, index } of serial) {
+    onToolStart?.(block.name, block.input)
+    const result = await executeTool(block.name, block.input)
+    results[index] = { type: 'tool_result', tool_use_id: block.id, content: result }
+  }
+
+  return results
 }
 
 export async function runAgentLoopStream(
@@ -54,7 +93,7 @@ export async function runAgentLoopStream(
 ): Promise<Anthropic.MessageParam[]> {
   const {
     client, model, system, tools, messages, maxTurns = 20,
-    executeTool, onText, onTurnEnd, onToolStart, onUsage, signal,
+    executeTool, onText, onTurnEnd, onToolStart, onUsage, signal, parallelSafeTools,
   } = opts
 
   const cumUsage: UsageAccum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
@@ -105,13 +144,8 @@ export async function runAgentLoopStream(
     messages.push({ role: 'assistant', content: response.content })
     if (response.stop_reason !== 'tool_use') break
 
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-    for (const block of response.content) {
-      if (block.type !== 'tool_use') continue
-      onToolStart?.(block.name, block.input)
-      const result = await executeTool(block.name, block.input)
-      toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
-    }
+    const toolBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
+    const toolResults = await executeToolsWithParallelism(toolBlocks, executeTool, onToolStart, parallelSafeTools)
     messages.push({ role: 'user', content: toolResults })
   }
 

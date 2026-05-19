@@ -17,6 +17,14 @@ export class ToolRegistrar {
         return this.registry.getTool(name);
     }
 
+    getParallelSafeNames(): Set<string> {
+        return new Set(
+            this.registry.getAllTools()
+                .filter(t => t.parallelSafe)
+                .map(t => t.name)
+        )
+    }
+
     getAllTools(): Anthropic.Tool[] {
         const tools = this.registry.getAllTools();
         return tools.map(tool => ({

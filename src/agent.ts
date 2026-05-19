@@ -132,6 +132,7 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
     messages,
     maxTurns: MAX_TURNS,
     executeTool,
+    parallelSafeTools: toolRegistrar.getParallelSafeNames(),
     signal,
     onText: delta => bridge.emitText(delta),
     onTurnEnd: text => bridge.emitTurnEnd(text),

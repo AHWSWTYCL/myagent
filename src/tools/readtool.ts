@@ -31,6 +31,8 @@ export class ReadTool extends Tool {
         }
     }
 
+    get parallelSafe(): boolean { return true }
+
     async execute(args: any): Promise<string> {
         const path = args.path;
         try {

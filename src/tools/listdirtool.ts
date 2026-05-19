@@ -23,6 +23,8 @@ export class ListDirTool extends Tool {
         }
     }
 
+    get parallelSafe(): boolean { return true }
+
     async execute(args: any): Promise<string> {
         const dirPath = args.path ? path.resolve(args.path) : cwd()
 
