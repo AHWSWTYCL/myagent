@@ -10,10 +10,15 @@
     "start": "node dist/agent.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.95.2"
+    "@anthropic-ai/sdk": "^0.95.2",
+    "ink": "^7.0.3",
+    "ink-text-input": "^6.0.0",
+    "marked": "^18.0.3",
+    "react": "^19.2.6"
   },
   "devDependencies": {
     "@types/node": "^25.7.0",
+    "@types/react": "^19.2.14",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"
   }

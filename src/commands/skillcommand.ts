@@ -1,7 +1,5 @@
-import * as readline from 'readline'
 import * as fs from 'fs'
 import * as path from 'path'
-import * as os from 'os'
 import { execSync } from 'child_process'
 import { Command } from './command.js'
 import { SkillManager } from '../skills/skillmanager.js'
@@ -10,7 +8,7 @@ import { DiskSkill, parseFrontmatter, SKILLS_DIR } from '../skills/skillloader.j
 export class SkillCommand extends Command {
   constructor(
     private skillManager: SkillManager,
-    private rl: readline.Interface,
+    private askQuestion: (prompt: string) => Promise<string>,
   ) {
     super()
   }
@@ -25,10 +23,6 @@ export class SkillCommand extends Command {
 
   get usage(): string {
     return '/skill <add|list|delete|modify> [name]'
-  }
-
-  private question(prompt: string): Promise<string> {
-    return new Promise((resolve) => this.rl.question(prompt, resolve))
   }
 
   async execute(args: string[]): Promise<void> {
@@ -52,7 +46,7 @@ export class SkillCommand extends Command {
   }
 
   private async handleAdd(): Promise<void> {
-    const name = await this.question('请输入 skill 名称: ')
+    const name = await this.askQuestion('skill 名称: ')
 
     if (!/^[a-zA-Z0-9-]+$/.test(name)) {
       console.log('错误：skill 名称只允许字母、数字和连字符')
@@ -65,7 +59,7 @@ export class SkillCommand extends Command {
       return
     }
 
-    const description = await this.question('请输入 skill 描述: ')
+    const description = await this.askQuestion('skill 描述: ')
 
     const template = `---
 name: ${name}
@@ -104,13 +98,9 @@ description: ${description}
 
     await this.skillManager.loadFromDisk()
 
-    try {
-      fs.unlinkSync(tmpFile)
-    } catch {
-      // 临时文件删除失败不影响主流程
-    }
+    try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
 
-    console.log(`✅ skill "${parsed.name}" 已添加`)
+    console.log(`skill "${parsed.name}" 已添加`)
   }
 
   private async handleList(): Promise<void> {
@@ -120,7 +110,7 @@ description: ${description}
     console.log(`可用 skill（共 ${skills.length} 个）：`)
     for (const skill of skills) {
       const source = skill instanceof DiskSkill ? '[自定义]' : '[内置]'
-      const status = activeNames.has(skill.name) ? '[✅ 已激活]' : '[⬜ 未激活]'
+      const status = activeNames.has(skill.name) ? '[已激活]' : '[未激活]'
       console.log(`- ${skill.name} ${source} ${status}：${skill.description}`)
     }
   }
@@ -139,13 +129,13 @@ description: ${description}
 
     const filePath = path.join(SKILLS_DIR, `${name}.md`)
     if (!fs.existsSync(filePath)) {
-      console.log(`错误：skill "${name}" 不存在（文件未找到）`)
+      console.log(`错误：skill "${name}" 不存在`)
       return
     }
 
     fs.unlinkSync(filePath)
     await this.skillManager.loadFromDisk()
-    console.log(`✅ skill "${name}" 已删除`)
+    console.log(`skill "${name}" 已删除`)
   }
 
   private async handleModify(args: string[]): Promise<void> {
@@ -162,7 +152,7 @@ description: ${description}
 
     const filePath = path.join(SKILLS_DIR, `${name}.md`)
     if (!fs.existsSync(filePath)) {
-      console.log(`错误：skill "${name}" 不存在（文件未找到）`)
+      console.log(`错误：skill "${name}" 不存在`)
       return
     }
 
@@ -175,6 +165,6 @@ description: ${description}
     }
 
     await this.skillManager.loadFromDisk()
-    console.log(`✅ skill "${name}" 已更新`)
+    console.log(`skill "${name}" 已更新`)
   }
 }

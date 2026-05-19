@@ -1,15 +1,14 @@
-import * as readline from 'readline'
 import { Hook, HookContext, HookResult } from './hook.js'
 
-// 对危险操作（write_file / bash）要求用户确认，替代原来硬编码的 checkPermission
+export type PermissionAnswer = 'yes' | 'session' | 'no'
+
 export class PermissionHook implements Hook {
   name = 'PermissionHook'
 
-  private rl: readline.Interface
+  /** 会话级别自动放行的 key 集合 */
+  private sessionAllowed: Set<string> = new Set()
 
-  constructor(rl: readline.Interface) {
-    this.rl = rl
-  }
+  constructor(private askPermission: (prompt: string) => Promise<PermissionAnswer>) {}
 
   async onToolCall(ctx: HookContext): Promise<HookResult> {
     const dangerousTools = ['write_file', 'bash']
@@ -18,22 +17,35 @@ export class PermissionHook implements Hook {
     }
 
     const args = ctx.toolInput as Record<string, string>
-    let prompt: string
-    if (ctx.toolName === 'bash') {
-      prompt = `The agent wants to run a bash command:\n  $ ${args.command}\nDo you allow this? (yes/no) `
-    } else {
-      prompt = `The agent wants to write a file:\n  ${args.path}\nDo you allow this? (yes/no) `
-    }
-    const answer = await this.question(prompt)
-    const allowed = answer.trim().toLowerCase()
+    const key = ctx.toolName === 'bash' ? `bash:${args.command}` : `write_file:${args.path}`
 
-    if (allowed === 'yes' || allowed === 'y') {
+    // 会话已允许 → 自动放行
+    if (this.sessionAllowed.has(key)) {
       return { action: 'continue' }
     }
+
+    const prompt =
+      ctx.toolName === 'bash'
+        ? `Run bash: $ ${args.command}`
+        : `Write file: ${args.path}`
+
+    const answer = await this.askPermission(prompt)
+
+    if (answer === 'yes') {
+      return { action: 'continue' }
+    }
+
+    if (answer === 'session') {
+      this.sessionAllowed.add(key)
+      return { action: 'continue' }
+    }
+
+    // answer === 'no'
     return { action: 'block', reason: 'User denied permission' }
   }
 
-  private question(prompt: string): Promise<string> {
-    return new Promise(resolve => this.rl.question(prompt, resolve))
+  /** 供外部查看当前会话放行了哪些操作（调试用） */
+  get sessionAllowedKeys(): string[] {
+    return Array.from(this.sessionAllowed)
   }
 }
