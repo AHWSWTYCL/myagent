@@ -28,6 +28,8 @@ import { CommandParser } from './commands/commandparser.js'
 import { HelpCommand } from './commands/helpcommand.js'
 import { SkillCommand } from './commands/skillcommand.js'
 import { TaskCommand } from './tasks/taskcommand.js'
+import { RetrospectiveCommand } from './commands/retrospectivecommand.js'
+import { runRetrospective } from './retrospective/retrospective.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -74,17 +76,21 @@ async function executeTool(name: string, input: unknown, skipHooks = false): Pro
   }
 }
 
+// ── Agent state ───────────────────────────────────────────────────────────────
+const MAX_TURNS = 20
+const MEMORY_CONSOLIDATE_THRESHOLD = 100
+const RETROSPECTIVE_THRESHOLD = 30
+let turnsSinceLastRetrospective = 0
+const messages: Anthropic.MessageParam[] = []
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 const commandRegistry = new CommandRegistry()
 commandRegistry.register(new HelpCommand(commandRegistry))
 commandRegistry.register(new SkillCommand(skillManager, prompt => bridge.askQuestion(prompt)))
 commandRegistry.register(new TaskCommand())
+// RetrospectiveCommand 需要访问 messages，传一个 getter 函数
+commandRegistry.register(new RetrospectiveCommand(client, () => messages, skillManager, bridge))
 const commandParser = new CommandParser(commandRegistry)
-
-// ── Agent state ───────────────────────────────────────────────────────────────
-const MAX_TURNS = 20
-const MEMORY_CONSOLIDATE_THRESHOLD = 100
-const messages: Anthropic.MessageParam[] = []
 
 function buildSystemPrompt(memoryFragment: string): string {
   const base = memoryFragment
@@ -143,6 +149,13 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
   if (messages.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
     const ok = await consolidateMemory()
     if (ok) messages.length = 0
+  }
+
+  turnsSinceLastRetrospective++
+  if (turnsSinceLastRetrospective >= RETROSPECTIVE_THRESHOLD) {
+    turnsSinceLastRetrospective = 0
+    runRetrospective(client, [...messages], skillManager, msg => bridge.emitStatus(msg))
+      .catch(err => console.error('[retrospective]', err))
   }
 }
 

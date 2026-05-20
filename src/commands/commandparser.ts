@@ -1,7 +1,16 @@
-import { CommandRegistry } from './commandregistry.js'
+import { CommandRegistry, type Suggestion } from './commandregistry.js'
 
 export class CommandParser {
-  constructor(private registry: CommandRegistry) {}
+  private registry: CommandRegistry
+
+  constructor(registry: CommandRegistry) {
+    this.registry = registry
+  }
+
+  /** 按前缀搜索命令 */
+  search(prefix: string): Suggestion[] {
+    return this.registry.search(prefix)
+  }
 
   isCommand(input: string): boolean {
     return input.startsWith('/')

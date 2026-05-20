@@ -5,6 +5,7 @@ import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { ChatMessage, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { TuiBridge } from './bridge.js'
 import type { CommandParser } from '../commands/commandparser.js'
+import type { Suggestion } from '../commands/commandregistry.js'
 import { MarkdownRenderer, StreamingText } from './MarkdownRenderer.js'
 
 type InputMode = 'chat' | 'permission' | 'question'
@@ -37,7 +38,7 @@ export function App({ bridge, commandParser, runTurn }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streamingText, setStreamingText] = useState('')
   const [status, setStatus] = useState('')
-  const [toolRunning, setToolRunning] = useState('')   // label of currently-executing tool
+  const [toolRunning, setToolRunning] = useState('')
   const [usage, setUsage] = useState<UsageStats | null>(null)
   const [inputValue, setInputValue] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
@@ -45,6 +46,9 @@ export function App({ bridge, commandParser, runTurn }: Props) {
   const [promptText, setPromptText] = useState('')
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
+  // ── 命令补全相关状态 ──────────────────────────────────────────────
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([])
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0)
   const pendingResolveRef = useRef<((v: any) => void) | null>(null)
   const idCounter = useRef(0)
   const streamingRef = useRef('')
@@ -65,7 +69,6 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       setStreamingText(streamingRef.current)
     })
 
-    // Each completed agent turn becomes its own message
     bridge.on('turnEnd', (text: string) => {
       if (!text) return
       setMessages(prev => [...prev, { id: nextId(), role: 'agent', content: text }])
@@ -77,7 +80,6 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       setMessages(prev => [...prev, { id: nextId(), role, content }])
     })
 
-    // Show which tool is running in the status bar
     bridge.on('toolStart', ({ name, summary }: { name: string; summary: string }) => {
       setToolRunning(`${name}  ${summary}`)
       setStatus('')
@@ -144,15 +146,53 @@ export function App({ bridge, commandParser, runTurn }: Props) {
     }
   }, { isActive: inputMode === 'permission' })
 
-  // Up/down arrow: browse input history
+  // ── 主要键盘处理：历史浏览 + 命令补全 ────────────────────────────────
+  const hasSuggestions = suggestions.length > 0
   useInput((_input, key) => {
+    // 只在聊天模式、非处理状态下生效
+    if (inputMode !== 'chat' || isProcessing) return
+
+    // ── 有建议列表时的处理 ──
+    if (hasSuggestions) {
+      // Escape → 关闭建议列表
+      if (key.escape) {
+        clearSuggestions()
+        return
+      }
+
+      // 上/下 → 导航建议
+      if (key.upArrow) {
+        setSelectedSuggestionIndex(prev => Math.max(0, prev - 1))
+        return
+      }
+      if (key.downArrow) {
+        setSelectedSuggestionIndex(prev => Math.min(suggestions.length - 1, prev + 1))
+        return
+      }
+
+      // Tab → 接受当前选中的建议
+      if (key.tab) {
+        acceptSuggestion()
+        return
+      }
+
+      // 右箭头 → 也接受建议
+      if (_input === '' && key.rightArrow) {
+        acceptSuggestion()
+        return
+      }
+    }
+
+    // ── 无建议列表：历史浏览 ──
     if (key.upArrow && inputHistory.length > 0) {
       const newIndex = historyIndexRef.current === -1
         ? inputHistory.length - 1
         : Math.max(0, historyIndexRef.current - 1)
       setHistoryIndex(newIndex)
       setInputValue(inputHistory[newIndex])
-    } else if (key.downArrow) {
+      return
+    }
+    if (key.downArrow) {
       if (historyIndexRef.current === -1) return
       const newIndex = historyIndexRef.current + 1
       if (newIndex >= inputHistory.length) {
@@ -162,8 +202,41 @@ export function App({ bridge, commandParser, runTurn }: Props) {
         setHistoryIndex(newIndex)
         setInputValue(inputHistory[newIndex])
       }
+      return
     }
   }, { isActive: inputMode === 'chat' && !isProcessing })
+
+  // ── 补全辅助函数 ──────────────────────────────────────────────────
+
+  function clearSuggestions() {
+    setSuggestions([])
+    setSelectedSuggestionIndex(0)
+  }
+
+  function updateSuggestions(value: string) {
+    if (value.startsWith('/')) {
+      const partial = value.slice(1) // 去掉 '/'
+      const matches = commandParser.search(partial)
+      setSuggestions(matches)
+      setSelectedSuggestionIndex(0)
+    } else {
+      clearSuggestions()
+    }
+  }
+
+  function acceptSuggestion() {
+    const selected = suggestions[selectedSuggestionIndex]
+    if (!selected) return
+    setInputValue('/' + selected.name + ' ')
+    clearSuggestions()
+  }
+
+  // ── 输入变化 ──────────────────────────────────────────────────────
+
+  const handleInputChange = useCallback((value: string) => {
+    setInputValue(value)
+    updateSuggestions(value)
+  }, [])
 
   const addToHistory = useCallback((text: string) => {
     setInputHistory(prev => {
@@ -188,6 +261,7 @@ export function App({ bridge, commandParser, runTurn }: Props) {
 
     setInputValue('')
     setHistoryIndex(-1)
+    clearSuggestions()
     if (isProcessing) return
 
     if (commandParser.isCommand(trimmed)) {
@@ -213,7 +287,6 @@ export function App({ bridge, commandParser, runTurn }: Props) {
         : `Error: ${err instanceof Error ? err.message : String(err)}`
       setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
     } finally {
-      // Flush any remaining streaming text that didn't get a turnEnd event
       const remaining = streamingRef.current
       if (remaining) {
         setMessages(msgs => [...msgs, { id: nextId(), role: 'agent', content: remaining }])
@@ -233,10 +306,9 @@ export function App({ bridge, commandParser, runTurn }: Props) {
     return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
   }
 
-  // ── 消息渲染：根据角色选择不同的渲染方式 ──────────────────────────────
+  // ── 消息渲染 ────────────────────────────────────────────────────────
 
   function renderMessage(msg: ChatMessage) {
-    // Tool 和 system 消息保持纯文本
     if (msg.role === 'tool' || msg.role === 'system') {
       return (
         <Box key={msg.id}>
@@ -246,13 +318,46 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       )
     }
 
-    // User 和 agent 消息用 Markdown 渲染
     return (
       <Box key={msg.id} flexDirection="column">
         <Text color="gray">{ROLE_LABEL[msg.role]} </Text>
         <Box paddingLeft={msg.role === 'agent' ? 6 : 5}>
           <MarkdownRenderer content={msg.content} />
         </Box>
+      </Box>
+    )
+  }
+
+  // ── 命令补全建议列表渲染 ──────────────────────────────────────────
+
+  function renderSuggestions() {
+    if (!hasSuggestions) return null
+
+    return (
+      <Box
+        borderStyle="round"
+        borderColor="cyan"
+        marginLeft={2}
+        flexDirection="column"
+        paddingX={1}
+        paddingY={0}
+      >
+        {suggestions.map((s, i) => {
+          const isSelected = i === selectedSuggestionIndex
+          return (
+            <Box key={s.name}>
+              <Text color={isSelected ? 'cyan' : 'gray'}>
+                {isSelected ? '▸ ' : '  '}
+              </Text>
+              <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
+                /{s.name}
+              </Text>
+              <Text color="gray">
+                {'  '}{s.description}
+              </Text>
+            </Box>
+          )
+        })}
       </Box>
     )
   }
@@ -272,7 +377,6 @@ export function App({ bridge, commandParser, runTurn }: Props) {
         </Box>
       ) : null}
 
-      {/* Tool running indicator */}
       {toolRunning ? (
         <Box>
           <Text color="yellow">  ⟳ </Text>
@@ -280,7 +384,6 @@ export function App({ bridge, commandParser, runTurn }: Props) {
         </Box>
       ) : null}
 
-      {/* Generic status line (memory recall, thinking…) */}
       {status && !toolRunning ? (
         <Box>
           <Text color="gray" dimColor>  {status}</Text>
@@ -288,28 +391,36 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       ) : null}
 
       {/* Input box */}
-      <Box borderStyle="single" borderColor={inputMode !== 'chat' ? 'yellow' : isProcessing ? 'gray' : 'cyan'} paddingX={1}>
-        {inputMode === 'permission' ? (
-          <Text color="yellow">{promptText}</Text>
-        ) : (
-          <>
-            <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : 'cyan'}>
-              {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : '> '}
-            </Text>
-            <TextInput
-              value={inputValue}
-              onChange={setInputValue}
-              onSubmit={handleSubmit}
-              focus={!isProcessing || inputMode === 'question'}
-              placeholder={isProcessing ? 'Ctrl+C to cancel…' : ''}
-            />
-          </>
-        )}
+      <Box borderStyle="single" borderColor={inputMode !== 'chat' ? 'yellow' : isProcessing ? 'gray' : 'cyan'} paddingX={1} flexDirection="column">
+        <Box>
+          {inputMode === 'permission' ? (
+            <Text color="yellow">{promptText}</Text>
+          ) : (
+            <>
+              <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : 'cyan'}>
+                {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : '> '}
+              </Text>
+              <TextInput
+                value={inputValue}
+                onChange={handleInputChange}
+                onSubmit={handleSubmit}
+                focus={!isProcessing || inputMode === 'question'}
+                placeholder={isProcessing ? 'Ctrl+C to cancel…' : ''}
+              />
+            </>
+          )}
+        </Box>
+        {/* 命令补全建议列表 */}
+        {renderSuggestions()}
       </Box>
 
-      {/* Footer: hint line + token count */}
+      {/* Footer */}
       <Box justifyContent="space-between" paddingX={1}>
-        <Text color="gray" dimColor>↑↓ history  /help  Ctrl+C {isProcessing ? 'cancel' : 'exit×2'}</Text>
+        <Text color="gray" dimColor>
+          {hasSuggestions
+            ? '↑↓ navigate  Tab/→ accept  Esc close  Enter execute'
+            : '↑↓ history  /help  Ctrl+C ' + (isProcessing ? 'cancel' : 'exit×2')}
+        </Text>
         {usage ? (
           <Text color="gray" dimColor>
             {`in ${fmtTokens(usage.inputTokens)}  out ${fmtTokens(usage.outputTokens)}`}

@@ -1,5 +1,10 @@
 import { Command } from './command.js'
 
+export interface Suggestion {
+  name: string
+  description: string
+}
+
 export class CommandRegistry {
   private commands: Map<string, Command> = new Map()
 
@@ -13,5 +18,14 @@ export class CommandRegistry {
 
   getAll(): Command[] {
     return [...this.commands.values()]
+  }
+
+  /** 按前缀搜索命令名，返回匹配的建议列表 */
+  search(prefix: string): Suggestion[] {
+    if (!prefix) return []
+    const lower = prefix.toLowerCase()
+    return this.getAll()
+      .filter(cmd => cmd.name.toLowerCase().startsWith(lower))
+      .map(cmd => ({ name: cmd.name, description: cmd.description }))
   }
 }
