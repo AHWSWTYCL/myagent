@@ -30,6 +30,9 @@ import { SkillCommand } from './commands/skillcommand.js'
 import { TaskCommand } from './tasks/taskcommand.js'
 import { RetrospectiveCommand } from './commands/retrospectivecommand.js'
 import { runRetrospective } from './retrospective/retrospective.js'
+import { SchedulerTool } from './scheduler/schedulertool.js'
+import { SchedulerCommand } from './scheduler/schedulercommand.js'
+import { Scheduler } from './scheduler/scheduler.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -50,6 +53,7 @@ toolRegistrar.registerTool(new (await import('./tools/builtin/verifiertool.js'))
 toolRegistrar.registerTool(new (await import('./tools/memorytool.js')).MemoryTool())
 toolRegistrar.registerTool(new (await import('./tools/useskilltool.js')).UseSkillTool(skillManager))
 toolRegistrar.registerTool(new (await import('./tasks/tasktool.js')).TaskTool())
+toolRegistrar.registerTool(new SchedulerTool())
 
 const client = createClient()
 const baseSystemPrompt = getSystemPrompt()
@@ -82,6 +86,7 @@ const MEMORY_CONSOLIDATE_THRESHOLD = 100
 const RETROSPECTIVE_THRESHOLD = 30
 let turnsSinceLastRetrospective = 0
 const messages: Anthropic.MessageParam[] = []
+let agentRunning = false
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 const commandRegistry = new CommandRegistry()
@@ -90,6 +95,7 @@ commandRegistry.register(new SkillCommand(skillManager, prompt => bridge.askQues
 commandRegistry.register(new TaskCommand())
 // RetrospectiveCommand 需要访问 messages，传一个 getter 函数
 commandRegistry.register(new RetrospectiveCommand(client, () => messages, skillManager, bridge))
+commandRegistry.register(new SchedulerCommand())
 const commandParser = new CommandParser(commandRegistry)
 
 function buildSystemPrompt(memoryFragment: string): string {
@@ -122,40 +128,50 @@ async function consolidateMemory(): Promise<boolean> {
 }
 
 export async function runTurn(input: string, signal?: AbortSignal): Promise<void> {
-  messages.push({ role: 'user', content: input })
-
-  bridge.emitStatus('召回相关记忆...')
-  const relevantMemory = await recallRelevantMemory(input)
-  bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
-
-  const systemPrompt = buildSystemPrompt(relevantMemory)
-
-  await runAgentLoopStream({
-    client,
-    model: 'claude-sonnet-4-6',
-    system: systemPrompt,
-    tools: toolRegistrar.getAllTools(),
-    messages,
-    maxTurns: MAX_TURNS,
-    executeTool,
-    parallelSafeTools: toolRegistrar.getParallelSafeNames(),
-    signal,
-    onText: delta => bridge.emitText(delta),
-    onTurnEnd: text => bridge.emitTurnEnd(text),
-    onToolStart: (name, input) => bridge.emitToolStart(name, toolLabel(name, input as Record<string, unknown>)),
-    onUsage: stats => bridge.emitUsage(stats),
-  })
-
-  if (messages.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
-    const ok = await consolidateMemory()
-    if (ok) messages.length = 0
+  // Serialize turns — wait if another turn is already running (e.g. a scheduled task)
+  while (agentRunning) {
+    await new Promise(r => setTimeout(r, 200))
   }
+  agentRunning = true
 
-  turnsSinceLastRetrospective++
-  if (turnsSinceLastRetrospective >= RETROSPECTIVE_THRESHOLD) {
-    turnsSinceLastRetrospective = 0
-    runRetrospective(client, [...messages], skillManager, msg => bridge.emitStatus(msg))
-      .catch(err => console.error('[retrospective]', err))
+  try {
+    messages.push({ role: 'user', content: input })
+
+    bridge.emitStatus('召回相关记忆...')
+    const relevantMemory = await recallRelevantMemory(input)
+    bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
+
+    const systemPrompt = buildSystemPrompt(relevantMemory)
+
+    await runAgentLoopStream({
+      client,
+      model: 'claude-sonnet-4-6',
+      system: systemPrompt,
+      tools: toolRegistrar.getAllTools(),
+      messages,
+      maxTurns: MAX_TURNS,
+      executeTool,
+      parallelSafeTools: toolRegistrar.getParallelSafeNames(),
+      signal,
+      onText: delta => bridge.emitText(delta),
+      onTurnEnd: text => bridge.emitTurnEnd(text),
+      onToolStart: (name, input) => bridge.emitToolStart(name, toolLabel(name, input as Record<string, unknown>)),
+      onUsage: stats => bridge.emitUsage(stats),
+    })
+
+    if (messages.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
+      const ok = await consolidateMemory()
+      if (ok) messages.length = 0
+    }
+
+    turnsSinceLastRetrospective++
+    if (turnsSinceLastRetrospective >= RETROSPECTIVE_THRESHOLD) {
+      turnsSinceLastRetrospective = 0
+      runRetrospective(client, [...messages], skillManager, msg => bridge.emitStatus(msg))
+        .catch(err => console.error('[retrospective]', err))
+    }
+  } finally {
+    agentRunning = false
   }
 }
 
@@ -168,6 +184,14 @@ function toolLabel(name: string, args: Record<string, unknown>): string {
     default:           return name
   }
 }
+
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+const scheduler = new Scheduler(
+  prompt => runTurn(prompt),
+  () => agentRunning,
+  bridge,
+)
+scheduler.start()
 
 // ── Render TUI ────────────────────────────────────────────────────────────────
 render(React.createElement(App, { bridge, commandParser, runTurn }))
