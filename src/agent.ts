@@ -54,6 +54,8 @@ toolRegistrar.registerTool(new (await import('./tools/memorytool.js')).MemoryToo
 toolRegistrar.registerTool(new (await import('./tools/useskilltool.js')).UseSkillTool(skillManager))
 toolRegistrar.registerTool(new (await import('./tasks/tasktool.js')).TaskTool())
 toolRegistrar.registerTool(new SchedulerTool())
+toolRegistrar.registerTool(new (await import('./tools/websearchtool.js')).WebSearchTool())
+toolRegistrar.registerTool(new (await import('./tools/fetchtool.js')).FetchTool())
 
 const client = createClient()
 const baseSystemPrompt = getSystemPrompt()
@@ -177,10 +179,12 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
 
 function toolLabel(name: string, args: Record<string, unknown>): string {
   switch (name) {
-    case 'bash':       return `$ ${args.command}`
-    case 'read_file':  return `read ${args.path}`
-    case 'write_file': return `write ${args.path}`
-    case 'list_dir':   return `ls ${args.path}`
+    case 'bash':        return `$ ${args.command}`
+    case 'read_file':   return `read ${args.path}`
+    case 'write_file':  return `write ${args.path}`
+    case 'list_dir':    return `ls ${args.path}`
+    case 'web_search':  return `search "${args.query}"`
+    case 'web_fetch':   return `fetch ${args.url}`
     default:           return name
   }
 }
