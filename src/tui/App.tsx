@@ -31,6 +31,8 @@ const ROLE_LABEL: Record<string, string> = {
 }
 
 const MAX_HISTORY = 100
+const MAX_CONTEXT = 200_000
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 export function App({ bridge, commandParser, runTurn }: Props) {
   const { exit } = useApp()
@@ -43,9 +45,20 @@ export function App({ bridge, commandParser, runTurn }: Props) {
   const [inputValue, setInputValue] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
   const [inputMode, setInputMode] = useState<InputMode>('chat')
+  const [permissionChoice, setPermissionChoice] = useState<0 | 1 | 2>(0)
   const [promptText, setPromptText] = useState('')
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
+  const [autoMode, setAutoMode] = useState(false)
+  // 临时提示条（footer 上方淡出消息），不进聊天历史
+  const [transientHint, setTransientHint] = useState('')
+  const transientHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 历史导航前的草稿（首次按 ↑ 时暂存，回到底时还原）
+  const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null)
+  // spinner 帧 + 当前 tool/status 开始时间
+  const [spinnerFrame, setSpinnerFrame] = useState(0)
+  const [activityStartedAt, setActivityStartedAt] = useState<number | null>(null)
+  const [elapsedSec, setElapsedSec] = useState(0)
   // ── 命令补全相关状态 ──────────────────────────────────────────────
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0)
@@ -61,12 +74,49 @@ export function App({ bridge, commandParser, runTurn }: Props) {
 
   historyIndexRef.current = historyIndex
 
+  // ── spinner 帧动画 + 已用秒数 ──────────────────────────────────
+  const isActive = !!toolRunning || (!!status && !toolRunning)
+  useEffect(() => {
+    if (!isActive) {
+      setActivityStartedAt(null)
+      setElapsedSec(0)
+      setSpinnerFrame(0)
+      return
+    }
+    setActivityStartedAt(Date.now())
+    const tick = setInterval(() => {
+      setSpinnerFrame(f => (f + 1) % SPINNER_FRAMES.length)
+    }, 80)
+    return () => clearInterval(tick)
+  }, [isActive, toolRunning, status])
+
+  useEffect(() => {
+    if (!activityStartedAt) return
+    const t = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - activityStartedAt) / 1000))
+    }, 250)
+    return () => clearInterval(t)
+  }, [activityStartedAt])
+
+  const showHint = useCallback((text: string, ms = 2000) => {
+    setTransientHint(text)
+    if (transientHintTimerRef.current) clearTimeout(transientHintTimerRef.current)
+    transientHintTimerRef.current = setTimeout(() => setTransientHint(''), ms)
+  }, [])
+
   useEffect(() => {
     bridge.on('status', (msg: string) => setStatus(msg))
 
+    let rafPending = false
     bridge.on('text', (delta: string) => {
       streamingRef.current += delta
-      setStreamingText(streamingRef.current)
+      if (!rafPending) {
+        rafPending = true
+        setImmediate(() => {
+          rafPending = false
+          setStreamingText(streamingRef.current)
+        })
+      }
     })
 
     bridge.on('turnEnd', (text: string) => {
@@ -90,8 +140,13 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       setToolRunning('')
     })
 
+    bridge.on('autoModeChange', (enabled: boolean) => {
+      setAutoMode(enabled)
+    })
+
     bridge.on('permission', ({ prompt, resolve }: PermissionEvent) => {
-      setPromptText(prompt + '  (y)es / (a)llow session / (n)o')
+      setPromptText(prompt)
+      setPermissionChoice(0)
       setInputMode('permission')
       pendingResolveRef.current = resolve as (v: any) => void
     })
@@ -121,25 +176,49 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       return
     }
 
-    setMessages(prev => [...prev, { id: nextId(), role: 'system', content: 'Press Ctrl+C again to exit.' }])
+    showHint('Press Ctrl+C again to exit.')
     if (ctrlCTimerRef.current) clearTimeout(ctrlCTimerRef.current)
     ctrlCTimerRef.current = setTimeout(() => { ctrlCCountRef.current = 0 }, 2000)
   })
 
-  // Permission mode: y / a / n
-  useInput((input) => {
-    if (input === 'y' || input === 'Y') {
-      pendingResolveRef.current?.('yes' satisfies PermissionAnswer)
+  // Shift+Tab: toggle auto permission mode
+  // 选 Shift+Tab 而非 Ctrl+A，因为 ink-text-input 自身已过滤 Shift+Tab，
+  // 不会在输入框里误插字符，无需 hack。
+  useInput((_input, key) => {
+    if (!key.tab || !key.shift) return
+    const next = bridge.toggleAutoMode()
+    showHint(next ? 'Auto mode ON — permissions handled by AI agent.' : 'Auto mode OFF — manual permission prompts restored.')
+  })
+
+  // Permission mode: ↑/↓ navigate, Enter confirm, Esc = no
+  useInput((input, key) => {
+    const answers: PermissionAnswer[] = ['yes', 'session', 'no']
+    if (key.upArrow) {
+      setPermissionChoice(c => ((c + 2) % 3) as 0 | 1 | 2)
+      return
+    }
+    if (key.downArrow) {
+      setPermissionChoice(c => ((c + 1) % 3) as 0 | 1 | 2)
+      return
+    }
+    if (key.return) {
+      pendingResolveRef.current?.(answers[permissionChoice])
       pendingResolveRef.current = null
       setInputMode('chat')
       setPromptText('')
-    } else if (input === 'a' || input === 'A') {
-      pendingResolveRef.current?.('session' satisfies PermissionAnswer)
-      pendingResolveRef.current = null
-      setInputMode('chat')
-      setPromptText('')
-    } else if (input === 'n' || input === 'N') {
+      return
+    }
+    if (key.escape) {
       pendingResolveRef.current?.('no' satisfies PermissionAnswer)
+      pendingResolveRef.current = null
+      setInputMode('chat')
+      setPromptText('')
+      return
+    }
+    // 保留快捷字母键
+    const map: Record<string, PermissionAnswer> = { y: 'yes', Y: 'yes', a: 'session', A: 'session', n: 'no', N: 'no' }
+    if (map[input]) {
+      pendingResolveRef.current?.(map[input])
       pendingResolveRef.current = null
       setInputMode('chat')
       setPromptText('')
@@ -185,6 +264,10 @@ export function App({ bridge, commandParser, runTurn }: Props) {
 
     // ── 无建议列表：历史浏览 ──
     if (key.upArrow && inputHistory.length > 0) {
+      // 第一次按 ↑，先把当前草稿存起来，后续从底部回来时还原
+      if (historyIndexRef.current === -1) {
+        setDraftBeforeHistory(inputValue)
+      }
       const newIndex = historyIndexRef.current === -1
         ? inputHistory.length - 1
         : Math.max(0, historyIndexRef.current - 1)
@@ -197,11 +280,21 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       const newIndex = historyIndexRef.current + 1
       if (newIndex >= inputHistory.length) {
         setHistoryIndex(-1)
-        setInputValue('')
+        setInputValue(draftBeforeHistory ?? '')
+        setDraftBeforeHistory(null)
       } else {
         setHistoryIndex(newIndex)
         setInputValue(inputHistory[newIndex])
       }
+      return
+    }
+
+    // Ctrl+U: 清空当前输入
+    if (key.ctrl && _input === 'u') {
+      setInputValue('')
+      setHistoryIndex(-1)
+      setDraftBeforeHistory(null)
+      clearSuggestions()
       return
     }
   }, { isActive: inputMode === 'chat' && !isProcessing })
@@ -345,16 +438,23 @@ export function App({ bridge, commandParser, runTurn }: Props) {
         {suggestions.map((s, i) => {
           const isSelected = i === selectedSuggestionIndex
           return (
-            <Box key={s.name}>
-              <Text color={isSelected ? 'cyan' : 'gray'}>
-                {isSelected ? '▸ ' : '  '}
-              </Text>
-              <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
-                /{s.name}
-              </Text>
-              <Text color="gray">
-                {'  '}{s.description}
-              </Text>
+            <Box key={s.name} flexDirection="column">
+              <Box>
+                <Text color={isSelected ? 'cyan' : 'gray'}>
+                  {isSelected ? '▸ ' : '  '}
+                </Text>
+                <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
+                  /{s.name}
+                </Text>
+                <Text color="gray">
+                  {'  '}{s.description}
+                </Text>
+              </Box>
+              {isSelected && s.usage ? (
+                <Box paddingLeft={4}>
+                  <Text color="gray" dimColor>usage: {s.usage}</Text>
+                </Box>
+              ) : null}
             </Box>
           )
         })}
@@ -379,24 +479,37 @@ export function App({ bridge, commandParser, runTurn }: Props) {
 
       {toolRunning ? (
         <Box>
-          <Text color="yellow">  ⟳ </Text>
+          <Text color="yellow">  {SPINNER_FRAMES[spinnerFrame]} </Text>
           <Text color="yellow" dimColor>{toolRunning}</Text>
+          {elapsedSec > 0 ? <Text color="gray" dimColor>{`  ${elapsedSec}s`}</Text> : null}
         </Box>
       ) : null}
 
       {status && !toolRunning ? (
         <Box>
-          <Text color="gray" dimColor>  {status}</Text>
+          <Text color="gray" dimColor>  {SPINNER_FRAMES[spinnerFrame]} {status}</Text>
+          {elapsedSec > 0 ? <Text color="gray" dimColor>{`  ${elapsedSec}s`}</Text> : null}
         </Box>
       ) : null}
 
       {/* Input box */}
       <Box borderStyle="single" borderColor={inputMode !== 'chat' ? 'yellow' : isProcessing ? 'gray' : 'cyan'} paddingX={1} flexDirection="column">
-        <Box>
+        <Box flexDirection="column">
           {inputMode === 'permission' ? (
-            <Text color="yellow">{promptText}</Text>
+            <Box flexDirection="column">
+              <Text color="yellow">{promptText}</Text>
+              {(['Yes, just this once', 'Yes, allow for the rest of session', 'No'] as const).map((label, i) => {
+                const sel = i === permissionChoice
+                return (
+                  <Text key={i} color={sel ? 'cyan' : 'gray'} bold={sel}>
+                    {sel ? '▸ ' : '  '}{i + 1}. {label}
+                  </Text>
+                )
+              })}
+              <Text color="gray" dimColor>↑↓ navigate  Enter confirm  Esc cancel  (y/a/n shortcuts)</Text>
+            </Box>
           ) : (
-            <>
+            <Box>
               <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : 'cyan'}>
                 {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : '> '}
               </Text>
@@ -407,26 +520,41 @@ export function App({ bridge, commandParser, runTurn }: Props) {
                 focus={!isProcessing || inputMode === 'question'}
                 placeholder={isProcessing ? 'Ctrl+C to cancel…' : ''}
               />
-            </>
+            </Box>
           )}
         </Box>
         {/* 命令补全建议列表 */}
         {renderSuggestions()}
       </Box>
 
+      {/* Transient hint (cleared after a couple seconds, doesn't pollute history) */}
+      {transientHint ? (
+        <Box paddingX={1}>
+          <Text color="yellow" dimColor>{transientHint}</Text>
+        </Box>
+      ) : null}
+
       {/* Footer */}
       <Box justifyContent="space-between" paddingX={1}>
         <Text color="gray" dimColor>
           {hasSuggestions
             ? '↑↓ navigate  Tab/→ accept  Esc close  Enter execute'
-            : '↑↓ history  /help  Ctrl+C ' + (isProcessing ? 'cancel' : 'exit×2')}
+            : '↑↓ history  /help  Shift+Tab auto  Ctrl+U clear  Ctrl+C ' + (isProcessing ? 'cancel' : 'exit×2')}
         </Text>
-        {usage ? (
-          <Text color="gray" dimColor>
-            {`in ${fmtTokens(usage.inputTokens)}  out ${fmtTokens(usage.outputTokens)}`}
-            {usage.cacheReadTokens > 0 ? `  cache↑${fmtTokens(usage.cacheReadTokens)}` : ''}
-          </Text>
-        ) : null}
+        <Box>
+          {autoMode ? (
+            <Text color="green" bold>AUTO  </Text>
+          ) : null}
+          {usage ? (
+            <Text color="gray" dimColor>
+              {(() => {
+                const total = usage.inputTokens + usage.cacheReadTokens
+                const pct = Math.min(100, Math.round((total / MAX_CONTEXT) * 100))
+                return `ctx ${pct}% (${fmtTokens(total)}/${fmtTokens(MAX_CONTEXT)})  out ${fmtTokens(usage.outputTokens)}`
+              })()}
+            </Text>
+          ) : null}
+        </Box>
       </Box>
     </Box>
   )

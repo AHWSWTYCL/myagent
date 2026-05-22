@@ -3,6 +3,18 @@ import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 
 export class TuiBridge extends EventEmitter {
+  private _autoMode = false
+
+  get autoMode() {
+    return this._autoMode
+  }
+
+  toggleAutoMode() {
+    this._autoMode = !this._autoMode
+    this.emit('autoModeChange', this._autoMode)
+    return this._autoMode
+  }
+
   askPermission(prompt: string): Promise<PermissionAnswer> {
     return new Promise(resolve => {
       this.emit('permission', { prompt, resolve } satisfies PermissionEvent)

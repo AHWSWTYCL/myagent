@@ -3,6 +3,7 @@ import { Command } from './command.js'
 export interface Suggestion {
   name: string
   description: string
+  usage: string
 }
 
 export class CommandRegistry {
@@ -26,6 +27,6 @@ export class CommandRegistry {
     const lower = prefix.toLowerCase()
     return this.getAll()
       .filter(cmd => cmd.name.toLowerCase().startsWith(lower))
-      .map(cmd => ({ name: cmd.name, description: cmd.description }))
+      .map(cmd => ({ name: cmd.name, description: cmd.description, usage: cmd.usage }))
   }
 }

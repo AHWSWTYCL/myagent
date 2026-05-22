@@ -78,8 +78,7 @@ function HeadingContent({ token }: { token: Tokens.Heading }) {
   )
 }
 
-function CodeBlock({ token }: { token: Tokens.Code }) {
-  const { columns } = useWindowSize()
+function CodeBlock({ token, columns }: { token: Tokens.Code; columns: number }) {
   const lang = token.lang ? ' ' + token.lang + ' ' : ''
   const innerWidth = Math.max(20, columns - 12)
   const topRule = '┌─' + lang + '─'.repeat(Math.max(0, innerWidth - lang.length - 2))
@@ -105,7 +104,7 @@ function ParagraphContent({ token }: { token: Tokens.Paragraph }) {
   )
 }
 
-function ListItemContent({ item }: { item: Tokens.ListItem }) {
+function ListItemContent({ item, columns }: { item: Tokens.ListItem; columns: number }) {
   return (
     <Box flexDirection="column">
       {item.tokens.map((t, i) => {
@@ -117,15 +116,15 @@ function ListItemContent({ item }: { item: Tokens.ListItem }) {
           )
         }
         if (t.type === 'list') {
-          return <ListContent key={i} token={t as Tokens.List} indent={2} />
+          return <ListContent key={i} token={t as Tokens.List} indent={2} columns={columns} />
         }
-        return <Box key={i}>{renderToken(t, i)}</Box>
+        return <Box key={i}>{renderToken(t, i, columns)}</Box>
       })}
     </Box>
   )
 }
 
-function ListContent({ token, indent = 0 }: { token: Tokens.List; indent?: number }) {
+function ListContent({ token, indent = 0, columns }: { token: Tokens.List; indent?: number; columns: number }) {
   return (
     <Box flexDirection="column" marginLeft={indent} marginBottom={indent === 0 ? 1 : 0}>
       {token.items.map((item, i) => {
@@ -139,7 +138,7 @@ function ListContent({ token, indent = 0 }: { token: Tokens.List; indent?: numbe
           <Box key={i}>
             <Text color="gray">{bullet}</Text>
             <Box flexDirection="column" flexGrow={1}>
-              <ListItemContent item={item} />
+              <ListItemContent item={item} columns={columns} />
             </Box>
           </Box>
         )
@@ -148,7 +147,7 @@ function ListContent({ token, indent = 0 }: { token: Tokens.List; indent?: numbe
   )
 }
 
-function BlockquoteContent({ token }: { token: Tokens.Blockquote }) {
+function BlockquoteContent({ token, columns }: { token: Tokens.Blockquote; columns: number }) {
   return (
     <Box
       borderStyle="single"
@@ -161,7 +160,7 @@ function BlockquoteContent({ token }: { token: Tokens.Blockquote }) {
       marginY={1}
     >
       <Box flexDirection="column">
-        {token.tokens.map((t, i) => renderToken(t, i))}
+        {token.tokens.map((t, i) => renderToken(t, i, columns))}
       </Box>
     </Box>
   )
@@ -212,13 +211,13 @@ function TableContent({ token }: { token: Tokens.Table }) {
 
 // ── Token dispatcher ──────────────────────────────────────────────────────────
 
-function renderToken(token: Token, index: number): React.ReactNode {
+function renderToken(token: Token, index: number, columns: number): React.ReactNode {
   switch (token.type) {
     case 'heading':    return <HeadingContent key={index} token={token as Tokens.Heading} />
-    case 'code':       return <CodeBlock key={index} token={token as Tokens.Code} />
+    case 'code':       return <CodeBlock key={index} token={token as Tokens.Code} columns={columns} />
     case 'paragraph':  return <ParagraphContent key={index} token={token as Tokens.Paragraph} />
-    case 'list':       return <ListContent key={index} token={token as Tokens.List} />
-    case 'blockquote': return <BlockquoteContent key={index} token={token as Tokens.Blockquote} />
+    case 'list':       return <ListContent key={index} token={token as Tokens.List} columns={columns} />
+    case 'blockquote': return <BlockquoteContent key={index} token={token as Tokens.Blockquote} columns={columns} />
     case 'table':      return <TableContent key={index} token={token as Tokens.Table} />
     case 'hr':         return <Text key={index} color="gray">{'─'.repeat(50)}</Text>
     case 'space':      return null
@@ -230,10 +229,11 @@ function renderToken(token: Token, index: number): React.ReactNode {
 // ── Main renderer ─────────────────────────────────────────────────────────────
 
 export function MarkdownRenderer({ content }: { content: string }) {
+  const { columns } = useWindowSize()
   const elements = useMemo(() => {
     const tokens = lexer(content)
-    return tokens.map((token, i) => renderToken(token, i))
-  }, [content])
+    return tokens.map((token, i) => renderToken(token, i, columns))
+  }, [content, columns])
   return (
     <MarkdownErrorBoundary fallback={content}>
       <Box flexDirection="column">{elements}</Box>
@@ -242,45 +242,31 @@ export function MarkdownRenderer({ content }: { content: string }) {
 }
 
 // ── Streaming text ────────────────────────────────────────────────────────────
+// 直接复用 MarkdownRenderer，得到与最终态完全一致的样式。流式过程中可能出现
+// 未闭合的代码围栏，先 sanitize 一下避免 lexer 把整段当代码块吃掉。
+
+function balanceFences(text: string): string {
+  const lines = text.split('\n')
+  let inFence = false
+  let fenceMarker = ''
+  for (const line of lines) {
+    const trimmed = line.trimStart()
+    if (!inFence) {
+      if (trimmed.startsWith('```')) { inFence = true; fenceMarker = '```' }
+      else if (trimmed.startsWith('~~~')) { inFence = true; fenceMarker = '~~~' }
+    } else if (trimmed.startsWith(fenceMarker)) {
+      inFence = false
+    }
+  }
+  return inFence ? text + '\n' + fenceMarker : text
+}
 
 export function StreamingText({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
-  const lines = text.split('\n')
-
-  const { rendered } = lines.reduce<{ rendered: React.ReactNode[]; inCode: boolean }>(
-    ({ rendered, inCode }, line, i) => {
-      const isLast = i === lines.length - 1
-      const cursor = isLast && showCursor ? '▋' : ''
-      const trimmed = line.trimStart()
-      if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
-        return {
-          rendered: [...rendered, <Text key={i} color="gray" dimColor>{line}{cursor}</Text>],
-          inCode: !inCode,
-        }
-      }
-      if (inCode) {
-        return {
-          rendered: [...rendered, <Text key={i} color="yellow">{(line || ' ') + cursor}</Text>],
-          inCode,
-        }
-      }
-      const parts = line.split(/(`[^`]+`)/)
-      return {
-        rendered: [
-          ...rendered,
-          <Text key={i} wrap="wrap">
-            {parts.map((part, j) =>
-              part.startsWith('`') && part.endsWith('`') && part.length > 2
-                ? <Text key={j} color="yellow">{part}</Text>
-                : <React.Fragment key={j}>{part || ' '}</React.Fragment>
-            )}
-            {cursor}
-          </Text>,
-        ],
-        inCode,
-      }
-    },
-    { rendered: [], inCode: false },
+  const safe = balanceFences(text)
+  return (
+    <Box flexDirection="column">
+      <MarkdownRenderer content={safe} />
+      {showCursor ? <Text color="cyan">▋</Text> : null}
+    </Box>
   )
-
-  return <Box flexDirection="column">{rendered}</Box>
 }

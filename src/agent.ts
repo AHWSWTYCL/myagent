@@ -20,6 +20,7 @@ import { ToolRegistrar } from './tools/toolregistrar.js'
 import { HookManager } from './hooks/hook.js'
 import { LoggerHook } from './hooks/loggerhook.js'
 import { PermissionHook } from './hooks/permissionhook.js'
+import { AutoPermissionAgent } from './hooks/autopermissionagent.js'
 import { SkillManager } from './skills/skillmanager.js'
 import { CodeReviewSkill } from './skills/codereviewskill.js'
 import { GitSkill } from './skills/gitskill.js'
@@ -63,7 +64,13 @@ const baseSystemPrompt = getSystemPrompt()
 // ── Hooks ─────────────────────────────────────────────────────────────────────
 const hookManager = new HookManager()
 hookManager.register(new LoggerHook(bridge))
-hookManager.register(new PermissionHook(prompt => bridge.askPermission(prompt)))
+const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt))
+const autoPermissionAgent = new AutoPermissionAgent(client)
+hookManager.register(permissionHook)
+
+bridge.on('autoModeChange', (enabled: boolean) => {
+  permissionHook.setAutoMode(enabled, autoPermissionAgent)
+})
 
 async function executeTool(name: string, input: unknown, skipHooks = false): Promise<string> {
   const args = input as Record<string, string>

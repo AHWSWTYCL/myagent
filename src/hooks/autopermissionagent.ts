@@ -1,0 +1,54 @@
+import Anthropic from '@anthropic-ai/sdk'
+import type { PermissionAnswer } from './permissionhook.js'
+
+const SYSTEM = `You are a security policy agent. Given a tool call description, decide whether to allow it.
+Respond with ONLY a JSON object: {"decision":"allow"} or {"decision":"block","reason":"<short reason>"}.
+
+Rules:
+- Read-only operations (read_file, list_dir, web_search, web_fetch): always allow
+- bash commands that only read/inspect (ls, cat, grep, git status, git log, git diff, npm test, etc.): allow
+- bash commands that modify the filesystem, install packages, run servers, or delete files: block
+- write_file to source code or config files: allow (the main agent already decided to write it)
+- write_file to sensitive paths (/etc, ~/.ssh, ~/.aws, system dirs): block
+- Anything that could exfiltrate data to external services: block`
+
+export class AutoPermissionAgent {
+  constructor(private client: Anthropic) {}
+
+  async decide(prompt: string): Promise<PermissionAnswer> {
+    console.log(`[auto-permission] prompt: ${prompt}`)
+    try {
+      const response = await this.client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 128,
+        system: SYSTEM,
+        messages: [{ role: 'user', content: prompt }],
+      })
+
+      const text = response.content
+        .filter(b => b.type === 'text')
+        .map(b => (b as Anthropic.TextBlock).text)
+        .join('')
+        .trim()
+
+      console.log(`[auto-permission] raw response: ${text}`)
+
+      // Extract JSON even if the model wraps it in markdown
+      const match = text.match(/\{[\s\S]*\}/)
+      if (!match) {
+        console.log(`[auto-permission] ⚠️ failed to parse JSON, defaulting to allow`)
+        return 'yes'
+      }
+
+      const parsed = JSON.parse(match[0]) as { decision: string; reason?: string }
+      const answer: PermissionAnswer = parsed.decision === 'allow' ? 'yes' : 'no'
+      const reason = parsed.reason ? ` (${parsed.reason})` : ''
+      console.log(`[auto-permission] decision: ${parsed.decision}${reason}`)
+      return answer
+    } catch (err) {
+      // On any error, fall back to allowing (don't block the agent)
+      console.log(`[auto-permission] ⚠️ error during decision, defaulting to allow: ${err}`)
+      return 'yes'
+    }
+  }
+}

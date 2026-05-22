@@ -9,8 +9,8 @@ export interface ClaudeSettings {
 }
 
 export function loadClaudeSettings(): ClaudeSettings {
-  // const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
-  const settingsPath = path.join(os.homedir(), '.claude', 'settings-using-deepseek.json')
+  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json')
+  // const settingsPath = path.join(os.homedir(), '.claude', 'settings-using-deepseek.json')
   if (!fs.existsSync(settingsPath)) {
     throw new Error(`settings.json not found at ${settingsPath}`)
   }
