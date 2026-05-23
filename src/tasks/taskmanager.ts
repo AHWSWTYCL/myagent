@@ -30,6 +30,7 @@ function serializeFrontmatter(task: Task): string {
     `depends_on: [${task.depends_on.map(d => `"${d}"`).join(', ')}]`,
     `depended_by: [${task.depended_by.map(d => `"${d}"`).join(', ')}]`,
     `title: "${escapeYamlValue(task.title)}"`,
+    `revision_count: ${task.revision_count}`,
     `created_at: "${task.created_at}"`,
     `updated_at: "${task.updated_at}"`,
     '---',
@@ -102,6 +103,7 @@ function fileToTask(content: string): Task {
     depended_by: Array.isArray(data.depended_by) ? data.depended_by : [],
     title: data.title || '(无标题)',
     description: body,
+    revision_count: data.revision_count !== undefined ? Number(data.revision_count) || 0 : 0,
     created_at: data.created_at || '',
     updated_at: data.updated_at || '',
   }
@@ -272,6 +274,7 @@ export class TaskManager {
       depended_by: [],
       title: data.title,
       description: data.description ?? '',
+      revision_count: 0,
       created_at: now,
       updated_at: now,
     }
@@ -336,6 +339,7 @@ export class TaskManager {
       title: string
       description: string
       depends_on: string[]
+      revision_count: number
     }>,
   ): Task | null {
     const task = this.readTaskFile(id)
@@ -353,6 +357,7 @@ export class TaskManager {
     if (data.subagent_id !== undefined) task.subagent_id = data.subagent_id
     if (data.title !== undefined) task.title = data.title
     if (data.description !== undefined) task.description = data.description
+    if (data.revision_count !== undefined) task.revision_count = data.revision_count
 
     if (data.depends_on !== undefined) {
       // 从旧的依赖中移除当前任务的 depended_by

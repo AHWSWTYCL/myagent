@@ -1,190 +1,184 @@
 import Anthropic from '@anthropic-ai/sdk'
+import * as crypto from 'crypto'
 import { createClient } from '../../client'
 import { runAgentLoopStream } from '../../utils/runagent'
-import { extractLastText, makePrefixedOnText } from '../../utils/agentutils'
+import { makePrefixedOnText } from '../../utils/agentutils'
 import { ToolRegistrar } from '../toolregistrar'
 import { Tool } from '../tool'
+import { TaskManager } from '../../tasks/taskmanager'
+import { recallRelevantMemory } from '../../memory/recall'
 
-const MAX_ITERATIONS = 3
+const PLANNER_SYSTEM = `你同时扮演两个角色：产品经理（PM） + 软件架构师。
+在动手拆任务之前，先把"为谁做、做什么"搞清楚，再考虑"怎么做"。
 
-const PLANNER_SYSTEM = `你是一个软件架构师。
-你可以使用工具读取代码库、列出目录、执行查询命令，充分调研现有代码结构后，再输出一份清晰的分步执行计划。
-计划要具体可执行，不要自己动手实现，只输出计划文本。
-如果有 verifier 的反馈，请针对反馈修订计划。`
+工作流分三个阶段：
 
-const GENERATOR_SYSTEM = `你是一个资深开发者。
-严格按照给定的计划，使用工具完成任务（读写文件、执行命令等）。
-如果提供了上一轮的实现摘要和 verifier 反馈，请在此基础上修复问题，而不是从头重写。
-完成后输出一份简洁的结果摘要，说明做了什么、结果如何。`
+【阶段一 · 需求澄清（PM 视角）】
+读懂用户原始任务，明确以下信息（在脑中完成即可，不必长篇输出）：
+- 目标用户/受众是谁，他们的真实诉求是什么
+- 核心目标与成功标准（验收条件）
+- 关键约束：性能、兼容性、依赖、代码风格、不能触碰的部分
+- 范围内 vs 范围外的事项
+若用户的原始任务存在重大歧义且无法通过调研消除，可以采用合理假设并在 root 任务的描述里写明"采用了什么假设"。
 
-const VERIFIER_SYSTEM = `你是一个代码审查专家和测试工程师。
-你可以使用工具读取代码文件、列出目录、运行测试或检查命令，来验证 generator 的实现是否满足原始任务要求。
-注意：你只能读取和运行，不能修改任何文件。
-如果满足，只回复：APPROVED
-如果不满足，回复：NEEDS_REVISION
-然后另起一行写出具体的改进意见，说明哪里不对、应该怎么改。`
+【阶段二 · 代码调研（架构师视角）】
+使用 read_file / list_dir / bash 调研代码库（只读），弄清：
+- 相关模块/文件的位置和职责
+- 既有约定（命名、测试、风格）
+- 潜在的冲突点和复用点
 
-export class PlannerAgentTool extends Tool {
+【阶段三 · 拆解任务】
+调用 create_plan_task 工具创建任务：
+1. 首次调用必须创建 root 任务（depends_on=[]）。root 的 description 写完整的需求文档：目标用户、核心目标、验收标准、关键约束、采用的假设。这是 verifier 判定整体是否达成的依据。
+2. 后续调用创建子任务，按依赖顺序排列，每个子任务必须 depends_on root 或前驱子任务，形成 DAG。粒度为"单文件级修改 / 一个函数 / 一组测试"，不要太粗也不要太细。
+3. 子任务 description 必须**完全自包含** —— generator 看不到你的调研记录、聊天历史，也无法回头问你。每条子任务的 description 至少要包含：
+   - 涉及的具体文件路径
+   - 要做的具体改动（增/删/改了什么，关键代码片段或签名）
+   - 输入与输出 / 接口契约
+   - 注意事项（约束、需保留的行为、不要触碰的部分）
+   - 验收标准（如何判断完成，如有可运行的检查命令请写出）
 
-  get name(): string {
-    return 'planner_agent'
+完成后输出一句话总结：root 任务 ID 是什么、共创建了几个子任务。不要自己动手实现，也不要调度 generator/verifier——主 agent 会作为 coordinator 来调度。`
+
+interface CreatePlanTaskInput {
+  title: string
+  description: string
+  depends_on?: string[]
+}
+
+class CreatePlanTaskTool extends Tool {
+  constructor(
+    private taskManager: TaskManager,
+    private subagentId: string,
+    private createdIds: string[],
+  ) {
+    super()
   }
-
+  get name(): string { return 'create_plan_task' }
   get description(): string {
-    return 'Use a planner-generator-verifier pipeline to complete complex tasks. ' +
-      'Planner researches the codebase and creates a step-by-step plan, Generator executes it with tools, ' +
-      'Verifier reads the actual code to review and test, then feeds back to Planner for up to 3 iterations.'
+    return 'Create a task in the kanban for the pipeline. Returns the new task id.'
   }
-
   get input_schema(): { type: 'object'; properties: object; required: string[] } {
     return {
       type: 'object',
       properties: {
-        task: { type: 'string', description: 'The task to complete using the planner-generator-verifier pipeline' },
+        title: { type: 'string', description: 'Short task title' },
+        description: { type: 'string', description: 'Full execution context for the generator (self-contained)' },
+        depends_on: { type: 'array', items: { type: 'string' }, description: 'IDs of prerequisite tasks (empty for root)' },
+      },
+      required: ['title', 'description'],
+    }
+  }
+  async execute(args: CreatePlanTaskInput): Promise<string> {
+    try {
+      const task = this.taskManager.create({
+        title: args.title,
+        description: args.description,
+        depends_on: args.depends_on ?? [],
+        subagent_id: this.subagentId,
+      })
+      this.createdIds.push(task.id)
+      return `Created task ${task.id} (status=${task.status})`
+    } catch (err) {
+      return `Error: ${err instanceof Error ? err.message : String(err)}`
+    }
+  }
+}
+
+function makeRegistrar(tools: Tool[]): { registrar: ToolRegistrar; exec: (n: string, i: unknown) => Promise<string> } {
+  const registrar = new ToolRegistrar()
+  for (const t of tools) registrar.registerTool(t)
+  const exec = async (name: string, input: unknown): Promise<string> => {
+    try {
+      return await (registrar.getTool(name)?.execute(input as Record<string, string>) ?? Promise.resolve('Unknown tool'))
+    } catch (err) {
+      return `Error: ${err}`
+    }
+  }
+  return { registrar, exec }
+}
+
+export class PlannerAgentTool extends Tool {
+  get name(): string { return 'planner_agent' }
+  get description(): string {
+    return 'Plan a complex task by researching the codebase (read-only) and creating a root task plus dependency-ordered subtasks in the kanban. ' +
+      'Returns the root task id and the list of created subtask ids. ' +
+      'Does NOT execute or verify — the main agent (coordinator) is responsible for dispatching generator/verifier on the created tasks.'
+  }
+  get input_schema(): { type: 'object'; properties: object; required: string[] } {
+    return {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The high-level task to plan' },
       },
       required: ['task'],
     }
   }
 
-  async execute(args: any): Promise<string> {
-    const task: string = args.task
+  async execute(args: { task: string }): Promise<string> {
+    const userTask = args.task
     const client = createClient()
+    const tm = new TaskManager()
+    const runId = crypto.randomUUID().slice(0, 8)
+    const subagentId = `plan-${runId}`
+    const createdIds: string[] = []
 
     const ReadTool = (await import('../readtool')).ReadTool
-    const WriteTool = (await import('../writetool')).WriteTool
     const ListDirTool = (await import('../listdirtool')).ListDirTool
     const BashTool = (await import('../bashtool')).BashTool
 
-    // Planner: read-only tools for codebase research
-    const plannerRegistrar = new ToolRegistrar()
-    plannerRegistrar.registerTool(new ReadTool())
-    plannerRegistrar.registerTool(new ListDirTool())
-    plannerRegistrar.registerTool(new BashTool())
+    const createTaskTool = new CreatePlanTaskTool(tm, subagentId, createdIds)
+    const planner = makeRegistrar([new ReadTool(), new ListDirTool(), new BashTool(), createTaskTool])
 
-    const plannerExecuteTool = async (name: string, input: unknown): Promise<string> => {
-      try {
-        return await (plannerRegistrar.getTool(name)?.execute(input as Record<string, string>) ?? Promise.resolve('Unknown tool'))
-      } catch (err) {
-        return `Error: ${err}`
+    let plannerSystem = PLANNER_SYSTEM
+    try {
+      const relevantMemory = await recallRelevantMemory(userTask)
+      if (relevantMemory) {
+        plannerSystem = `${PLANNER_SYSTEM}\n\n## 相关记忆\n${relevantMemory}`
+        console.log(`[planner ${runId}] 已注入相关记忆 (${relevantMemory.length} 字符)`)
       }
+    } catch (err) {
+      console.error(`[planner ${runId}] 记忆召回失败，继续无记忆模式:`, err)
     }
 
-    // Generator: full access (read + write + bash)
-    const genRegistrar = new ToolRegistrar()
-    genRegistrar.registerTool(new ReadTool())
-    genRegistrar.registerTool(new WriteTool())
-    genRegistrar.registerTool(new ListDirTool())
-    genRegistrar.registerTool(new BashTool())
+    console.log(`\n[planner ${runId}] 调研并创建任务`)
+    const planMessages: Anthropic.MessageParam[] = [
+      {
+        role: 'user',
+        content:
+          `用户原始任务：${userTask}\n\n` +
+          `请按"需求澄清 → 代码调研 → 拆解任务"三阶段工作。\n` +
+          `先调研代码库（read_file / list_dir / bash 只读），然后通过 create_plan_task 创建：\n` +
+          `1) root 任务（depends_on=[]，description 写完整需求文档：目标、验收标准、约束、假设）\n` +
+          `2) 细粒度子任务（带依赖，description 自包含：涉及文件、具体改动、接口契约、注意事项、验收标准）\n` +
+          `完成后输出一句话总结。`,
+      },
+    ]
+    await runAgentLoopStream({
+      client,
+      model: 'claude-sonnet-4-6',
+      system: plannerSystem,
+      tools: planner.registrar.getAllTools(),
+      messages: planMessages,
+      maxTurns: 15,
+      executeTool: planner.exec,
+      onText: makePrefixedOnText('[planner]'),
+    })
+    process.stdout.write('\n')
 
-    const genExecuteTool = async (name: string, input: unknown): Promise<string> => {
-      try {
-        return await (genRegistrar.getTool(name)?.execute(input as Record<string, string>) ?? Promise.resolve('Unknown tool'))
-      } catch (err) {
-        return `Error: ${err}`
-      }
+    if (createdIds.length === 0) {
+      return `[planner ${runId}] 未创建任何任务，已终止。`
     }
-
-    // Verifier: read + bash for reviewing and testing, no write
-    const verRegistrar = new ToolRegistrar()
-    verRegistrar.registerTool(new ReadTool())
-    verRegistrar.registerTool(new ListDirTool())
-    verRegistrar.registerTool(new BashTool())
-
-    const verExecuteTool = async (name: string, input: unknown): Promise<string> => {
-      try {
-        return await (verRegistrar.getTool(name)?.execute(input as Record<string, string>) ?? Promise.resolve('Unknown tool'))
-      } catch (err) {
-        return `Error: ${err}`
-      }
-    }
-
-    let feedback = ''
-    let result = ''
-    let previousResult = ''
-
-    for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const iteration = i + 1
-      console.log(`\n[pipeline] 第 ${iteration} 轮`)
-
-      // 1. Planner — researches codebase then outputs a plan
-      const plannerInput = feedback
-        ? `任务：${task}\n\nVerifier 的反馈（请根据此修订计划）：\n${feedback}`
-        : `任务：${task}`
-
-      const planMessages: Anthropic.MessageParam[] = [
-        { role: 'user', content: plannerInput },
-      ]
-      await runAgentLoopStream({
-        client,
-        model: 'claude-sonnet-4-6',
-        system: PLANNER_SYSTEM,
-        tools: plannerRegistrar.getAllTools(),
-        messages: planMessages,
-        maxTurns: 10,
-        executeTool: plannerExecuteTool,
-        onText: makePrefixedOnText('[planner]'),
-      })
-      process.stdout.write('\n')
-      const plan = extractLastText(planMessages)
-
-      // 2. Generator — on revision rounds, include previous result and verifier feedback
-      let genUserContent = `任务：${task}\n\n执行计划：\n${plan}`
-      if (i > 0 && previousResult && feedback) {
-        genUserContent +=
-          `\n\n上一轮的实现摘要：\n${previousResult}` +
-          `\n\nVerifier 的反馈（需要修复的问题）：\n${feedback}`
-      }
-
-      const genMessages: Anthropic.MessageParam[] = [
-        { role: 'user', content: genUserContent },
-      ]
-      await runAgentLoopStream({
-        client,
-        model: 'claude-sonnet-4-6',
-        system: GENERATOR_SYSTEM,
-        tools: genRegistrar.getAllTools(),
-        messages: genMessages,
-        maxTurns: 20,
-        executeTool: genExecuteTool,
-        onText: makePrefixedOnText('[generator]'),
-      })
-      process.stdout.write('\n')
-      result = extractLastText(genMessages)
-      previousResult = result
-
-      // 3. Verifier — reads actual files to review and test
-      const verMessages: Anthropic.MessageParam[] = [
-        {
-          role: 'user',
-          content:
-            `原始任务：${task}\n\n执行计划：\n${plan}\n\nGenerator 的结果摘要：\n${result}\n\n` +
-            `请使用工具读取相关文件，验证实现是否正确，必要时运行测试命令。`,
-        },
-      ]
-      await runAgentLoopStream({
-        client,
-        model: 'claude-sonnet-4-6',
-        system: VERIFIER_SYSTEM,
-        tools: verRegistrar.getAllTools(),
-        messages: verMessages,
-        maxTurns: 10,
-        executeTool: verExecuteTool,
-        onText: makePrefixedOnText('[verifier]'),
-      })
-      process.stdout.write('\n')
-      const review = extractLastText(verMessages)
-
-      if (review.trimStart().startsWith('APPROVED')) {
-        console.log('[pipeline] Verifier 通过，任务完成。')
-        break
-      }
-
-      feedback = review.replace(/^NEEDS_REVISION\s*/i, '').trim()
-      if (i === MAX_ITERATIONS - 1) {
-        console.log('[pipeline] 已达最大迭代轮数，返回当前结果。')
-      }
-    }
-
-    return result
+    const rootId = createdIds[0]
+    const subIds = createdIds.slice(1)
+    const lines = [
+      `[planner ${runId}] 计划已生成`,
+      `Root: ${rootId}`,
+      `Subtasks (${subIds.length}): ${subIds.join(', ') || '(none)'}`,
+      ``,
+      `下一步：作为 coordinator，循环执行 task(action=list, filter_status=todo) 找到下一个可做任务，`,
+      `调用 generator 执行后用 verifier 审查；APPROVED → task 设为 done；NEEDS_REVISION → 把反馈追加到 description 后重置回 todo，最多重试 3 次。`,
+    ]
+    return lines.join('\n')
   }
 }
