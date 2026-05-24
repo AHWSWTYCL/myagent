@@ -109,7 +109,7 @@ async function executeTool(name: string, input: unknown, skipHooks = false): Pro
 }
 
 // ── Agent state ───────────────────────────────────────────────────────────────
-const MAX_TURNS = 60
+const MAX_TURNS = 1000
 const MEMORY_CONSOLIDATE_THRESHOLD = 250
 const MEMORY_KEEP_RECENT = 100
 const messages: Anthropic.MessageParam[] = []
