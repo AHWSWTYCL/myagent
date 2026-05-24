@@ -116,11 +116,28 @@ export async function compactMessages(
   model: string,
   messages: Anthropic.MessageParam[],
 ): Promise<Anthropic.MessageParam[]> {
-  // 需要至少有足够消息才值得压缩
   if (messages.length <= KEEP_RECENT + 2) return messages
 
-  const toSummarize = messages.slice(0, messages.length - KEEP_RECENT)
-  const toKeep = messages.slice(messages.length - KEEP_RECENT)
+  // Find a safe cut point: walk back KEEP_RECENT user-initiated turns from the end.
+  // A user-initiated turn starts with a user message that is NOT a tool_result —
+  // cutting here guarantees no orphaned tool_result at the head of toKeep.
+  let keepFrom = messages.length
+  let turnsFound = 0
+  for (let i = messages.length - 1; i >= 0 && turnsFound < KEEP_RECENT; i--) {
+    const m = messages[i]
+    if (m.role !== 'user') continue
+    const isToolResult = Array.isArray(m.content) && m.content.length > 0 && m.content[0].type === 'tool_result'
+    if (!isToolResult) {
+      keepFrom = i
+      turnsFound++
+    }
+  }
+
+  // Not enough clean turns to compact — nothing to do
+  if (keepFrom === 0) return messages
+
+  const toSummarize = messages.slice(0, keepFrom)
+  const toKeep = messages.slice(keepFrom)
 
   const historyText = toSummarize
     .map(m => {
