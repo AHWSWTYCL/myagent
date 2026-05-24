@@ -126,8 +126,16 @@ export class PermissionHook implements Hook {
       console.log(`[permission] 🤖 auto mode — asking agent: ${prompt}`)
       const answer = await this.autoAgent.decide(prompt)
       if (answer === 'no') {
-        console.log(`[permission] ❌ agent denied — ${prompt}`)
-        return { action: 'block', reason: 'Auto mode: agent denied permission' }
+        console.log(`[permission] ❌ agent denied — ${prompt}, falling back to user`)
+        const userAnswer = await this.askPermission(`[Auto mode denied] ${prompt}`)
+        console.log(`[permission] user override: ${userAnswer} — ${prompt}`)
+        if (userAnswer === 'session') {
+          this.sessionAllowed.add(key)
+          console.log(`[permission] 📌 added to session cache — ${key}`)
+          return { action: 'continue' }
+        }
+        if (userAnswer === 'yes') return { action: 'continue' }
+        return { action: 'block', reason: 'User denied permission' }
       }
       this.sessionAllowed.add(key)
       console.log(`[permission] ✅ agent allowed — ${prompt}`)

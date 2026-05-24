@@ -29,3 +29,24 @@ export function makePrefixedOnText(prefix: string): (delta: string) => void {
     process.stdout.write(out)
   }
 }
+
+/**
+ * Like makePrefixedOnText but routes deltas through an emitLine callback
+ * instead of writing directly to stdout. Use this inside sub-agent tools so
+ * their output surfaces in the TUI rather than bypassing Ink's renderer.
+ */
+export function makePrefixedEmit(
+  prefix: string,
+  emitLine: (line: string) => void,
+): (delta: string) => void {
+  let buf = ''
+  return (delta: string) => {
+    buf += delta
+    const lines = buf.split('\n')
+    // All but the last element are complete lines
+    for (let i = 0; i < lines.length - 1; i++) {
+      emitLine(`${prefix} ${lines[i]}`)
+    }
+    buf = lines[lines.length - 1]
+  }
+}

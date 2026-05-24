@@ -2,13 +2,13 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Box, Text, Static, useInput, useApp, useWindowSize } from 'ink'
 import TextInput from 'ink-text-input'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
-import type { ChatMessage, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
+import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { TuiBridge } from './bridge.js'
 import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
 import { MarkdownRenderer, StreamingText } from './MarkdownRenderer.js'
 
-type InputMode = 'chat' | 'permission' | 'question'
+type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 
 interface Props {
   bridge: TuiBridge
@@ -46,6 +46,11 @@ export function App({ bridge, commandParser, runTurn }: Props) {
   const [isProcessing, setIsProcessing] = useState(false)
   const [inputMode, setInputMode] = useState<InputMode>('chat')
   const [permissionChoice, setPermissionChoice] = useState<0 | 1 | 2>(0)
+  // ── choice 模式状态 ─────────────────────────────────────────────────
+  const [choiceQuestions, setChoiceQuestions] = useState<ChoiceQuestion[]>([])
+  const [choiceSelections, setChoiceSelections] = useState<number[]>([])
+  // 焦点行：0..n-1 是问题，n 是 Submit 按钮，n+1 是 Cancel 按钮
+  const [choiceFocus, setChoiceFocus] = useState(0)
   const [promptText, setPromptText] = useState('')
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
@@ -140,6 +145,10 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       setToolRunning('')
     })
 
+    bridge.on('recall', (memory: string) => {
+      setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `[recalled memory]\n${memory}` }])
+    })
+
     bridge.on('autoModeChange', (enabled: boolean) => {
       setAutoMode(enabled)
     })
@@ -155,6 +164,14 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       setPromptText(prompt)
       setInputMode('question')
       pendingResolveRef.current = resolve
+    })
+
+    bridge.on('choice', ({ questions, resolve }: ChoiceEvent) => {
+      setChoiceQuestions(questions)
+      setChoiceSelections(questions.map(() => 0))
+      setChoiceFocus(0)
+      setInputMode('choice')
+      pendingResolveRef.current = resolve as (v: any) => void
     })
 
     return () => { bridge.removeAllListeners() }
@@ -224,6 +241,80 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       setPromptText('')
     }
   }, { isActive: inputMode === 'permission' })
+
+  // Choice mode: ↑/↓ navigate rows, ←/→ change option / switch button, Enter submit/cancel, Esc cancel
+  useInput((_input, key) => {
+    const totalRows = choiceQuestions.length + 2 // questions + Submit + Cancel
+    const submitRow = choiceQuestions.length
+    const cancelRow = choiceQuestions.length + 1
+
+    const finish = (result: ChoiceResult) => {
+      pendingResolveRef.current?.(result)
+      pendingResolveRef.current = null
+      setInputMode('chat')
+      setChoiceQuestions([])
+      setChoiceSelections([])
+      setChoiceFocus(0)
+    }
+
+    if (key.escape) {
+      finish({ status: 'cancelled' })
+      return
+    }
+
+    if (key.upArrow) {
+      setChoiceFocus(f => (f - 1 + totalRows) % totalRows)
+      return
+    }
+    if (key.downArrow) {
+      setChoiceFocus(f => (f + 1) % totalRows)
+      return
+    }
+
+    // 焦点在问题行：←/→ 切换选项
+    if (choiceFocus < choiceQuestions.length) {
+      const optCount = choiceQuestions[choiceFocus].options.length
+      if (key.leftArrow) {
+        setChoiceSelections(prev => {
+          const next = [...prev]
+          next[choiceFocus] = (next[choiceFocus] - 1 + optCount) % optCount
+          return next
+        })
+        return
+      }
+      if (key.rightArrow) {
+        setChoiceSelections(prev => {
+          const next = [...prev]
+          next[choiceFocus] = (next[choiceFocus] + 1) % optCount
+          return next
+        })
+        return
+      }
+      // 在问题行按 Enter 等同于跳到 Submit 行
+      if (key.return) {
+        setChoiceFocus(submitRow)
+        return
+      }
+    } else {
+      // 焦点在按钮行：←/→ 在 Submit/Cancel 间切换
+      if (key.leftArrow || key.rightArrow) {
+        setChoiceFocus(f => f === submitRow ? cancelRow : submitRow)
+        return
+      }
+      if (key.return) {
+        if (choiceFocus === submitRow) {
+          const answers: Record<string, string> = {}
+          choiceQuestions.forEach((q, i) => {
+            answers[q.id] = q.options[choiceSelections[i]].value
+          })
+          finish({ status: 'submitted', answers })
+        } else {
+          finish({ status: 'cancelled' })
+        }
+        return
+      }
+    }
+  }, { isActive: inputMode === 'choice' })
 
   // ── 主要键盘处理：历史浏览 + 命令补全 ────────────────────────────────
   const hasSuggestions = suggestions.length > 0
@@ -507,6 +598,44 @@ export function App({ bridge, commandParser, runTurn }: Props) {
                 )
               })}
               <Text color="gray" dimColor>↑↓ navigate  Enter confirm  Esc cancel  (y/a/n shortcuts)</Text>
+            </Box>
+          ) : inputMode === 'choice' ? (
+            <Box flexDirection="column">
+              <Text color="yellow" bold>Please answer the following:</Text>
+              {choiceQuestions.map((q, qi) => {
+                const focused = choiceFocus === qi
+                const selected = choiceSelections[qi] ?? 0
+                return (
+                  <Box key={q.id} flexDirection="column" marginTop={1}>
+                    <Text color={focused ? 'cyan' : 'white'} bold={focused}>
+                      {focused ? '▸ ' : '  '}{qi + 1}. {q.prompt}
+                    </Text>
+                    <Box marginLeft={4}>
+                      {q.options.map((opt, oi) => {
+                        const isSel = oi === selected
+                        return (
+                          <Text key={opt.value} color={isSel ? (focused ? 'cyan' : 'green') : 'gray'} bold={isSel}>
+                            {isSel ? '[●] ' : '[ ] '}{opt.label}
+                            {oi < q.options.length - 1 ? '   ' : ''}
+                          </Text>
+                        )
+                      })}
+                    </Box>
+                  </Box>
+                )
+              })}
+              <Box marginTop={1}>
+                {(['Submit', 'Cancel'] as const).map((label, bi) => {
+                  const rowIdx = choiceQuestions.length + bi
+                  const focused = choiceFocus === rowIdx
+                  return (
+                    <Text key={label} color={focused ? (label === 'Submit' ? 'green' : 'red') : 'gray'} bold={focused}>
+                      {focused ? '▸ ' : '  '}[ {label} ]{bi === 0 ? '   ' : ''}
+                    </Text>
+                  )
+                })}
+              </Box>
+              <Text color="gray" dimColor>↑↓ row  ←→ option/button  Enter confirm  Esc cancel</Text>
             </Box>
           ) : (
             <Box>

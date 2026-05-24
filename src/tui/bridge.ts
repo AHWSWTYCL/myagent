@@ -1,6 +1,6 @@
 import EventEmitter from 'events'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
-import type { MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
+import type { ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 
 export class TuiBridge extends EventEmitter {
   private _autoMode = false
@@ -24,6 +24,12 @@ export class TuiBridge extends EventEmitter {
   askQuestion(prompt: string): Promise<string> {
     return new Promise(resolve => {
       this.emit('question', { prompt, resolve } satisfies QuestionEvent)
+    })
+  }
+
+  askChoice(questions: ChoiceQuestion[]): Promise<ChoiceResult> {
+    return new Promise(resolve => {
+      this.emit('choice', { questions, resolve } satisfies ChoiceEvent)
     })
   }
 
@@ -52,5 +58,10 @@ export class TuiBridge extends EventEmitter {
   /** Called after each API turn with cumulative token counts. */
   emitUsage(stats: UsageStats) {
     this.emit('usage', stats)
+  }
+
+  /** Called when relevant memory is recalled for the current query. */
+  emitRecall(memory: string) {
+    this.emit('recall', memory)
   }
 }

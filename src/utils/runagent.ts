@@ -3,13 +3,22 @@ import Anthropic from '@anthropic-ai/sdk'
 export interface RunAgentOptions {
   client: Anthropic
   model: string
-  system: string
+  /**
+   * System prompt. Either a static string, or a function that's re-evaluated at the start
+   * of every inner loop iteration (so memory recall / dynamic context can run per-turn,
+   * matching Claude Code's queryLoop semantics).
+   */
+  system: string | (() => string | Promise<string>)
   tools: Anthropic.Tool[]
   messages: Anthropic.MessageParam[]
   maxTurns?: number
   executeTool: (name: string, input: unknown) => Promise<string>
   /** Names of tools that are safe to execute concurrently (no side effects, no permission prompts). */
   parallelSafeTools?: Set<string>
+}
+
+async function resolveSystem(system: RunAgentOptions['system']): Promise<string> {
+  return typeof system === 'function' ? await system() : system
 }
 
 export interface UsageAccum {
@@ -23,12 +32,13 @@ export async function runAgentLoop(opts: RunAgentOptions): Promise<Anthropic.Mes
   const { client, model, system, tools, messages, maxTurns = 20, executeTool, parallelSafeTools } = opts
 
   for (let turn = 0; turn < maxTurns; turn++) {
+    const resolvedSystem = await resolveSystem(system)
     const response = await client.messages.create({
       model,
       max_tokens: 4096,
       tools,
       messages,
-      system,
+      system: resolvedSystem,
     })
     messages.push({ role: 'assistant', content: response.content })
     if (response.stop_reason !== 'tool_use') break
@@ -85,7 +95,7 @@ async function executeToolsWithParallelism(
 export async function runAgentLoopStream(
   opts: RunAgentOptions & {
     onText?: (delta: string) => void
-    onTurnEnd?: (text: string) => void
+    onTurnEnd?: (text: string, messages: Anthropic.MessageParam[]) => void | Promise<void>
     onToolStart?: (name: string, input: unknown) => void
     onUsage?: (usage: UsageAccum) => void
     signal?: AbortSignal
@@ -101,12 +111,13 @@ export async function runAgentLoopStream(
   for (let turn = 0; turn < maxTurns; turn++) {
     if (signal?.aborted) break
 
+    const resolvedSystem = await resolveSystem(system)
     const stream = client.messages.stream({
       model,
       max_tokens: 4096,
       tools,
       messages,
-      system,
+      system: resolvedSystem,
     })
 
     signal?.addEventListener('abort', () => stream.abort(), { once: true })
@@ -130,7 +141,6 @@ export async function runAgentLoopStream(
       }
     }
 
-    if (turnText) onTurnEnd?.(turnText)
     if (onUsage) onUsage({ ...cumUsage })
 
     if (signal?.aborted) break
@@ -142,6 +152,12 @@ export async function runAgentLoopStream(
       break
     }
     messages.push({ role: 'assistant', content: response.content })
+
+    // Fire onTurnEnd after the assistant message is in the history, so hooks
+    // observe a consistent snapshot. Awaited so per-turn side effects (memory
+    // extract scheduling, retrospective counting) run before the next iteration.
+    if (turnText) await onTurnEnd?.(turnText, messages)
+
     if (response.stop_reason !== 'tool_use') break
 
     const toolBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]

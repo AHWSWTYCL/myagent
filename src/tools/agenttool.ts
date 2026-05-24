@@ -1,90 +1,111 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { createClient } from '../client'
-import { runAgentLoopStream } from '../utils/runagent'
-import { ToolRegistrar } from './toolregistrar'
-import { Tool } from './tool'
+import { Tool } from './tool.js'
+import { ToolRegistrar } from './toolregistrar.js'
+import { AgentRegistry } from '../agents/registry.js'
+import { runAgent } from '../agents/runner.js'
 
+interface AgentToolInput {
+  agent: string
+  source?: string
+  task?: string
+  [key: string]: unknown
+}
+
+/**
+ * 唯一的 agent 调度入口。
+ *
+ * 主 LLM（或某个 sub-agent）通过它选择并启动一个 sub-agent；
+ * 具体可调用的 agent 列表由注册到 AgentRegistry 中的定义决定。
+ *
+ * 通过 setExecutionContext 由 agent.ts 注入 client / executeTool / emitLine —
+ * 这些不能在构造时拿到（循环依赖）。
+ */
 export class AgentTool extends Tool {
+  private client?: Anthropic
+  private executeToolFn?: (name: string, input: unknown) => Promise<string>
+  private emitLineFn?: (line: string) => void
 
-  get name(): string {
-    return 'agent'
+  constructor(
+    private registry: AgentRegistry,
+    private toolRegistrar: ToolRegistrar,
+  ) { super() }
+
+  setExecutionContext(opts: {
+    client: Anthropic
+    executeTool: (name: string, input: unknown) => Promise<string>
+    emitLine: (line: string) => void
+  }) {
+    this.client = opts.client
+    this.executeToolFn = opts.executeTool
+    this.emitLineFn = opts.emitLine
   }
 
+  get name(): string { return 'agent' }
+
   get description(): string {
-    return 'Spawn a sub-agent to handle a self-contained task. The sub-agent has access to read_file, write_file, list_dir, and bash tools. Use this when a task can be fully delegated and its result summarized back.'
+    const lines = [
+      'Spawn a sub-agent to handle a self-contained task.',
+      'Pick `agent` from the registered list. Each agent has its own description, allowed tools and input schema; the union of input fields is exposed below — pass only what the chosen agent expects.',
+      '',
+      'Available agents:',
+    ]
+    for (const a of this.registry.list()) {
+      lines.push(`- **${a.name}** — ${a.description.replace(/\s+/g, ' ').trim()}`)
+    }
+    return lines.join('\n')
   }
 
   get input_schema(): { type: 'object'; properties: object; required: string[] } {
+    // 取所有 agent input schema 的并集，agent / task / source 是固定字段
+    const properties: Record<string, unknown> = {
+      agent: {
+        type: 'string',
+        enum: this.registry.list().map(a => a.name),
+        description: 'Which sub-agent to spawn.',
+      },
+      task: {
+        type: 'string',
+        description: 'High-level task description. Most agents accept this; some accept extra fields (see agent description).',
+      },
+      source: {
+        type: 'string',
+        description: 'Caller agent name (e.g. "main", "coordinator"). Optional, used for logging.',
+      },
+    }
+    for (const a of this.registry.list()) {
+      if (!a.inputSchema) continue
+      for (const [k, v] of Object.entries(a.inputSchema.properties)) {
+        if (k in properties) continue
+        properties[k] = v
+      }
+    }
     return {
       type: 'object',
-      properties: {
-        task: { type: 'string', description: 'The task description for the sub-agent to complete' },
-        system: { type: 'string', description: 'Optional system prompt override for the sub-agent' },
-      },
-      required: ['task'],
+      properties,
+      required: ['agent'],
     }
   }
 
-  async execute(args: any): Promise<string> {
-    const task: string = args.task
-    const systemOverride: string | undefined = args.system
-
-    const client = createClient()
-
-    const subRegistrar = new ToolRegistrar()
-    subRegistrar.registerTool(new (await import('./readtool')).ReadTool())
-    subRegistrar.registerTool(new (await import('./writetool')).WriteTool())
-    subRegistrar.registerTool(new (await import('./listdirtool')).ListDirTool())
-    subRegistrar.registerTool(new (await import('./bashtool')).BashTool())
-
-    const system = systemOverride ?? 'You are a helpful sub-agent. Complete the given task using the tools available to you.'
-
-    const messages: Anthropic.MessageParam[] = [
-      { role: 'user', content: task },
-    ]
-
-    const executeTool = async (name: string, input: unknown): Promise<string> => {
-      try {
-        return await (subRegistrar.getTool(name)?.execute(input as Record<string, string>) ?? Promise.resolve('Unknown tool'))
-      } catch (err) {
-        return `Error: ${err}`
-      }
+  async execute(args: AgentToolInput): Promise<string> {
+    if (!this.client || !this.executeToolFn || !this.emitLineFn) {
+      return 'Error: AgentTool is not initialized; setExecutionContext was never called.'
+    }
+    const def = this.registry.get(args.agent)
+    if (!def) {
+      const known = this.registry.list().map(a => a.name).join(', ')
+      return `Error: unknown agent "${args.agent}". Available: ${known}`
     }
 
-    process.stdout.write('[sub-agent] ')
-    let atLineStart = false
-    await runAgentLoopStream({
-      client,
-      model: 'claude-sonnet-4-6',
-      system,
-      tools: subRegistrar.getAllTools(),
-      messages,
-      maxTurns: 20,
-      executeTool,
-      onText: delta => {
-        // Re-prefix after each newline so every output line is tagged
-        const prefixed = delta.replace(/\n(?!$)/g, '\n[sub-agent] ')
-        process.stdout.write(prefixed)
-        atLineStart = delta.endsWith('\n')
-      },
-    })
-    if (!atLineStart) process.stdout.write('\n')
-
-    // Extract the last assistant text as the result
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]
-      if (msg.role !== 'assistant') continue
-      const content = msg.content
-      if (typeof content === 'string') return content
-      if (Array.isArray(content)) {
-        const text = content
-          .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-          .map(b => b.text)
-          .join('')
-        if (text) return text
-      }
+    try {
+      return await runAgent(def, args, {
+        source: args.source ?? 'main',
+        toolRegistrar: this.toolRegistrar,
+        executeTool: this.executeToolFn,
+        client: this.client,
+        emitLine: this.emitLineFn,
+      })
+    } catch (err) {
+      return `Error running agent "${args.agent}": ${err instanceof Error ? err.message : String(err)}`
     }
-
-    return '(sub-agent completed with no text output)'
   }
 }

@@ -15,7 +15,7 @@ import * as crypto from 'crypto'
 import { Task, TaskStatus, TASK_STATUSES, STATUS_ICON, STATUS_ORDER } from './task.js'
 
 /** 任务文件存储根目录 */
-const TASKS_DIR = path.join(os.homedir(), '.myagent', 'tasks')
+const TASKS_BASE_DIR = path.join(os.homedir(), '.myagent', 'tasks')
 
 // ============================================================
 //  Frontmatter 解析（轻量，不依赖 yaml 库）
@@ -114,22 +114,27 @@ function fileToTask(content: string): Task {
 // ============================================================
 
 export class TaskManager {
-  constructor() {
+  private readonly tasksDir: string
+
+  constructor(namespace?: string) {
+    this.tasksDir = namespace
+      ? path.join(TASKS_BASE_DIR, namespace)
+      : TASKS_BASE_DIR
     this.ensureDir()
   }
 
   // ── 目录维护 ──
 
   private ensureDir(): void {
-    fs.mkdirSync(TASKS_DIR, { recursive: true })
+    fs.mkdirSync(this.tasksDir, { recursive: true })
   }
 
   private taskPath(id: string): string {
-    return path.join(TASKS_DIR, `${id}.md`)
+    return path.join(this.tasksDir, `${id}.md`)
   }
 
   private indexPath(): string {
-    return path.join(TASKS_DIR, 'INDEX.md')
+    return path.join(this.tasksDir, 'INDEX.md')
   }
 
   // ── 生成唯一 ID ──
@@ -440,6 +445,14 @@ export class TaskManager {
     const deleted = this.deleteTaskFile(id)
     if (deleted) this.rebuildIndex()
     return deleted
+  }
+
+  /**
+   * 删除整个任务目录（仅对有 namespace 的实例有意义）。
+   * 用于 coordinator 收尾时一次性清理本次 pipeline 的所有任务文件。
+   */
+  destroy(): void {
+    fs.rmSync(this.tasksDir, { recursive: true, force: true })
   }
 
   /** 重建 INDEX.md */

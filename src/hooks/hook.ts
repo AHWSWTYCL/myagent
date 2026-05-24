@@ -1,9 +1,20 @@
 // Hook 系统的核心接口定义
 
+import type Anthropic from '@anthropic-ai/sdk'
+
 export interface HookContext {
   toolName: string
   toolInput: unknown
   toolResult?: string
+}
+
+export interface TurnEndContext {
+  /** 当前会话消息（hook 内只读，按需自行 copy） */
+  messages: Anthropic.MessageParam[]
+  /** 本 turn 模型最终输出的文本 */
+  assistantText: string
+  /** 本轮 runTurn 的原始用户输入；可选，子 agent / 工具内部循环可不传 */
+  userInput?: string
 }
 
 // Hook 执行结果：continue 继续执行，block 阻断
@@ -17,6 +28,8 @@ export interface Hook {
   onToolCall?(ctx: HookContext): Promise<HookResult>
   // tool 执行后触发，可观察结果
   onToolResult?(ctx: HookContext): Promise<void>
+  // 内层 queryLoop 每一 turn 模型出 text 后触发（纯观察 / 副作用）
+  onTurnEnd?(ctx: TurnEndContext): Promise<void>
 }
 
 export class HookManager {
@@ -45,6 +58,18 @@ export class HookManager {
     for (const hook of this.hooks) {
       if (!hook.onToolResult) continue
       await hook.onToolResult(ctx)
+    }
+  }
+
+  // 内层 turn 结束时调用（纯观察，不阻断；hook 内部异常被吞掉以免影响主循环）
+  async runOnTurnEnd(ctx: TurnEndContext): Promise<void> {
+    for (const hook of this.hooks) {
+      if (!hook.onTurnEnd) continue
+      try {
+        await hook.onTurnEnd(ctx)
+      } catch (err) {
+        console.error(`[hooks] ${hook.name}.onTurnEnd error:`, err)
+      }
     }
   }
 }

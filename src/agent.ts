@@ -21,6 +21,8 @@ import { HookManager } from './hooks/hook.js'
 import { LoggerHook } from './hooks/loggerhook.js'
 import { PermissionHook } from './hooks/permissionhook.js'
 import { AutoPermissionAgent } from './hooks/autopermissionagent.js'
+import { MemoryExtractHook } from './hooks/memoryextracthook.js'
+import { RetrospectiveHook } from './hooks/retrospectivehook.js'
 import { SkillManager } from './skills/skillmanager.js'
 import { CodeReviewSkill } from './skills/codereviewskill.js'
 import { GitSkill } from './skills/gitskill.js'
@@ -30,7 +32,6 @@ import { HelpCommand } from './commands/helpcommand.js'
 import { SkillCommand } from './commands/skillcommand.js'
 import { TaskCommand } from './tasks/taskcommand.js'
 import { RetrospectiveCommand } from './commands/retrospectivecommand.js'
-import { runRetrospective } from './retrospective/retrospective.js'
 import { SchedulerTool } from './scheduler/schedulertool.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
@@ -47,19 +48,35 @@ toolRegistrar.registerTool(new (await import('./tools/readtool.js')).ReadTool())
 toolRegistrar.registerTool(new (await import('./tools/writetool.js')).WriteTool())
 toolRegistrar.registerTool(new (await import('./tools/listdirtool.js')).ListDirTool())
 toolRegistrar.registerTool(new (await import('./tools/bashtool.js')).BashTool())
-toolRegistrar.registerTool(new (await import('./tools/agenttool.js')).AgentTool())
-toolRegistrar.registerTool(new (await import('./tools/builtin/planneragenttool.js')).PlannerAgentTool())
-toolRegistrar.registerTool(new (await import('./tools/builtin/generatortool.js')).GeneratorTool())
-toolRegistrar.registerTool(new (await import('./tools/builtin/verifiertool.js')).VerifierTool())
 toolRegistrar.registerTool(new (await import('./tools/memorytool.js')).MemoryTool())
 toolRegistrar.registerTool(new (await import('./tools/useskilltool.js')).UseSkillTool(skillManager))
 toolRegistrar.registerTool(new (await import('./tasks/tasktool.js')).TaskTool())
 toolRegistrar.registerTool(new SchedulerTool())
 toolRegistrar.registerTool(new (await import('./tools/websearchtool.js')).WebSearchTool())
 toolRegistrar.registerTool(new (await import('./tools/fetchtool.js')).FetchTool())
+toolRegistrar.registerTool(new (await import('./tools/choicetool.js')).ChoiceTool(qs => bridge.askChoice(qs)))
+
+// ── Init agent registry & unified agent tool ─────────────────────────────────
+const { AgentRegistry } = await import('./agents/registry.js')
+const { builtinAgents } = await import('./agents/builtin/index.js')
+const { loadAgentsFromDir } = await import('./agents/markdown.js')
+const agentRegistry = new AgentRegistry()
+agentRegistry.registerAll(builtinAgents)
+// 用户也可以通过 ./agents/*.md 自定义 sub-agent
+agentRegistry.registerAll(loadAgentsFromDir(`${process.cwd()}/agents`))
+
+const agentTool = new (await import('./tools/agenttool.js')).AgentTool(agentRegistry, toolRegistrar)
+toolRegistrar.registerTool(agentTool)
 
 const client = createClient()
 const baseSystemPrompt = getSystemPrompt()
+
+// AgentTool 需要 client / executeTool / emitLine —— 这些此时才有，在这里注入
+agentTool.setExecutionContext({
+  client,
+  executeTool: (name, input) => executeTool(name, input),
+  emitLine: line => bridge.emitMessage('system', line),
+})
 
 // ── Hooks ─────────────────────────────────────────────────────────────────────
 const hookManager = new HookManager()
@@ -67,6 +84,8 @@ hookManager.register(new LoggerHook(bridge))
 const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt))
 const autoPermissionAgent = new AutoPermissionAgent(client)
 hookManager.register(permissionHook)
+hookManager.register(new MemoryExtractHook(bridge))
+hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
 
 bridge.on('autoModeChange', (enabled: boolean) => {
   permissionHook.setAutoMode(enabled, autoPermissionAgent)
@@ -90,10 +109,9 @@ async function executeTool(name: string, input: unknown, skipHooks = false): Pro
 }
 
 // ── Agent state ───────────────────────────────────────────────────────────────
-const MAX_TURNS = 20
-const MEMORY_CONSOLIDATE_THRESHOLD = 100
-const RETROSPECTIVE_THRESHOLD = 30
-let turnsSinceLastRetrospective = 0
+const MAX_TURNS = 60
+const MEMORY_CONSOLIDATE_THRESHOLD = 250
+const MEMORY_KEEP_RECENT = 100
 const messages: Anthropic.MessageParam[] = []
 let agentRunning = false
 
@@ -111,7 +129,9 @@ function buildSystemPrompt(memoryFragment: string): string {
   const base = memoryFragment
     ? `${baseSystemPrompt}\n\n## 相关记忆\n${memoryFragment}`
     : baseSystemPrompt
-  return `${base}${skillManager.buildPromptFragment()}`
+  const agentSection = agentRegistry.describeForPrompt()
+  const withAgents = agentSection ? `${base}\n\n${agentSection}` : base
+  return `${withAgents}${skillManager.buildPromptFragment()}`
 }
 
 async function consolidateMemory(): Promise<boolean> {
@@ -146,16 +166,24 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
   try {
     messages.push({ role: 'user', content: input })
 
-    bridge.emitStatus('召回相关记忆...')
-    const relevantMemory = await recallRelevantMemory(input)
-    bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
-
-    const systemPrompt = buildSystemPrompt(relevantMemory)
+    // Recall + system prompt are now re-evaluated at every inner turn
+    // (matching Claude Code's queryLoop), via the function form of `system`.
+    let lastRecall: string | null = null
+    const buildSystem = async (): Promise<string> => {
+      bridge.emitStatus('召回相关记忆...')
+      const relevantMemory = await recallRelevantMemory(input)
+      if (relevantMemory && relevantMemory !== lastRecall) {
+        bridge.emitRecall(relevantMemory)
+        lastRecall = relevantMemory
+      }
+      bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
+      return buildSystemPrompt(relevantMemory)
+    }
 
     await runAgentLoopStream({
       client,
       model: 'claude-sonnet-4-6',
-      system: systemPrompt,
+      system: buildSystem,
       tools: toolRegistrar.getAllTools(),
       messages,
       maxTurns: MAX_TURNS,
@@ -163,25 +191,44 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
       parallelSafeTools: toolRegistrar.getParallelSafeNames(),
       signal,
       onText: delta => bridge.emitText(delta),
-      onTurnEnd: text => bridge.emitTurnEnd(text),
+      onTurnEnd: async (text, msgs) => {
+        bridge.emitTurnEnd(text)
+        await hookManager.runOnTurnEnd({
+          messages: msgs,
+          assistantText: text,
+          userInput: input,
+        })
+      },
       onToolStart: (name, input) => bridge.emitToolStart(name, toolLabel(name, input as Record<string, unknown>)),
       onUsage: stats => bridge.emitUsage(stats),
     })
 
     if (messages.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
       const ok = await consolidateMemory()
-      if (ok) messages.length = 0
-    }
-
-    turnsSinceLastRetrospective++
-    if (turnsSinceLastRetrospective >= RETROSPECTIVE_THRESHOLD) {
-      turnsSinceLastRetrospective = 0
-      runRetrospective(client, [...messages], skillManager, msg => bridge.emitStatus(msg))
-        .catch(err => console.error('[retrospective]', err))
+      if (ok) trimMessagesKeepingRecent(messages, MEMORY_KEEP_RECENT)
     }
   } finally {
     agentRunning = false
   }
+}
+
+function isToolResultMessage(m: Anthropic.MessageParam): boolean {
+  if (m.role !== 'user' || typeof m.content === 'string') return false
+  return m.content.some(b => b.type === 'tool_result')
+}
+
+function trimMessagesKeepingRecent(messages: Anthropic.MessageParam[], keepRecent: number): void {
+  if (messages.length <= keepRecent) return
+  let cut = messages.length - keepRecent
+  // Walk forward to a clean boundary: a user message whose content is NOT tool_result.
+  // This avoids orphaning a tool_use (in an earlier assistant msg) from its tool_result.
+  while (cut < messages.length) {
+    const m = messages[cut]
+    if (m.role === 'user' && !isToolResultMessage(m)) break
+    cut++
+  }
+  if (cut >= messages.length) return
+  messages.splice(0, cut)
 }
 
 function toolLabel(name: string, args: Record<string, unknown>): string {

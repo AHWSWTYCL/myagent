@@ -6,7 +6,6 @@
   "scripts": {
     "hello": "tsx src/hello.ts",
     "agent": "tsx src/agent.ts",
-    "build": "tsc",
     "start": "node dist/agent.js"
   },
   "dependencies": {
@@ -15,12 +14,18 @@
     "ink": "^7.0.3",
     "ink-text-input": "^6.0.0",
     "marked": "^18.0.3",
-    "react": "^19.2.6"
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.7.0",
     "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^10.3.0",
+    "globals": "^17.6.0",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.3"
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.59.2"
   }
 }

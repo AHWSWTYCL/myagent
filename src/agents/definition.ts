@@ -1,0 +1,52 @@
+import Anthropic from '@anthropic-ai/sdk'
+import { Tool } from '../tools/tool.js'
+import { ToolRegistrar } from '../tools/toolregistrar.js'
+
+export interface AgentRunContext {
+  /** 调用方 agent 名（"main" 表示主 agent；其他值表示 agent 调 agent） */
+  source: string
+  /** 主 agent 的 toolRegistrar，用于按 name 拿到工具实例 */
+  toolRegistrar: ToolRegistrar
+  /** 共享的 tool 执行入口（已带 hooks / 权限） */
+  executeTool: (name: string, input: unknown) => Promise<string>
+  client: Anthropic
+  emitLine: (line: string) => void
+}
+
+/** Agent 接收的参数 schema 暴露给主 LLM */
+export interface AgentInputSchema {
+  properties: Record<string, unknown>
+  required?: string[]
+}
+
+export interface AgentDefinition {
+  name: string
+  /** 描述给主 LLM 看：什么时候用这个 agent。要写得能让 LLM 自主选择。 */
+  description: string
+  /** Agent 自己的 system prompt；可以是字符串或异步求值（支持运行时拼接） */
+  systemPrompt: string | ((args: Record<string, unknown>, ctx: AgentRunContext) => string | Promise<string>)
+  /** 允许使用的全局工具名列表（从 toolRegistrar 取） */
+  tools: string[]
+  model?: string
+  maxTurns?: number
+  /** 默认 schema：{ task: string }。Agent 需要更复杂入参时可以覆盖 */
+  inputSchema?: AgentInputSchema
+  /** 把入参拼成 user message。默认：直接用 args.task */
+  formatUserMessage?: (args: Record<string, unknown>, ctx: AgentRunContext) => string | Promise<string>
+  /** 仅在该 agent 运行期内可用的工厂工具（带闭包状态）。每次 runAgent 都会新建一份。 */
+  extraTools?: (ctx: AgentRunContext, args: Record<string, unknown>) => Tool[] | Promise<Tool[]>
+  /** 跑完之后的钩子（可读 messages、createdIds 之类的状态） */
+  finalize?: (
+    messages: Anthropic.MessageParam[],
+    lastText: string,
+    ctx: AgentRunContext,
+    args: Record<string, unknown>,
+  ) => string | Promise<string>
+}
+
+export const DEFAULT_AGENT_INPUT_SCHEMA: AgentInputSchema = {
+  properties: {
+    task: { type: 'string', description: 'The task description for the sub-agent' },
+  },
+  required: ['task'],
+}
