@@ -123,22 +123,19 @@ export class PermissionHook implements Hook {
 
     // ── 4. auto mode：交给 AI agent 决策 ─────────────────────────────────────
     if (this.autoMode && this.autoAgent) {
-      console.log(`[permission] 🤖 auto mode — asking agent: ${prompt}`)
       const answer = await this.autoAgent.decide(prompt)
       if (answer === 'no') {
-        console.log(`[permission] ❌ agent denied — ${prompt}, falling back to user`)
+        // 只有拒绝时才显示，让用户确认
         const userAnswer = await this.askPermission(`[Auto mode denied] ${prompt}`)
-        console.log(`[permission] user override: ${userAnswer} — ${prompt}`)
         if (userAnswer === 'session') {
           this.sessionAllowed.add(key)
-          console.log(`[permission] 📌 added to session cache — ${key}`)
           return { action: 'continue' }
         }
         if (userAnswer === 'yes') return { action: 'continue' }
         return { action: 'block', reason: 'User denied permission' }
       }
+      // 授权成功 → 静默放行，不在 TUI 显示
       this.sessionAllowed.add(key)
-      console.log(`[permission] ✅ agent allowed — ${prompt}`)
       return { action: 'continue' }
     }
 

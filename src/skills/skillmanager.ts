@@ -56,6 +56,10 @@ export class SkillManager {
     return [...this.skills.values()]
   }
 
+  getSkill(name: string): Skill | undefined {
+    return this.skills.get(name)
+  }
+
   getActiveSkills(): Skill[] {
     return [...this.activeSkills].map(name => this.skills.get(name)!)
   }

@@ -11,6 +11,13 @@ export class LoggerHook implements Hook {
   }
 
   async onToolResult(ctx: HookContext): Promise<void> {
+    // read_file：只显示路径，不显示内容（内容太长且干扰 TUI）
+    if (ctx.toolName === 'read_file') {
+      const path = (ctx.toolInput as Record<string, unknown>)?.path ?? ''
+      this.bridge.emitMessage('tool', `◀ read_file  ${path}`)
+      return
+    }
+
     const result = ctx.toolResult ?? ''
     const preview = result.length > 300 ? result.slice(0, 300) + ' …' : result
     this.bridge.emitMessage('tool', `◀ ${ctx.toolName}: ${preview}`)

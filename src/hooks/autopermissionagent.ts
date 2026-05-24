@@ -16,7 +16,6 @@ export class AutoPermissionAgent {
   constructor(private client: Anthropic) {}
 
   async decide(prompt: string): Promise<PermissionAnswer> {
-    console.log(`[auto-permission] prompt: ${prompt}`)
     try {
       const response = await this.client.messages.create({
         model: 'claude-haiku-4-5-20251001',
@@ -31,23 +30,16 @@ export class AutoPermissionAgent {
         .join('')
         .trim()
 
-      console.log(`[auto-permission] raw response: ${text}`)
-
       // Extract JSON even if the model wraps it in markdown
       const match = text.match(/\{[\s\S]*\}/)
       if (!match) {
-        console.log(`[auto-permission] ⚠️ failed to parse JSON, defaulting to allow`)
         return 'yes'
       }
 
       const parsed = JSON.parse(match[0]) as { decision: string; reason?: string }
-      const answer: PermissionAnswer = parsed.decision === 'allow' ? 'yes' : 'no'
-      const reason = parsed.reason ? ` (${parsed.reason})` : ''
-      console.log(`[auto-permission] decision: ${parsed.decision}${reason}`)
-      return answer
-    } catch (err) {
+      return parsed.decision === 'allow' ? 'yes' : 'no'
+    } catch {
       // On any error, fall back to allowing (don't block the agent)
-      console.log(`[auto-permission] ⚠️ error during decision, defaulting to allow: ${err}`)
       return 'yes'
     }
   }

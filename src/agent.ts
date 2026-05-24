@@ -22,7 +22,7 @@ import { HookManager } from './hooks/hook.js'
 import { LoggerHook } from './hooks/loggerhook.js'
 import { PermissionHook } from './hooks/permissionhook.js'
 import { AutoPermissionAgent } from './hooks/autopermissionagent.js'
-import { MemoryExtractHook } from './hooks/memoryextracthook.js'
+import { extractMemoryFromTurn, appendMemories } from './memory/extract.js'
 import { RetrospectiveHook } from './hooks/retrospectivehook.js'
 import { SkillManager } from './skills/skillmanager.js'
 import { CodeReviewSkill } from './skills/codereviewskill.js'
@@ -52,6 +52,7 @@ toolRegistrar.registerTool(new (await import('./tools/listdirtool.js')).ListDirT
 toolRegistrar.registerTool(new (await import('./tools/bashtool.js')).BashTool())
 toolRegistrar.registerTool(new (await import('./tools/memorytool.js')).MemoryTool())
 toolRegistrar.registerTool(new (await import('./tools/useskilltool.js')).UseSkillTool(skillManager))
+toolRegistrar.registerTool(new (await import('./tools/invokeskilltool.js')).InvokeSkillTool(skillManager))
 toolRegistrar.registerTool(new (await import('./tasks/tasktool.js')).TaskTool())
 toolRegistrar.registerTool(new SchedulerTool())
 toolRegistrar.registerTool(new (await import('./tools/websearchtool.js')).WebSearchTool())
@@ -89,7 +90,6 @@ hookManager.register(new LoggerHook(bridge))
 const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt))
 const autoPermissionAgent = new AutoPermissionAgent(client)
 hookManager.register(permissionHook)
-hookManager.register(new MemoryExtractHook(bridge))
 hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
 
 bridge.on('autoModeChange', (enabled: boolean) => {
@@ -179,6 +179,9 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
 
     const buildSystem = (): string => buildSystemPrompt(relevantMemory)
 
+    // Accumulate text across inner turns for memory extraction (one pass per user input, not per inner turn)
+    let fullAssistantText = ''
+
     await runAgentLoopStream({
       client,
       model: 'claude-sonnet-4-6',
@@ -191,6 +194,7 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
       signal,
       onText: delta => bridge.emitText(delta),
       onTurnEnd: async (text, msgs) => {
+        fullAssistantText += text + '\n'
         bridge.emitTurnEnd(text)
         await hookManager.runOnTurnEnd({
           messages: msgs,
@@ -204,6 +208,19 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
         bridge.emitUsage(stats)
       },
     })
+
+    // Extract memories once per user input (not per inner turn)
+    if (fullAssistantText.trim()) {
+      extractMemoryFromTurn(input, fullAssistantText)
+        .then(items => {
+          if (items.length === 0) return
+          const added = appendMemories(items)
+          if (added > 0) {
+            bridge.emitMessage('system', `[memory] +${added} new memor${added === 1 ? 'y' : 'ies'}`)
+          }
+        })
+        .catch(err => console.error('[extract]', err))
+    }
 
     await compactIfNeeded()
   } finally {
