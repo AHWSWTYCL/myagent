@@ -1,19 +1,28 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { cwd } from 'process'
 
-const MEMORY_DIR = path.join(os.homedir(), '.myagent', 'memory')
+export type MemoryCategory = 'profile' | 'project' | 'feedback' | 'reference' | 'index'
 
-/** 各分类对应的文件路径 */
-export const MEMORY_FILES = {
-  profile: path.join(MEMORY_DIR, 'profile.md'),
-  project: path.join(MEMORY_DIR, 'project.md'),
-  feedback: path.join(MEMORY_DIR, 'feedback.md'),
-  reference: path.join(MEMORY_DIR, 'reference.md'),
-  index: path.join(MEMORY_DIR, 'INDEX.md'),
-} as const
+function getProjectSlug(): string {
+  return cwd().replace(/\//g, '-')
+}
 
-export type MemoryCategory = keyof typeof MEMORY_FILES
+function getMemoryDir(): string {
+  return path.join(os.homedir(), '.myagent', 'memory', getProjectSlug())
+}
+
+export function getMemoryFiles(): Record<MemoryCategory, string> {
+  const dir = getMemoryDir()
+  return {
+    profile:  path.join(dir, 'profile.md'),
+    project:  path.join(dir, 'project.md'),
+    feedback: path.join(dir, 'feedback.md'),
+    reference: path.join(dir, 'reference.md'),
+    index:    path.join(dir, 'INDEX.md'),
+  }
+}
 
 /** 返回记忆整理的 prompt 指令 */
 export function getMemoryPrompt(): string {
@@ -21,13 +30,13 @@ export function getMemoryPrompt(): string {
 }
 
 function ensureDir(): void {
-  fs.mkdirSync(MEMORY_DIR, { recursive: true })
+  fs.mkdirSync(getMemoryDir(), { recursive: true })
 }
 
 /** 读取指定分类文件的内容 */
 export function readCategory(category: MemoryCategory): string {
   ensureDir()
-  const filePath = MEMORY_FILES[category]
+  const filePath = getMemoryFiles()[category]
   if (!fs.existsSync(filePath)) {
     fs.writeFileSync(filePath, '')
     return ''
@@ -38,7 +47,7 @@ export function readCategory(category: MemoryCategory): string {
 /** 写入指定分类文件 */
 export function writeCategory(category: MemoryCategory, content: string): void {
   ensureDir()
-  fs.writeFileSync(MEMORY_FILES[category], content)
+  fs.writeFileSync(getMemoryFiles()[category], content)
 }
 
 /** 读取所有分类（除 index 外）的内容，返回一个对象 */

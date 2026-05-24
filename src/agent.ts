@@ -54,6 +54,9 @@ toolRegistrar.registerTool(new (await import('./tasks/tasktool.js')).TaskTool())
 toolRegistrar.registerTool(new SchedulerTool())
 toolRegistrar.registerTool(new (await import('./tools/websearchtool.js')).WebSearchTool())
 toolRegistrar.registerTool(new (await import('./tools/fetchtool.js')).FetchTool())
+toolRegistrar.registerTool(new (await import('./tools/globtool.js')).GlobTool())
+toolRegistrar.registerTool(new (await import('./tools/greptool.js')).GrepTool())
+toolRegistrar.registerTool(new (await import('./tools/edittool.js')).EditTool())
 toolRegistrar.registerTool(new (await import('./tools/choicetool.js')).ChoiceTool(qs => bridge.askChoice(qs)))
 
 // ── Init agent registry & unified agent tool ─────────────────────────────────
@@ -239,6 +242,9 @@ function toolLabel(name: string, args: Record<string, unknown>): string {
     case 'list_dir':    return `ls ${args.path}`
     case 'web_search':  return `search "${args.query}"`
     case 'web_fetch':   return `fetch ${args.url}`
+    case 'glob':        return `glob ${args.pattern}`
+    case 'grep':        return `grep ${args.pattern}`
+    case 'edit_file':   return `edit ${args.path}`
     default:           return name
   }
 }

@@ -1,4 +1,4 @@
-import { MEMORY_FILES, MemoryCategory, readCategory, writeCategory, readAllCategories } from '../memory/memory.js'
+import { getMemoryFiles, MemoryCategory, readCategory, writeCategory, readAllCategories } from '../memory/memory.js'
 import { Tool } from './tool.js'
 
 type MemoryAction = 'save' | 'delete' | 'list' | 'update_index'
