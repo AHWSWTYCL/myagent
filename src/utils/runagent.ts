@@ -34,12 +34,15 @@ export async function runAgentLoop(opts: RunAgentOptions): Promise<Anthropic.Mes
 
   for (let turn = 0; turn < maxTurns; turn++) {
     const resolvedSystem = await resolveSystem(system)
+    const systemParam: Anthropic.TextBlockParam[] = [
+      { type: 'text', text: resolvedSystem, cache_control: { type: 'ephemeral' } },
+    ]
     const response = await withRetry(() => client.messages.create({
       model,
       max_tokens: 4096,
       tools,
       messages,
-      system: resolvedSystem,
+      system: systemParam,
     }))
     messages.push({ role: 'assistant', content: response.content })
     if (response.stop_reason !== 'tool_use') break
@@ -113,12 +116,18 @@ export async function runAgentLoopStream(
     if (signal?.aborted) break
 
     const resolvedSystem = await resolveSystem(system)
+    // Cache the system prompt — it's largely stable across the inner loop
+    // (skills + agent list + memory), so paying 25% more once to read at 10%
+    // on every subsequent turn is a clear win.
+    const systemParam: Anthropic.TextBlockParam[] = [
+      { type: 'text', text: resolvedSystem, cache_control: { type: 'ephemeral' } },
+    ]
     const stream = await withRetry(() => client.messages.stream({
       model,
       max_tokens: 4096,
       tools,
       messages,
-      system: resolvedSystem,
+      system: systemParam,
     }))
 
     signal?.addEventListener('abort', () => stream.abort(), { once: true })

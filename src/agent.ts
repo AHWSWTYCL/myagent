@@ -33,6 +33,7 @@ import { HelpCommand } from './commands/helpcommand.js'
 import { SkillCommand } from './commands/skillcommand.js'
 import { TaskCommand } from './tasks/taskcommand.js'
 import { RetrospectiveCommand } from './commands/retrospectivecommand.js'
+import { TokenStatsCommand } from './commands/tokenstatscommand.js'
 import { SchedulerTool } from './scheduler/schedulertool.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
@@ -125,6 +126,8 @@ commandRegistry.register(new SkillCommand(skillManager, prompt => bridge.askQues
 commandRegistry.register(new TaskCommand())
 // RetrospectiveCommand 需要访问 messages，传一个 getter 函数
 commandRegistry.register(new RetrospectiveCommand(client, () => messages, skillManager, bridge))
+// TokenStatsCommand 需要访问 lastUsage 和 messages，传 getter 函数
+commandRegistry.register(new TokenStatsCommand(() => lastUsage, () => messages))
 commandRegistry.register(new SchedulerCommand())
 const commandParser = new CommandParser(commandRegistry)
 
@@ -167,19 +170,14 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
   try {
     messages.push({ role: 'user', content: input })
 
-    // Recall + system prompt are now re-evaluated at every inner turn
-    // (matching Claude Code's queryLoop), via the function form of `system`.
-    let lastRecall: string | null = null
-    const buildSystem = async (): Promise<string> => {
-      bridge.emitStatus('召回相关记忆...')
-      const relevantMemory = await recallRelevantMemory(input)
-      if (relevantMemory && relevantMemory !== lastRecall) {
-        bridge.emitRecall(relevantMemory)
-        lastRecall = relevantMemory
-      }
-      bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
-      return buildSystemPrompt(relevantMemory)
-    }
+    // Recall once per user input (not per inner turn) — input doesn't change inside the loop,
+    // and Haiku calls are cheap but still add up across 10+ tool iterations.
+    bridge.emitStatus('召回相关记忆...')
+    const relevantMemory = await recallRelevantMemory(input)
+    if (relevantMemory) bridge.emitRecall(relevantMemory)
+    bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
+
+    const buildSystem = (): string => buildSystemPrompt(relevantMemory)
 
     await runAgentLoopStream({
       client,

@@ -1,6 +1,29 @@
 import { createClient } from '../client.js'
 import { readCategory, writeCategory, MemoryCategory } from './memory.js'
 
+const MAX_ENTRIES_PER_CATEGORY = 50
+
+/** 归一化文本：转小写、去标点符号和空格，用于模糊比较 */
+function normalizeText(text: string): string {
+  const withoutPrefix = text.replace(/^-\s*/, '')
+  return withoutPrefix
+    .toLowerCase()
+    .replace(/[^\w\u4e00-\u9fff]/g, '')
+    .trim()
+}
+
+/** 判断两条记忆是否"足够相似"（归一化后相等，或一方包含另一方）。
+ * 语义层面的去重交给 consolidation LLM 处理。 */
+function isSimilar(a: string, b: string): boolean {
+  const na = normalizeText(a)
+  const nb = normalizeText(b)
+  if (!na || !nb) return false
+  if (na === nb) return true
+  // 一方包含另一方（处理措辞微调："不喜欢冗长输出" ≈ "不喜欢冗长的输出"）
+  if (na.includes(nb) || nb.includes(na)) return true
+  return false
+}
+
 const EXTRACT_MODEL = 'claude-haiku-4-5'
 
 const EXTRACT_SYSTEM_PROMPT = `你是记忆抽取助手。从一轮对话中提取值得长期记住的信息。
@@ -93,22 +116,82 @@ export async function extractMemoryFromTurn(
   }
 }
 
-/** 把抽取出的记忆追加到对应分类，去重。返回新增条数。 */
+/** 把抽取出的记忆追加到对应分类，去重（精确匹配 + 模糊匹配）。返回新增条数。 */
 export function appendMemories(items: ExtractedMemory[]): number {
   let added = 0
   for (const item of items) {
-    const existing = readCategory(item.category)
+    const category = item.category
+    const existing = readCategory(category)
     const lines = existing
       .split('\n')
       .map(l => l.trim())
       .filter(l => l.startsWith('- '))
 
     const newEntry = `- ${item.content}`
+
+    // 第一道防御：精确匹配
     if (lines.includes(newEntry)) continue
 
+    // 第二道防御：模糊匹配（归一化后相同或包含）
+    const isDuplicate = lines.some(existingLine => isSimilar(existingLine, newEntry))
+    if (isDuplicate) continue
+
     lines.push(newEntry)
-    writeCategory(item.category, lines.join('\n') + '\n')
+    writeCategory(category, lines.join('\n') + '\n')
     added++
+
+    // 定期压缩：当条目超过上限时，异步触发 LLM 合并
+    if (lines.length > MAX_ENTRIES_PER_CATEGORY) {
+      consolidateCategory(category).catch(err =>
+        console.error(`[extract] consolidate ${category} failed:`, err),
+      )
+    }
   }
   return added
+}
+
+/** 对某个分类做 LLM 批量合并：将语义相似的记忆合并为一条，保留最完整表述。 */
+async function consolidateCategory(category: MemoryCategory): Promise<void> {
+  const raw = readCategory(category)
+  const entries = raw.split('\n').filter(l => l.trim().startsWith('- '))
+  if (entries.length <= MAX_ENTRIES_PER_CATEGORY) return
+
+  const client = createClient()
+  try {
+    const response = await client.messages.create({
+      model: EXTRACT_MODEL,
+      max_tokens: 2048,
+      system: `你是记忆合并助手。将语义重复或高度相似的记忆条目合并为一条，保留最完整的表述。
+要求：
+- 对于每条输出，保持 "- content" 格式
+- 合并后的内容必须涵盖所有原文的关键信息，去掉修饰词
+- 直接输出合并后的条目列表，每行一条，不要任何解释文字
+- 如果所有条目都很独特无需合并，原样输出`,
+      messages: [
+        {
+          role: 'user',
+          content: `请合并以下 ${category} 分类中语义重复的记忆条目（共 ${entries.length} 条），输出精简后的列表：\n\n${entries.join('\n')}`,
+        },
+      ],
+    })
+
+    const textBlock = response.content.find(b => b.type === 'text')
+    const result = textBlock?.text.trim()
+    if (!result) return
+
+    // 只保留符合 "- content" 格式的行
+    const cleaned = result
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.startsWith('- '))
+      .join('\n')
+
+    if (cleaned && cleaned.split('\n').length < entries.length) {
+      writeCategory(category, cleaned + '\n')
+      console.log(`[extract] consolidated ${category}: ${entries.length} → ${cleaned.split('\n').length} entries`)
+    }
+  } catch (err) {
+    console.error(`[extract] consolidate ${category} error:`, err)
+    // 压缩失败不影响已有记忆，只是暂时多些重复条目
+  }
 }

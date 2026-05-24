@@ -59,3 +59,22 @@ export function readAllCategories(): Record<Exclude<MemoryCategory, 'index'>, st
   }
   return result
 }
+
+/** 为 recall 读取所有分类，每个分类最多取最新的 maxPerCategory 条。
+ *  防止记忆膨胀后 recall 的 prompt 过大。 */
+export function readAllCategoriesForRecall(maxPerCategory = 30): Record<Exclude<MemoryCategory, 'index'>, string> {
+  const result = {} as Record<Exclude<MemoryCategory, 'index'>, string>
+  const categories = ['profile', 'project', 'feedback', 'reference'] as const
+  for (const cat of categories) {
+    const raw = readCategory(cat)
+    if (!raw.trim()) {
+      result[cat] = ''
+      continue
+    }
+    // 只保留最新的 maxPerCategory 条（文件尾部是最新的）
+    const lines = raw.split('\n').filter(l => l.trim().startsWith('- '))
+    const latest = lines.slice(-maxPerCategory)
+    result[cat] = latest.join('\n')
+  }
+  return result
+}

@@ -1,5 +1,5 @@
 import { createClient } from '../client.js'
-import { readAllCategories } from './memory.js'
+import { readAllCategoriesForRecall } from './memory.js'
 
 const RECALL_MODEL = 'claude-haiku-4-5'
 
@@ -22,8 +22,8 @@ const RECALL_SYSTEM_PROMPT = `你是一个记忆召回助手。你的任务是�
  * @returns 相关的记忆文本片段，若无相关记忆则返回空字符串
  */
 export async function recallRelevantMemory(query: string): Promise<string> {
-  // 1. 读取所有记忆
-  const allMemory = readAllCategories()
+  // 1. 读取所有记忆（每个分类只取最新 30 条，控制 token 成本）
+  const allMemory = readAllCategoriesForRecall(30)
   const hasMemory = Object.values(allMemory).some(v => v.trim().length > 0)
   if (!hasMemory) {
     return ''
