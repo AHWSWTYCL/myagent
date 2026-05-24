@@ -10,7 +10,7 @@ export class ListDirTool extends Tool {
     }
 
     get description(): string {
-        return 'List the contents of a directory. Returns file names, types (file/directory), and sizes.'
+        return 'List the contents of a directory. Shows a file tree with names, types, and sizes.'
     }
 
     get input_schema(): { type: 'object'; properties: object; required: string[] } {
@@ -25,17 +25,27 @@ export class ListDirTool extends Tool {
 
     get parallelSafe(): boolean { return true }
 
+    /** 将字节数转为人类可读格式 */
+    private fmtSize(bytes: number): string {
+        if (bytes < 1024) return `${bytes} B`
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    }
+
     async execute(args: any): Promise<string> {
         const dirPath = args.path ? path.resolve(args.path) : cwd()
 
         const workDir = cwd()
         if (!dirPath.startsWith(workDir + path.sep) && dirPath !== workDir) {
-            return JSON.stringify({ error: `Path ${args.path} is outside the working directory` })
+            return `error: path "${args.path}" is outside the working directory`
         }
 
         try {
             const entries = fs.readdirSync(dirPath, { withFileTypes: true })
-            const result = entries.map(entry => {
+
+            // 收集信息：文件名、类型、大小
+            type Entry = { name: string; type: 'file' | 'directory'; size: number | null }
+            const items: Entry[] = entries.map(entry => {
                 const fullPath = path.join(dirPath, entry.name)
                 let size: number | null = null
                 if (entry.isFile()) {
@@ -47,9 +57,35 @@ export class ListDirTool extends Tool {
                     size,
                 }
             })
-            return JSON.stringify(result, null, 2)
+
+            // 排序：目录在前，文件在后，各自按名称排序
+            items.sort((a, b) => {
+                if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+                return a.name.localeCompare(b.name)
+            })
+
+            // 构建树状显示
+            const lines: string[] = []
+            const dirCount = items.filter(i => i.type === 'directory').length
+            const fileCount = items.length - dirCount
+
+            // 标题行：显示目录路径和条目统计
+            const label = dirPath === workDir ? '.' : path.basename(dirPath)
+            lines.push(`${label}/  (${items.length} entries, ${dirCount} dirs, ${fileCount} files)`)
+
+            // 逐项输出，最后一项用 └──，其余用 ├──
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i]
+                const prefix = i === items.length - 1 ? '└── ' : '├── '
+                const namePart = item.type === 'directory' ? `${item.name}/` : item.name
+                const sizePart = item.size !== null ? ` (${this.fmtSize(item.size)})` : ''
+                const typeHint = item.type === 'directory' ? '' : ''
+                lines.push(`${prefix}${namePart}${sizePart}`)
+            }
+
+            return lines.join('\n')
         } catch (err) {
-            return JSON.stringify({ error: `Error listing directory ${dirPath}: ${err}` })
+            return `error: ${err}`
         }
     }
 }
