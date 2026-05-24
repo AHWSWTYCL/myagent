@@ -60,6 +60,16 @@ export class TuiBridge extends EventEmitter {
     this.emit('usage', stats)
   }
 
+  /** Called when context compaction starts or finishes. state='start'|'done'|'micro' */
+  emitCompacting(state: 'start' | 'done' | 'micro', detail?: string) {
+    this.emit('compacting', { state, detail })
+  }
+
+  /** Called after context compaction — resets the token counter in the TUI. */
+  emitUsageReset() {
+    this.emit('usageReset')
+  }
+
   /** Called when relevant memory is recalled for the current query. */
   emitRecall(memory: string) {
     this.emit('recall', memory)

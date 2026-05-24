@@ -13,9 +13,10 @@ console.log = (...args: unknown[]) => {
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from './client.js'
 import { getSystemPrompt } from './prompt/prompt.js'
-import { getMemoryPrompt, readCategory } from './memory/memory.js'
+import { readCategory } from './memory/memory.js'
 import { recallRelevantMemory } from './memory/recall.js'
-import { runAgentLoop, runAgentLoopStream } from './utils/runagent.js'
+import { runAgentLoopStream, UsageAccum } from './utils/runagent.js'
+import { compactMessages, microcompactMessages, estimateTokens, MICRO_COMPACT_TOKEN_THRESHOLD, COMPACT_TOKEN_THRESHOLD } from './utils/compact.js'
 import { ToolRegistrar } from './tools/toolregistrar.js'
 import { HookManager } from './hooks/hook.js'
 import { LoggerHook } from './hooks/loggerhook.js'
@@ -113,10 +114,9 @@ async function executeTool(name: string, input: unknown, skipHooks = false): Pro
 
 // ── Agent state ───────────────────────────────────────────────────────────────
 const MAX_TURNS = 1000
-const MEMORY_CONSOLIDATE_THRESHOLD = 250
-const MEMORY_KEEP_RECENT = 100
 const messages: Anthropic.MessageParam[] = []
 let agentRunning = false
+let lastUsage: UsageAccum | null = null
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 const commandRegistry = new CommandRegistry()
@@ -137,26 +137,24 @@ function buildSystemPrompt(memoryFragment: string): string {
   return `${withAgents}${skillManager.buildPromptFragment()}`
 }
 
-async function consolidateMemory(): Promise<boolean> {
-  bridge.emitStatus('整理记忆...')
-  const indexBefore = readCategory('index')
+async function compactIfNeeded(): Promise<void> {
+  const tokenCount = lastUsage ? lastUsage.inputTokens : estimateTokens(messages)
 
-  const historyText = messages
-    .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
-    .join('\n')
-
-  await runAgentLoop({
-    client,
-    model: 'claude-sonnet-4-6',
-    system: getMemoryPrompt(),
-    tools: toolRegistrar.getAllTools(),
-    messages: [{ role: 'user', content: `以下是最近的对话记录，请整理：\n\n${historyText}` }],
-    maxTurns: MAX_TURNS,
-    executeTool: (name, input) => executeTool(name, input, true),
-  })
-
-  const indexAfter = readCategory('index')
-  return indexAfter !== indexBefore
+  if (tokenCount >= COMPACT_TOKEN_THRESHOLD) {
+    bridge.emitCompacting('start', `${tokenCount.toLocaleString()} tokens`)
+    const compacted = await compactMessages(client, 'claude-sonnet-4-6', messages)
+    messages.splice(0, messages.length, ...compacted)
+    lastUsage = null
+    bridge.emitUsageReset()
+    bridge.emitCompacting('done', `${tokenCount.toLocaleString()} tokens → ${messages.length} 条消息`)
+  } else if (tokenCount >= MICRO_COMPACT_TOKEN_THRESHOLD) {
+    const freed = microcompactMessages(messages)
+    if (freed > 0) {
+      lastUsage = null
+      bridge.emitUsageReset()
+      bridge.emitCompacting('micro', `释放约 ${freed.toLocaleString()} tokens`)
+    }
+  }
 }
 
 export async function runTurn(input: string, signal?: AbortSignal): Promise<void> {
@@ -203,35 +201,16 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
         })
       },
       onToolStart: (name, input) => bridge.emitToolStart(name, toolLabel(name, input as Record<string, unknown>)),
-      onUsage: stats => bridge.emitUsage(stats),
+      onUsage: stats => {
+        lastUsage = stats
+        bridge.emitUsage(stats)
+      },
     })
 
-    if (messages.length >= MEMORY_CONSOLIDATE_THRESHOLD) {
-      const ok = await consolidateMemory()
-      if (ok) trimMessagesKeepingRecent(messages, MEMORY_KEEP_RECENT)
-    }
+    await compactIfNeeded()
   } finally {
     agentRunning = false
   }
-}
-
-function isToolResultMessage(m: Anthropic.MessageParam): boolean {
-  if (m.role !== 'user' || typeof m.content === 'string') return false
-  return m.content.some(b => b.type === 'tool_result')
-}
-
-function trimMessagesKeepingRecent(messages: Anthropic.MessageParam[], keepRecent: number): void {
-  if (messages.length <= keepRecent) return
-  let cut = messages.length - keepRecent
-  // Walk forward to a clean boundary: a user message whose content is NOT tool_result.
-  // This avoids orphaning a tool_use (in an earlier assistant msg) from its tool_result.
-  while (cut < messages.length) {
-    const m = messages[cut]
-    if (m.role === 'user' && !isToolResultMessage(m)) break
-    cut++
-  }
-  if (cut >= messages.length) return
-  messages.splice(0, cut)
 }
 
 function toolLabel(name: string, args: Record<string, unknown>): string {

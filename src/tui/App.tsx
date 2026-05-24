@@ -55,6 +55,7 @@ export function App({ bridge, commandParser, runTurn }: Props) {
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
   const [autoMode, setAutoMode] = useState(false)
+  const [compactingState, setCompactingState] = useState<'idle' | 'running' | 'micro'>('idle')
   // 临时提示条（footer 上方淡出消息），不进聊天历史
   const [transientHint, setTransientHint] = useState('')
   const transientHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -143,6 +144,23 @@ export function App({ bridge, commandParser, runTurn }: Props) {
     bridge.on('usage', (stats: UsageStats) => {
       setUsage(stats)
       setToolRunning('')
+    })
+
+    bridge.on('usageReset', () => {
+      setUsage(null)
+    })
+
+    bridge.on('compacting', ({ state, detail }: { state: 'start' | 'done' | 'micro'; detail?: string }) => {
+      if (state === 'start') {
+        setCompactingState('running')
+      } else if (state === 'micro') {
+        setCompactingState('micro')
+        setTimeout(() => setCompactingState('idle'), 3000)
+        setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `✦ microcompact  ${detail ?? ''}` }])
+      } else {
+        setCompactingState('idle')
+        setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `✦ 上下文已压缩  ${detail ?? ''}` }])
+      }
     })
 
     bridge.on('recall', (memory: string) => {
@@ -580,6 +598,17 @@ export function App({ bridge, commandParser, runTurn }: Props) {
         <Box>
           <Text color="gray" dimColor>  {SPINNER_FRAMES[spinnerFrame]} {status}</Text>
           {elapsedSec > 0 ? <Text color="gray" dimColor>{`  ${elapsedSec}s`}</Text> : null}
+        </Box>
+      ) : null}
+
+      {compactingState === 'running' ? (
+        <Box>
+          <Text color="blue">  {SPINNER_FRAMES[spinnerFrame]} </Text>
+          <Text color="blue">compacting context...</Text>
+        </Box>
+      ) : compactingState === 'micro' ? (
+        <Box>
+          <Text color="blue" dimColor>  ✦ microcompact done</Text>
         </Box>
       ) : null}
 

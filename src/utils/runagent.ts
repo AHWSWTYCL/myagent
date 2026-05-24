@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { withRetry } from '../client.js'
 
 export interface RunAgentOptions {
   client: Anthropic
@@ -33,13 +34,13 @@ export async function runAgentLoop(opts: RunAgentOptions): Promise<Anthropic.Mes
 
   for (let turn = 0; turn < maxTurns; turn++) {
     const resolvedSystem = await resolveSystem(system)
-    const response = await client.messages.create({
+    const response = await withRetry(() => client.messages.create({
       model,
       max_tokens: 4096,
       tools,
       messages,
       system: resolvedSystem,
-    })
+    }))
     messages.push({ role: 'assistant', content: response.content })
     if (response.stop_reason !== 'tool_use') break
 
@@ -112,13 +113,13 @@ export async function runAgentLoopStream(
     if (signal?.aborted) break
 
     const resolvedSystem = await resolveSystem(system)
-    const stream = client.messages.stream({
+    const stream = await withRetry(() => client.messages.stream({
       model,
       max_tokens: 4096,
       tools,
       messages,
       system: resolvedSystem,
-    })
+    }))
 
     signal?.addEventListener('abort', () => stream.abort(), { once: true })
 
