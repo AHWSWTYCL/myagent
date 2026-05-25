@@ -22,6 +22,8 @@ export interface ChoiceQuestion {
   id: string
   prompt: string
   options: { value: string; label: string }[]
+  /** If true, an "Other…" option is appended. When selected, the user can type a custom value. */
+  allowOther?: boolean
 }
 
 export type ChoiceResult =

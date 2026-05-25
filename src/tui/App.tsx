@@ -8,6 +8,7 @@ import type { DiffLine } from '../tools/edittool.js'
 import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
 import { MarkdownRenderer, StreamingText } from './MarkdownRenderer.js'
+import { Banner } from './banner.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 
@@ -53,6 +54,10 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   const [choiceSelections, setChoiceSelections] = useState<number[]>([])
   // 焦点行：0..n-1 是问题，n 是 Submit 按钮，n+1 是 Cancel 按钮
   const [choiceFocus, setChoiceFocus] = useState(0)
+  // "Other…" 自定义输入
+  const [choiceCustomActive, setChoiceCustomActive] = useState<number | null>(null) // 正在输入的问题索引
+  const [choiceCustomInput, setChoiceCustomInput] = useState('') // 输入草稿
+  const [choiceCustomValues, setChoiceCustomValues] = useState<Record<number, string>>({}) // 已提交的自定义值
   const [promptText, setPromptText] = useState('')
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
@@ -199,6 +204,9 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       setChoiceQuestions(questions)
       setChoiceSelections(questions.map(() => 0))
       setChoiceFocus(0)
+      setChoiceCustomActive(null)
+      setChoiceCustomInput('')
+      setChoiceCustomValues({})
       setInputMode('choice')
       pendingResolveRef.current = resolve as (v: any) => void
     })
@@ -277,6 +285,24 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     const submitRow = choiceQuestions.length
     const cancelRow = choiceQuestions.length + 1
 
+    // ── 辅助函数 ──────────────────────────────────────────────────────
+    /** 某个问题的有效选项数（含虚拟 "Other…" 项） */
+    function optCount(qi: number): number {
+      const q = choiceQuestions[qi]
+      return q.options.length + (q.allowOther ? 1 : 0)
+    }
+    /** 当前选中是否为 "Other…" */
+    function isOther(qi: number): boolean {
+      const q = choiceQuestions[qi]
+      return q.allowOther && choiceSelections[qi] === q.options.length
+    }
+    /** 获取某个问题的最终答案值 */
+    function answerFor(qi: number): string {
+      const q = choiceQuestions[qi]
+      if (isOther(qi)) return `__other__:${choiceCustomValues[qi] ?? ''}`
+      return q.options[choiceSelections[qi]].value
+    }
+
     const finish = (result: ChoiceResult) => {
       pendingResolveRef.current?.(result)
       pendingResolveRef.current = null
@@ -284,6 +310,33 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       setChoiceQuestions([])
       setChoiceSelections([])
       setChoiceFocus(0)
+      setChoiceCustomActive(null)
+      setChoiceCustomInput('')
+      setChoiceCustomValues({})
+    }
+
+    // ── 自定义文本输入模式 ────────────────────────────────────────────
+    if (choiceCustomActive !== null) {
+      if (_input && !key.escape && !key.return && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow && !key.tab) {
+        setChoiceCustomInput(prev => prev + _input)
+        return
+      }
+      if (key.backspace || (key.ctrl && _input === 'h')) {
+        setChoiceCustomInput(prev => prev.slice(0, -1))
+        return
+      }
+      if (key.return) {
+        setChoiceCustomValues(prev => ({ ...prev, [choiceCustomActive]: choiceCustomInput }))
+        setChoiceCustomActive(null)
+        setChoiceCustomInput('')
+        return
+      }
+      if (key.escape) {
+        setChoiceCustomActive(null)
+        setChoiceCustomInput('')
+        return
+      }
+      return // 其他按键在输入模式下忽略
     }
 
     if (key.escape) {
@@ -302,11 +355,11 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
     // 焦点在问题行：←/→ 切换选项
     if (choiceFocus < choiceQuestions.length) {
-      const optCount = choiceQuestions[choiceFocus].options.length
+      const count = optCount(choiceFocus)
       if (key.leftArrow) {
         setChoiceSelections(prev => {
           const next = [...prev]
-          next[choiceFocus] = (next[choiceFocus] - 1 + optCount) % optCount
+          next[choiceFocus] = (next[choiceFocus] - 1 + count) % count
           return next
         })
         return
@@ -314,14 +367,18 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       if (key.rightArrow) {
         setChoiceSelections(prev => {
           const next = [...prev]
-          next[choiceFocus] = (next[choiceFocus] + 1) % optCount
+          next[choiceFocus] = (next[choiceFocus] + 1) % count
           return next
         })
         return
       }
-      // 在问题行按 Enter 等同于跳到 Submit 行
       if (key.return) {
-        setChoiceFocus(submitRow)
+        if (isOther(choiceFocus)) {
+          setChoiceCustomActive(choiceFocus)
+          setChoiceCustomInput('')
+        } else {
+          setChoiceFocus(submitRow)
+        }
         return
       }
     } else {
@@ -333,9 +390,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       if (key.return) {
         if (choiceFocus === submitRow) {
           const answers: Record<string, string> = {}
-          choiceQuestions.forEach((q, i) => {
-            answers[q.id] = q.options[choiceSelections[i]].value
-          })
+          choiceQuestions.forEach((_q, i) => { answers[_q.id] = answerFor(i) })
           finish({ status: 'submitted', answers })
         } else {
           finish({ status: 'cancelled' })
@@ -659,6 +714,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
   return (
     <Box flexDirection="column">
+      <Banner />
       <Static items={messages}>
         {(msg) => renderMessage(msg)}
       </Static>
@@ -725,21 +781,35 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
               {choiceQuestions.map((q, qi) => {
                 const focused = choiceFocus === qi
                 const selected = choiceSelections[qi] ?? 0
+                const effectiveOpts = q.allowOther
+                  ? [...q.options, { value: '__other__', label: 'Other (type custom value)' }]
+                  : q.options
                 return (
                   <Box key={q.id} flexDirection="column" marginTop={1}>
                     <Text color={focused ? 'cyan' : 'white'} bold={focused}>
                       {focused ? '▸ ' : '  '}{qi + 1}. {q.prompt}
                     </Text>
-                    <Box marginLeft={4}>
-                      {q.options.map((opt, oi) => {
-                        const isSel = oi === selected
-                        return (
-                          <Text key={opt.value} color={isSel ? (focused ? 'cyan' : 'green') : 'gray'} bold={isSel}>
-                            {isSel ? '[●] ' : '[ ] '}{opt.label}
-                            {oi < q.options.length - 1 ? '   ' : ''}
-                          </Text>
-                        )
-                      })}
+                    <Box marginLeft={4} flexDirection="column">
+                      <Box>
+                        {effectiveOpts.map((opt, oi) => {
+                          const isSel = oi === selected
+                          return (
+                            <Text key={opt.value} color={isSel ? (focused ? 'cyan' : 'green') : 'gray'} bold={isSel}>
+                              {isSel ? '[●] ' : '[ ] '}{opt.label}
+                              {oi < effectiveOpts.length - 1 ? '   ' : ''}
+                            </Text>
+                          )
+                        })}
+                      </Box>
+                      {/* "Other…" 自定义输入框 */}
+                      {choiceCustomActive === qi ? (
+                        <Box marginTop={1}>
+                          <Text color="cyan">  Type: </Text>
+                          <Text color="white">{choiceCustomInput}</Text>
+                          <Text color="cyan">▎</Text>
+                          <Text color="gray" dimColor>  Enter confirm  Esc cancel</Text>
+                        </Box>
+                      ) : null}
                     </Box>
                   </Box>
                 )
@@ -755,7 +825,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
                   )
                 })}
               </Box>
-              <Text color="gray" dimColor>↑↓ row  ←→ option/button  Enter confirm  Esc cancel</Text>
+              <Text color="gray" dimColor>↑↓ row  ←→ option/button  Enter confirm/type  Esc cancel</Text>
             </Box>
           ) : (
             <Box>

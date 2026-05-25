@@ -51,6 +51,7 @@ export class ChoiceTool extends Tool {
                   required: ['value', 'label'],
                 },
               },
+              allowOther: { type: 'boolean', description: 'If true, an "Other…" option is appended for custom input.' },
             },
             required: ['id', 'prompt', 'options'],
           },
