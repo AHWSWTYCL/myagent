@@ -11,6 +11,8 @@ import type { FileAttachment } from '../utils/attachments.js'
 import { parseAttachments, buildUserContent, autoPrefixAttachments } from '../utils/attachments.js'
 import { MarkdownRenderer, StreamingText } from './MarkdownRenderer.js'
 import { Banner } from './banner.js'
+import { McpStatusPanel } from './McpStatusPanel.js'
+import type { MCPServerInfo } from '../mcp/mcpmanager.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 
@@ -94,6 +96,9 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
   const [attachmentErrors, setAttachmentErrors] = useState<string[]>([])
   const pendingAttachmentCheckRef = useRef<string | null>(null) // 防止异步竞态
+
+  // ── MCP 状态 ─────────────────────────────────────────────────────────
+  const [mcpServers, setMcpServers] = useState<MCPServerInfo[]>([])
 
   historyIndexRef.current = historyIndex
 
@@ -188,6 +193,10 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
     bridge.on('recall', (memory: string) => {
       setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `[recalled memory]\n${memory}` }])
+    })
+
+    bridge.on('mcp-status', (servers: MCPServerInfo[]) => {
+      setMcpServers(servers)
     })
 
     bridge.on('autoModeChange', (enabled: boolean) => {
@@ -969,24 +978,29 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
       {/* Footer */}
       <Box justifyContent="space-between" paddingX={1}>
-        <Text color="gray" dimColor>
+        {mcpServers.length > 0 ? (
+          <McpStatusPanel serverInfos={mcpServers} />
+        ) : null}
+        <Box>
+          <Text color="gray" dimColor>
           {hasSuggestions
             ? '↑↓ navigate  Tab/→ accept  Esc close  Enter execute'
             : '↑↓ history  @file  /help  Shift+Tab auto  Ctrl+U clear  Ctrl+C ' + (isProcessing ? 'cancel' : 'exit×2')}
-        </Text>
-        <Box>
-          {autoMode ? (
-            <Text color="green" bold>AUTO  </Text>
-          ) : null}
-          {usage ? (
-            <Text color="gray" dimColor>
-              {(() => {
-                const total = usage.inputTokens + usage.cacheReadTokens
-                const pct = Math.min(100, Math.round((total / MAX_CONTEXT) * 100))
-                return `ctx ${pct}% (${fmtTokens(total)}/${fmtTokens(MAX_CONTEXT)})  out ${fmtTokens(usage.outputTokens)}`
-              })()}
-            </Text>
-          ) : null}
+          </Text>
+          <Box>
+            {autoMode ? (
+              <Text color="green" bold>AUTO  </Text>
+            ) : null}
+            {usage ? (
+              <Text color="gray" dimColor>
+                {(() => {
+                  const total = usage.inputTokens + usage.cacheReadTokens
+                  const pct = Math.min(100, Math.round((total / MAX_CONTEXT) * 100))
+                  return `ctx ${pct}% (${fmtTokens(total)}/${fmtTokens(MAX_CONTEXT)})  out ${fmtTokens(usage.outputTokens)}`
+                })()}
+              </Text>
+            ) : null}
+          </Box>
         </Box>
       </Box>
     </Box>

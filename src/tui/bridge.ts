@@ -2,6 +2,7 @@ import EventEmitter from 'events'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { DiffLine } from '../tools/edittool.js'
 import type { ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
+import type { MCPServerInfo } from '../mcp/mcpmanager.js'
 
 export class TuiBridge extends EventEmitter {
   private _autoMode = false
@@ -79,6 +80,11 @@ export class TuiBridge extends EventEmitter {
   /** Called when relevant memory is recalled for the current query. */
   emitRecall(memory: string) {
     this.emit('recall', memory)
+  }
+
+  /** Called when MCP server status changes. */
+  emitMcpStatus(servers: MCPServerInfo[]) {
+    this.emit('mcp-status', servers)
   }
 
 }

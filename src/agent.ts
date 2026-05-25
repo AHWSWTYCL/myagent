@@ -38,6 +38,8 @@ import { TokenStatsCommand } from './commands/tokenstatscommand.js'
 import { SchedulerTool } from './scheduler/schedulertool.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
+import { MCPManager } from './mcp/mcpmanager.js'
+import { handleMCPCommand } from './commands/mcpcommand.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -86,6 +88,12 @@ agentTool.setExecutionContext({
   emitLine: line => bridge.emitMessage('system', line),
 })
 
+// ── MCP Manager ───────────────────────────────────────────────────────────────
+const mcpManager = new MCPManager()
+mcpManager.setRegistrar(toolRegistrar)
+mcpManager.onStatusChange((infos) => bridge.emitMcpStatus(infos))
+await mcpManager.startAll()
+
 // ── Hooks ─────────────────────────────────────────────────────────────────────
 const hookManager = new HookManager()
 hookManager.register(new LoggerHook(bridge))
@@ -98,10 +106,22 @@ bridge.on('autoModeChange', (enabled: boolean) => {
   permissionHook.setAutoMode(enabled, autoPermissionAgent)
 })
 
-// ── ! 命令：执行 bash 并推入 messages (Claude Code 模式) ───────────
+// ── ! 命令：执行 bash / !mcp 并推入 messages (Claude Code 模式) ───
 // 复用 toolRegistry 中的 BashTool（和 LLM 调用的同个工具），而非另起 execSync。
 // 结果以 XML 标签格式推入 messages 供后续 LLM 回合引用，本身不触发 LLM query。
+// !mcp 命令被拦截路由到 MCP 命令处理器。
 export async function runBash(cmd: string): Promise<string> {
+  // !mcp 命令拦截
+  if (cmd.trim().toLowerCase().startsWith('mcp')) {
+    const args = cmd.trim().slice(3).trim()
+    const result = await handleMCPCommand(args, mcpManager)
+    messages.push(
+      { role: 'user', content: `<mcp-cmd>${args}</mcp-cmd>` },
+      { role: 'user', content: `<mcp-result>\n${result}\n</mcp-result>` },
+    )
+    return result
+  }
+
   const tool = toolRegistrar.getTool('bash')
   if (!tool) return 'Error: Bash tool not found'
   // 跳过权限检查：用户主动输入 ! 命令即已授权
