@@ -7,6 +7,8 @@ import type { TuiBridge } from './bridge.js'
 import type { DiffLine } from '../tools/edittool.js'
 import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
+import type { FileAttachment } from '../utils/attachments.js'
+import { parseAttachments, buildUserContent, autoPrefixAttachments } from '../utils/attachments.js'
 import { MarkdownRenderer, StreamingText } from './MarkdownRenderer.js'
 import { Banner } from './banner.js'
 
@@ -15,7 +17,7 @@ type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 interface Props {
   bridge: TuiBridge
   commandParser: CommandParser
-  runTurn: (input: string, signal?: AbortSignal) => Promise<void>
+  runTurn: (input: string | any[], signal?: AbortSignal) => Promise<void>
   runBash: (cmd: string) => Promise<string>
 }
 
@@ -87,6 +89,11 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
   // ── Edit diff 状态 ──────────────────────────────────────────────────
   const [editDiffs, setEditDiffs] = useState<Array<{ id: string; filePath: string; lines: DiffLine[]; additions: number; removals: number }>>([])
+
+  // ── 附件状态 ────────────────────────────────────────────────────────
+  const [attachments, setAttachments] = useState<FileAttachment[]>([])
+  const [attachmentErrors, setAttachmentErrors] = useState<string[]>([])
+  const pendingAttachmentCheckRef = useRef<string | null>(null) // 防止异步竞态
 
   historyIndexRef.current = historyIndex
 
@@ -499,11 +506,58 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     clearSuggestions()
   }
 
+  // ── 快速预检：输入中是否包含疑似文件路径（同步，无 I/O） ────────
+
+  function looksLikeFilePath(value: string): boolean {
+    return value.split(/\s+/).some(token => {
+      if (token.length < 2 || token.startsWith('@')) return false
+      const stripped = token.replace(/^['"]|['"]$/g, '')
+      return /^(\/|~\/|\.\/|\.\.\/)/.test(stripped)
+    })
+  }
+
+  // ── 附件解析（仅当输入包含 @ 时） ─────────────────────────────
+
+  async function parseAttachmentsFromInput(value: string) {
+    if (!value.includes('@') || value.trim().startsWith('/') || value.trim().startsWith('!')) {
+      setAttachments([])
+      setAttachmentErrors([])
+      return
+    }
+
+    try {
+      const { cleaned, attachments: newAtts, errors: newErrors } = await parseAttachments(value)
+      setAttachments(newAtts)
+      setAttachmentErrors(newErrors)
+    } catch {
+      // 解析中的临时异常忽略
+    }
+  }
+
   // ── 输入变化 ──────────────────────────────────────────────────────
 
   const handleInputChange = useCallback((value: string) => {
     setInputValue(value)
     updateSuggestions(value)
+
+    // 记录当前 value，后续异步回调据此判断是否已过期
+    pendingAttachmentCheckRef.current = value
+
+    // 快速预检：只有包含 @ 或疑似文件路径时才做异步 I/O
+    if (value.includes('@') || looksLikeFilePath(value)) {
+      autoPrefixAttachments(value).then(processed => {
+        // 如果 value 已变更（用户继续输入了），丢弃本次结果防竞态
+        if (pendingAttachmentCheckRef.current !== value) return
+        if (processed !== value) {
+          setInputValue(processed)
+          updateSuggestions(processed)
+        }
+        parseAttachmentsFromInput(processed)
+      })
+    } else {
+      setAttachments([])
+      setAttachmentErrors([])
+    }
   }, [])
 
   const addToHistory = useCallback((text: string) => {
@@ -564,7 +618,43 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     }
 
     addToHistory(trimmed)
-    setMessages(prev => [...prev, { id: nextId(), role: 'user', content: trimmed }])
+
+    // ── 处理附件 ──────────────────────────────────────────────────────
+    // 兜底：确保裸文件路径已被 @ 前缀（防止用户在异步检测完成前按 Enter）
+    // autoPrefixAttachments 对已有 @ 的 token 是 no-op，所以安全
+    const safeValue = await autoPrefixAttachments(trimmed)
+    let userContent: string | any[]
+    let displayText = safeValue
+
+    if (safeValue.includes('@') && !safeValue.startsWith('/') && !safeValue.startsWith('!')) {
+      const { cleaned, attachments: atts, errors: attErrors } = await parseAttachments(safeValue)
+      if (atts.length > 0) {
+        userContent = buildUserContent(cleaned, atts)
+        // 构建显示文本（含附件标记）
+        const attSummary = atts.map(a => `📎 ${a.name} (${a.kind})`).join('  ')
+        displayText = cleaned.trim()
+          ? `${cleaned.trim()}  ${attSummary}`
+          : `[attachments: ${attSummary}]`
+        // 如果部分附件解析失败，附加错误到显示文本
+        if (attErrors.length > 0) {
+          displayText += `  ⚠ ${attErrors.join('; ')}`
+        }
+      } else {
+        // 没有成功解析到附件 — 清理 @token 避免模型看到字面路径
+        // 同时将错误加入消息内容让用户知晓
+        userContent = cleaned || trimmed.replace(/@\S+/g, '').trim()
+        if (!userContent) userContent = '(empty — file not found)'
+        const errorMsg = attErrors.length > 0 ? `[⚠ ${attErrors.join('; ')}]` : `[⚠ file not found]`
+        displayText = `${cleaned || '(empty)'}  ${errorMsg}`
+        setMessages(prev => [...prev, { id: nextId(), role: 'system', content: errorMsg }])
+      }
+    } else {
+      userContent = safeValue
+    }
+
+    setMessages(prev => [...prev, { id: nextId(), role: 'user', content: displayText }])
+    setAttachments([])
+    setAttachmentErrors([])
     setIsProcessing(true)
     setStatus('thinking...')
     streamingRef.current = ''
@@ -574,7 +664,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     abortControllerRef.current = ac
 
     try {
-      await runTurn(trimmed, ac.signal)
+      await runTurn(userContent, ac.signal)
     } catch (err: unknown) {
       const msg = ac.signal.aborted
         ? 'Cancelled.'
@@ -832,17 +922,37 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
               <Text color="gray" dimColor>↑↓ row  ←→ option/button  Enter confirm/type  Esc cancel</Text>
             </Box>
           ) : (
-            <Box>
-              <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : inputValue.startsWith('!') ? 'green' : 'cyan'}>
-                {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : inputValue.startsWith('!') ? <Text bold color="green">$ </Text> : '> '}
-              </Text>
-              <TextInput
-                value={inputValue}
-                onChange={handleInputChange}
-                onSubmit={handleSubmit}
-                focus={!isProcessing || inputMode === 'question'}
-                placeholder={isProcessing ? 'Ctrl+C to cancel…' : ''}
-              />
+            <Box flexDirection="column">
+              {/* 附件指示器 */}
+              {(attachments.length > 0 || attachmentErrors.length > 0) ? (
+                <Box flexDirection="column" marginBottom={1}>
+                  {attachments.map((att, i) => (
+                    <Box key={i}>
+                      <Text color="cyan">  📎 </Text>
+                      <Text color="white">{att.name}</Text>
+                      <Text color="gray">  ({att.kind === 'image' ? '🖼️' : att.kind === 'pdf' ? '📄' : '📝'} {att.kind})</Text>
+                    </Box>
+                  ))}
+                  {attachmentErrors.map((err, i) => (
+                    <Box key={`err-${i}`}>
+                      <Text color="yellow">  ⚠ </Text>
+                      <Text color="yellow" dimColor>{err}</Text>
+                    </Box>
+                  ))}
+                </Box>
+              ) : null}
+              <Box>
+                <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : inputValue.startsWith('!') ? 'green' : 'cyan'}>
+                  {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : inputValue.startsWith('!') ? <Text bold color="green">$ </Text> : '> '}
+                </Text>
+                <TextInput
+                  value={inputValue}
+                  onChange={handleInputChange}
+                  onSubmit={handleSubmit}
+                  focus={!isProcessing || inputMode === 'question'}
+                  placeholder={isProcessing ? 'Ctrl+C to cancel…' : ''}
+                />
+              </Box>
             </Box>
           )}
         </Box>
@@ -862,7 +972,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         <Text color="gray" dimColor>
           {hasSuggestions
             ? '↑↓ navigate  Tab/→ accept  Esc close  Enter execute'
-            : '↑↓ history  /help  Shift+Tab auto  Ctrl+U clear  Ctrl+C ' + (isProcessing ? 'cancel' : 'exit×2')}
+            : '↑↓ history  @file  /help  Shift+Tab auto  Ctrl+U clear  Ctrl+C ' + (isProcessing ? 'cancel' : 'exit×2')}
         </Text>
         <Box>
           {autoMode ? (

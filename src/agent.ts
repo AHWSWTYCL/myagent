@@ -11,6 +11,7 @@ console.log = (...args: unknown[]) => {
 }
 
 import Anthropic from '@anthropic-ai/sdk'
+import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages/messages.js'
 import { createClient } from './client.js'
 import { getSystemPrompt } from './prompt/prompt.js'
 import { readCategory } from './memory/memory.js'
@@ -61,6 +62,7 @@ toolRegistrar.registerTool(new (await import('./tools/globtool.js')).GlobTool())
 toolRegistrar.registerTool(new (await import('./tools/greptool.js')).GrepTool())
 toolRegistrar.registerTool(new (await import('./tools/edittool.js')).EditTool())
 toolRegistrar.registerTool(new (await import('./tools/choicetool.js')).ChoiceTool(qs => bridge.askChoice(qs)))
+toolRegistrar.registerTool(new (await import('./tools/asktool.js')).AskTool(prompt => bridge.askQuestion(prompt)))
 
 // ── Init agent registry & unified agent tool ─────────────────────────────────
 const { AgentRegistry } = await import('./agents/registry.js')
@@ -175,7 +177,21 @@ async function compactIfNeeded(): Promise<void> {
   }
 }
 
-export async function runTurn(input: string, signal?: AbortSignal): Promise<void> {
+/**
+ * Extract plain text from user content for memory recall (strip attachments).
+ */
+function extractRecallText(content: string | Array<ContentBlockParam | Anthropic.TextBlockParam>): string {
+  if (typeof content === 'string') return content
+  return content
+    .filter((b): b is Anthropic.TextBlockParam => b.type === 'text')
+    .map(b => b.text)
+    .join('\n')
+}
+
+export async function runTurn(
+  input: string | Array<ContentBlockParam>,
+  signal?: AbortSignal,
+): Promise<void> {
   // Serialize turns — wait if another turn is already running (e.g. a scheduled task)
   while (agentRunning) {
     await new Promise(r => setTimeout(r, 200))
@@ -183,12 +199,12 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
   agentRunning = true
 
   try {
-    messages.push({ role: 'user', content: input })
+    messages.push({ role: 'user', content: input as Anthropic.MessageParam['content'] })
 
-    // Recall once per user input (not per inner turn) — input doesn't change inside the loop,
-    // and Haiku calls are cheap but still add up across 10+ tool iterations.
+    // Recall once per user input (not per inner turn)
+    const recallText = extractRecallText(input as string | Array<ContentBlockParam>)
     bridge.emitStatus('召回相关记忆...')
-    const relevantMemory = await recallRelevantMemory(input)
+    const relevantMemory = await recallRelevantMemory(recallText)
     if (relevantMemory) bridge.emitRecall(relevantMemory)
     bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
 
@@ -214,7 +230,7 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
         await hookManager.runOnTurnEnd({
           messages: msgs,
           assistantText: text,
-          userInput: input,
+          userInput: recallText,
         })
       },
       onToolStart: (name, input) => bridge.emitToolStart(name, toolLabel(name, input as Record<string, unknown>)),
@@ -226,7 +242,7 @@ export async function runTurn(input: string, signal?: AbortSignal): Promise<void
 
     // Extract memories once per user input (not per inner turn)
     if (fullAssistantText.trim()) {
-      extractMemoryFromTurn(input, fullAssistantText)
+      extractMemoryFromTurn(recallText, fullAssistantText)
         .then(items => {
           if (items.length === 0) return
           const added = appendMemories(items)

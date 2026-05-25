@@ -172,7 +172,7 @@ export class TaskManager {
   private listAllTaskIds(): string[] {
     this.ensureDir()
     return fs
-      .readdirSync(TASKS_DIR)
+      .readdirSync(this.tasksDir)
       .filter(f => f.endsWith('.md') && f !== 'INDEX.md')
       .map(f => f.replace(/\.md$/, ''))
   }

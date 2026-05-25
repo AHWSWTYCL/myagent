@@ -1,4 +1,4 @@
-import { Tool } from './tool.js'
+import { Tool, type ToolPermissionResult } from './tool.js'
 import type { ChoiceQuestion, ChoiceResult } from '../tui/types.js'
 
 interface ChoiceToolArgs {
@@ -62,6 +62,11 @@ export class ChoiceTool extends Tool {
   }
 
   get parallelSafe(): boolean { return false }
+
+  /** ChoiceTool 本身就是用户交互工具，再走权限确认就是循环提问，直接放行。 */
+  async checkPermission(): Promise<ToolPermissionResult> {
+    return { action: 'continue' }
+  }
 
   async execute(args: ChoiceToolArgs): Promise<string> {
     if (!Array.isArray(args.questions) || args.questions.length === 0) {
