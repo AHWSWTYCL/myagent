@@ -29,32 +29,6 @@ export interface UsageAccum {
   cacheWriteTokens: number
 }
 
-export async function runAgentLoop(opts: RunAgentOptions): Promise<Anthropic.MessageParam[]> {
-  const { client, model, system, tools, messages, maxTurns = 20, executeTool, parallelSafeTools } = opts
-
-  for (let turn = 0; turn < maxTurns; turn++) {
-    const resolvedSystem = await resolveSystem(system)
-    const systemParam: Anthropic.TextBlockParam[] = [
-      { type: 'text', text: resolvedSystem, cache_control: { type: 'ephemeral' } },
-    ]
-    const response = await withRetry(() => client.messages.create({
-      model,
-      max_tokens: 8192,
-      tools,
-      messages,
-      system: systemParam,
-    }))
-    messages.push({ role: 'assistant', content: response.content })
-    if (response.stop_reason !== 'tool_use') break
-
-    const toolBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
-    const toolResults = await executeToolsWithParallelism(toolBlocks, executeTool, undefined, parallelSafeTools)
-    messages.push({ role: 'user', content: toolResults })
-  }
-
-  return messages
-}
-
 async function executeToolsWithParallelism(
   blocks: Anthropic.ToolUseBlock[],
   executeTool: (name: string, input: unknown) => Promise<string>,
@@ -111,6 +85,8 @@ export async function runAgentLoopStream(
   } = opts
 
   const cumUsage: UsageAccum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  const MAX_TOKENS_RECOVERY_LIMIT = 3
+  let maxTokensRecoveryCount = 0
 
   for (let turn = 0; turn < maxTurns; turn++) {
     if (signal?.aborted) {
@@ -176,11 +152,24 @@ export async function runAgentLoopStream(
     if (turnText) await onTurnEnd?.(turnText, messages)
 
     if (response.stop_reason !== 'tool_use') {
+      if (response.stop_reason === 'max_tokens') {
+        if (maxTokensRecoveryCount >= MAX_TOKENS_RECOVERY_LIMIT) {
+          console.log(`[queryLoop] exit at turn ${turn}: max_tokens recovery limit reached`)
+          break
+        }
+        maxTokensRecoveryCount++
+        console.log(`[queryLoop] turn ${turn}: max_tokens hit (recovery ${maxTokensRecoveryCount}/${MAX_TOKENS_RECOVERY_LIMIT}), continuing...`)
+        // Inject a continuation prompt so the model knows to resume rather than restart
+        messages.push({ role: 'user', content: 'Output token limit hit. Resume your response directly from where you left off, without repeating anything.' })
+        continue
+      }
+      maxTokensRecoveryCount = 0
       if (response.stop_reason !== 'end_turn') {
         console.log(`[queryLoop] exit at turn ${turn}: stop_reason=${response.stop_reason}`)
       }
       break
     }
+    maxTokensRecoveryCount = 0
 
     const toolBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
     const toolResults = await executeToolsWithParallelism(toolBlocks, executeTool, onToolStart, parallelSafeTools)

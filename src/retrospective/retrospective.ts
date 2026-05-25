@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import Anthropic from '@anthropic-ai/sdk'
-import { runAgentLoop } from '../utils/runagent.js'
+import { runAgentLoopStream } from '../utils/runagent.js'
 import { SkillManager } from '../skills/skillmanager.js'
 import { MemoryTool } from '../tools/memorytool.js'
 import { SkillWriteTool } from '../tools/skillwritetool.js'
@@ -66,7 +66,7 @@ export async function runRetrospective(
     }
   }
 
-  await runAgentLoop({
+  await runAgentLoopStream({
     client,
     model: RETROSPECTIVE_MODEL,
     system: getRetrospectivePrompt(),
