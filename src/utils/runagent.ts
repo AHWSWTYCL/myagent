@@ -39,7 +39,7 @@ export async function runAgentLoop(opts: RunAgentOptions): Promise<Anthropic.Mes
     ]
     const response = await withRetry(() => client.messages.create({
       model,
-      max_tokens: 4096,
+      max_tokens: 8192,
       tools,
       messages,
       system: systemParam,
@@ -113,7 +113,10 @@ export async function runAgentLoopStream(
   const cumUsage: UsageAccum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    if (signal?.aborted) break
+    if (signal?.aborted) {
+      console.log(`[queryLoop] exit: aborted before turn ${turn}`)
+      break
+    }
 
     const resolvedSystem = await resolveSystem(system)
     // Cache the system prompt — it's largely stable across the inner loop
@@ -124,7 +127,7 @@ export async function runAgentLoopStream(
     ]
     const stream = await withRetry(() => client.messages.stream({
       model,
-      max_tokens: 4096,
+      max_tokens: 8192,
       tools,
       messages,
       system: systemParam,
@@ -153,12 +156,16 @@ export async function runAgentLoopStream(
 
     if (onUsage) onUsage({ ...cumUsage })
 
-    if (signal?.aborted) break
+    if (signal?.aborted) {
+      console.log(`[queryLoop] exit: aborted during stream at turn ${turn}`)
+      break
+    }
 
     let response: Anthropic.Message
     try {
       response = await stream.finalMessage()
-    } catch {
+    } catch (err) {
+      console.error(`[queryLoop] exit: stream.finalMessage failed at turn ${turn}:`, err)
       break
     }
     messages.push({ role: 'assistant', content: response.content })
@@ -168,11 +175,20 @@ export async function runAgentLoopStream(
     // extract scheduling, retrospective counting) run before the next iteration.
     if (turnText) await onTurnEnd?.(turnText, messages)
 
-    if (response.stop_reason !== 'tool_use') break
+    if (response.stop_reason !== 'tool_use') {
+      if (response.stop_reason !== 'end_turn') {
+        console.log(`[queryLoop] exit at turn ${turn}: stop_reason=${response.stop_reason}`)
+      }
+      break
+    }
 
     const toolBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
     const toolResults = await executeToolsWithParallelism(toolBlocks, executeTool, onToolStart, parallelSafeTools)
     messages.push({ role: 'user', content: toolResults })
+
+    if (turn === maxTurns - 1) {
+      console.log(`[queryLoop] exit: hit maxTurns=${maxTurns} (model still wanted to call tools)`)
+    }
   }
 
   return messages
