@@ -714,9 +714,13 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
   return (
     <Box flexDirection="column">
-      <Banner />
-      <Static items={messages}>
-        {(msg) => renderMessage(msg)}
+      <Static items={[{ id: '__banner__', role: 'system', content: '' } as ChatMessage, ...messages]}>
+        {(msg) => {
+          if (msg.id === '__banner__') {
+            return <Banner key="__banner__" />
+          }
+          return renderMessage(msg)
+        }}
       </Static>
 
       {streamingText ? (
