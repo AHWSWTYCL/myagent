@@ -11,6 +11,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.2",
     "cron-parser": "^4.9.0",
+    "diff": "^9.0.0",
     "glob": "^11.1.0",
     "ink": "^7.0.3",
     "ink-text-input": "^6.0.0",
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/diff": "^7.0.2",
     "@types/node": "^25.7.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

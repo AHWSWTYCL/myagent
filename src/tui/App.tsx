@@ -4,6 +4,7 @@ import TextInput from 'ink-text-input'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { TuiBridge } from './bridge.js'
+import type { DiffLine } from '../tools/edittool.js'
 import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
 import { MarkdownRenderer, StreamingText } from './MarkdownRenderer.js'
@@ -14,6 +15,7 @@ interface Props {
   bridge: TuiBridge
   commandParser: CommandParser
   runTurn: (input: string, signal?: AbortSignal) => Promise<void>
+  runBash: (cmd: string) => Promise<string>
 }
 
 const ROLE_COLOR: Record<string, string> = {
@@ -34,7 +36,7 @@ const MAX_HISTORY = 100
 const MAX_CONTEXT = 200_000
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-export function App({ bridge, commandParser, runTurn }: Props) {
+export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   const { exit } = useApp()
   const { columns } = useWindowSize()
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -77,6 +79,9 @@ export function App({ bridge, commandParser, runTurn }: Props) {
   const ctrlCTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const nextId = () => String(++idCounter.current)
+
+  // ── Edit diff 状态 ──────────────────────────────────────────────────
+  const [editDiffs, setEditDiffs] = useState<Array<{ id: string; filePath: string; lines: DiffLine[]; additions: number; removals: number }>>([])
 
   historyIndexRef.current = historyIndex
 
@@ -161,6 +166,12 @@ export function App({ bridge, commandParser, runTurn }: Props) {
         setCompactingState('idle')
         setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `✦ 上下文已压缩  ${detail ?? ''}` }])
       }
+    })
+
+    bridge.on('editDiff', ({ filePath, lines, additions, removals }: { filePath: string; lines: DiffLine[]; additions: number; removals: number }) => {
+      const id = nextId()
+      setEditDiffs(prev => [...prev, { id, filePath, lines, additions, removals }])
+      setMessages(prev => [...prev, { id, role: 'tool', content: `◀ Edited ${filePath} (${additions} added, ${removals} removed)` }])
     })
 
     bridge.on('recall', (memory: string) => {
@@ -466,6 +477,32 @@ export function App({ bridge, commandParser, runTurn }: Props) {
     clearSuggestions()
     if (isProcessing) return
 
+    // ! 命令：走 agent 层的 BashTool（和 LLM 调用的同个工具），不走 LLM
+    if (trimmed.startsWith('!')) {
+      const cmd = trimmed.slice(1).trim()
+      if (!cmd) {
+        setMessages(prev => [...prev, { id: nextId(), role: 'system', content: '! 后面需要跟要执行的命令' }])
+        return
+      }
+      addToHistory(trimmed)
+      setMessages(prev => [...prev, { id: nextId(), role: 'user', content: trimmed }])
+      setIsProcessing(true)
+      setToolRunning(`bash  ${cmd}`)
+
+      try {
+        const output = await runBash(cmd)
+        const text = output || '(empty output)'
+        setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: text }])
+        if (text.length > 2000) console.log(`[!] ${cmd}\n${text}`)
+      } catch (err: any) {
+        setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: `Error: ${err.message ?? err}` }])
+      } finally {
+        setToolRunning('')
+        setIsProcessing(false)
+      }
+      return
+    }
+
     if (commandParser.isCommand(trimmed)) {
       await commandParser.dispatch(trimmed)
       return
@@ -511,7 +548,32 @@ export function App({ bridge, commandParser, runTurn }: Props) {
   // ── 消息渲染 ────────────────────────────────────────────────────────
 
   function renderMessage(msg: ChatMessage) {
-    if (msg.role === 'tool' || msg.role === 'system') {
+    // 检查是否是 edit_file 的 diff 消息
+    if (msg.role === 'tool') {
+      const diff = editDiffs.find(d => d.id === msg.id)
+      if (diff) {
+        return (
+          <Box key={msg.id} flexDirection="column">
+            <Box>
+              <Text color="gray">tool  </Text>
+              <Text color="yellow">◀ {diff.filePath}</Text>
+              <Text color="gray">  ({diff.additions} added, {diff.removals} removed)</Text>
+            </Box>
+            <Box paddingLeft={6} marginTop={0}>
+              <DiffView lines={diff.lines} additions={diff.additions} removals={diff.removals} />
+            </Box>
+          </Box>
+        )
+      }
+      return (
+        <Box key={msg.id}>
+          <Text color="gray">{ROLE_LABEL[msg.role]} </Text>
+          <Text color={ROLE_COLOR[msg.role] as any} wrap="wrap">{msg.content}</Text>
+        </Box>
+      )
+    }
+
+    if (msg.role === 'system') {
       return (
         <Box key={msg.id}>
           <Text color="gray">{ROLE_LABEL[msg.role]} </Text>
@@ -571,6 +633,30 @@ export function App({ bridge, commandParser, runTurn }: Props) {
     )
   }
 
+  // ── Diff 渲染组件 ───────────────────────────────────────────────────
+
+  function DiffView({ lines, additions, removals }: { lines: DiffLine[]; additions: number; removals: number }) {
+    return (
+      <Box flexDirection="column">
+        {lines.length > 80 ? (
+          // 太多行时简略展示
+          <Text color="gray">  {additions} added, {removals} removed</Text>
+        ) : (
+          lines.map((line, i) => {
+            const color = line.type === 'add' ? 'green' : line.type === 'remove' ? 'red' : 'gray'
+            const prefix = line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '
+            const lineNum = line.type === 'remove' ? String(line.oldLine ?? '') : String(line.newLine ?? '')
+            return (
+              <Box key={i}>
+                <Text color={color as any}>{prefix} {lineNum.padStart(3)}  {line.content}</Text>
+              </Box>
+            )
+          })
+        )}
+      </Box>
+    )
+  }
+
   return (
     <Box flexDirection="column">
       <Static items={messages}>
@@ -613,7 +699,12 @@ export function App({ bridge, commandParser, runTurn }: Props) {
       ) : null}
 
       {/* Input box */}
-      <Box borderStyle="single" borderColor={inputMode !== 'chat' ? 'yellow' : isProcessing ? 'gray' : 'cyan'} paddingX={1} flexDirection="column">
+      <Box
+        borderStyle="single"
+        borderColor={inputMode !== 'chat' ? 'yellow' : inputValue.startsWith('!') ? 'green' : isProcessing ? 'gray' : 'cyan'}
+        paddingX={1}
+        flexDirection="column"
+      >
         <Box flexDirection="column">
           {inputMode === 'permission' ? (
             <Box flexDirection="column">
@@ -668,8 +759,8 @@ export function App({ bridge, commandParser, runTurn }: Props) {
             </Box>
           ) : (
             <Box>
-              <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : 'cyan'}>
-                {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : '> '}
+              <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : inputValue.startsWith('!') ? 'green' : 'cyan'}>
+                {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : inputValue.startsWith('!') ? <Text bold color="green">$ </Text> : '> '}
               </Text>
               <TextInput
                 value={inputValue}

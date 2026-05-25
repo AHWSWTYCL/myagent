@@ -25,6 +25,10 @@ export class ListDirTool extends Tool {
 
     get parallelSafe(): boolean { return true }
 
+    async checkPermission(_args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
+        return { action: 'continue' }
+    }
+
     /** 将字节数转为人类可读格式 */
     private fmtSize(bytes: number): string {
         if (bytes < 1024) return `${bytes} B`

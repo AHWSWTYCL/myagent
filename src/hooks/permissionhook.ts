@@ -1,5 +1,6 @@
 import { Hook, HookContext, HookResult } from './hook.js'
 import type { AutoPermissionAgent } from './autopermissionagent.js'
+import type { ToolRegistrar } from '../tools/toolregistrar.js'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
@@ -25,8 +26,6 @@ function loadPermissionsConfig(): PermissionsConfig {
     const raw = fs.readFileSync(configPath, 'utf-8')
     return JSON.parse(raw) as PermissionsConfig
   } catch {
-    // 文件不存在或解析失败，返回空配置（不影响正常运行）
-    console.log('[permission] permissions.json not found, skipping rule check')
     return { blacklist: [], whitelist: [] }
   }
 }
@@ -37,6 +36,9 @@ function extractSubject(toolName: string, args: Record<string, string>): string 
     case 'bash':       return args.command ?? null
     case 'write_file': return args.path ?? null
     case 'web_fetch':  return args.url ?? null
+    case 'read_file':  return args.path ?? null
+    case 'list_dir':   return args.path ?? null
+    case 'grep':       return args.pattern ?? null
     default:           return null
   }
 }
@@ -47,7 +49,6 @@ function matchesRule(rule: PermissionRule, toolName: string, subject: string): b
   try {
     return new RegExp(rule.pattern, 'i').test(subject)
   } catch {
-    console.log(`[permission] invalid regex pattern: ${rule.pattern}`)
     return false
   }
 }
@@ -60,12 +61,14 @@ export class PermissionHook implements Hook {
   private autoMode = false
   private autoAgent: AutoPermissionAgent | null = null
   private config: PermissionsConfig
+  private toolRegistrar: ToolRegistrar
 
-  constructor(private askPermission: (prompt: string) => Promise<PermissionAnswer>) {
+  constructor(
+    private askPermission: (prompt: string) => Promise<PermissionAnswer>,
+    toolRegistrar: ToolRegistrar,
+  ) {
     this.config = loadPermissionsConfig()
-    console.log(
-      `[permission] loaded rules — blacklist: ${this.config.blacklist.length}, whitelist: ${this.config.whitelist.length}`
-    )
+    this.toolRegistrar = toolRegistrar
   }
 
   setAutoMode(enabled: boolean, agent?: AutoPermissionAgent) {
@@ -78,28 +81,17 @@ export class PermissionHook implements Hook {
   }
 
   async onToolCall(ctx: HookContext): Promise<HookResult> {
-    const dangerousTools = ['write_file', 'bash', 'web_fetch']
-    if (!dangerousTools.includes(ctx.toolName)) {
-      return { action: 'continue' }
-    }
-
     const args = ctx.toolInput as Record<string, string>
     const subject = extractSubject(ctx.toolName, args)
-    const key = ctx.toolName === 'bash' ? `bash:${args.command}` : `${ctx.toolName}:${subject}`
-
-    const prompt =
-      ctx.toolName === 'bash'
-        ? `Run bash: $ ${args.command}`
-        : ctx.toolName === 'web_fetch'
-        ? `Fetch URL: ${args.url}`
-        : `Write file: ${args.path}`
+    const key = ctx.toolName === 'bash'
+      ? `bash:${args.command}`
+      : `${ctx.toolName}:${subject}`
 
     // ── 1. 黑名单检查（最高优先级，硬性拒绝）────────────────────────────────
     if (subject !== null) {
       for (const rule of this.config.blacklist) {
         if (matchesRule(rule, ctx.toolName, subject)) {
           const reason = rule.reason ?? 'Blocked by blacklist rule'
-          console.log(`[permission] 🚫 blacklist hit — ${prompt} | reason: ${reason}`)
           return { action: 'block', reason }
         }
       }
@@ -109,7 +101,6 @@ export class PermissionHook implements Hook {
     if (subject !== null) {
       for (const rule of this.config.whitelist) {
         if (matchesRule(rule, ctx.toolName, subject)) {
-          console.log(`[permission] ✅ whitelist hit — ${prompt}`)
           return { action: 'continue' }
         }
       }
@@ -117,15 +108,38 @@ export class PermissionHook implements Hook {
 
     // ── 3. session 缓存命中，直接放行 ────────────────────────────────────────
     if (this.sessionAllowed.has(key)) {
-      console.log(`[permission] ✅ session cache hit — ${prompt}`)
       return { action: 'continue' }
     }
 
-    // ── 4. auto mode：交给 AI agent 决策 ─────────────────────────────────────
+    // ── 4. 工具自身的权限检查 ────────────────────────────────────────────────
+    const tool = this.toolRegistrar.getTool(ctx.toolName)
+    if (tool) {
+      const toolResult = await tool.checkPermission(args)
+      if (toolResult.action === 'continue') {
+        // 工具说安全 → 直接放行，跳过 auto/manual 决策
+        return { action: 'continue' }
+      }
+      if (toolResult.action === 'block') {
+        return { action: 'block', reason: toolResult.reason }
+      }
+      // toolResult.action === 'defer' → 继续往下走
+    }
+
+    // 构建给用户的提示
+    const prompt =
+      ctx.toolName === 'bash'
+        ? `Run bash: $ ${args.command}`
+        : ctx.toolName === 'web_fetch'
+        ? `Fetch URL: ${args.url}`
+        : ctx.toolName === 'write_file'
+        ? `Write file: ${args.path}`
+        : `${ctx.toolName}: ${JSON.stringify(args)}`
+
+    // ── 5. auto mode：交给 AI agent 决策 ─────────────────────────────────────
     if (this.autoMode && this.autoAgent) {
       const answer = await this.autoAgent.decide(prompt)
       if (answer === 'no') {
-        // 只有拒绝时才显示，让用户确认
+        // 拒绝时让用户确认
         const userAnswer = await this.askPermission(`[Auto mode denied] ${prompt}`)
         if (userAnswer === 'session') {
           this.sessionAllowed.add(key)
@@ -134,26 +148,20 @@ export class PermissionHook implements Hook {
         if (userAnswer === 'yes') return { action: 'continue' }
         return { action: 'block', reason: 'User denied permission' }
       }
-      // 授权成功 → 静默放行，不在 TUI 显示
+      // 授权成功 → 静默放行
       this.sessionAllowed.add(key)
       return { action: 'continue' }
     }
 
-    // ── 5. 手动模式：询问用户 ─────────────────────────────────────────────────
-    console.log(`[permission] ❓ asking user — ${prompt}`)
+    // ── 6. 手动模式：询问用户 ─────────────────────────────────────────────────
     const answer = await this.askPermission(prompt)
-    console.log(`[permission] user answered: ${answer} — ${prompt}`)
-
     if (answer === 'yes') {
       return { action: 'continue' }
     }
-
     if (answer === 'session') {
       this.sessionAllowed.add(key)
-      console.log(`[permission] 📌 added to session cache — ${key}`)
       return { action: 'continue' }
     }
-
     return { action: 'block', reason: 'User denied permission' }
   }
 

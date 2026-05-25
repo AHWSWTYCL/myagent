@@ -18,6 +18,34 @@ function stripHtml(html: string): string {
     .trim()
 }
 
+// 已知安全的域名——直接放行，不触发权限链
+const SAFE_DOMAINS = [
+  'github.com', 'raw.githubusercontent.com',
+  'stackoverflow.com', 'stackexchange.com',
+  'developer.mozilla.org',  'wiki', 'wikipedia.org',
+  'npmjs.com', 'npmjs.org', 'pypi.org',
+  'docs.', 'learn.microsoft.com',
+  'react.dev', 'nextjs.org', 'vuejs.org',
+  'nodejs.org', 'typescriptlang.org',
+  'deno.land', 'bun.sh', 'rust-lang.org',
+  'docker.com', 'kubernetes.io',
+  'json-schema.org', 'swagger.io',
+  'trpc.io', 'graphql.org',
+  'anthropic.com', 'claude.ai',
+]
+
+// 明显可疑的 URL 模式——直接阻断
+const SUSPICIOUS_PATTERNS = [
+  /^data:/i,                                          // data: URIs
+  /^file:/i,                                          // file: URIs
+  /^javascript:/i,                                    // javascript: URIs
+  /^vbscript:/i,                                      // vbscript: URIs
+  /^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./,        // 内网 IP
+  /^127\./,                                           // localhost
+  /^localhost/i,                                      // localhost 域名
+  /\.(onion|i2p)$/i,                                  // 暗网
+]
+
 export class FetchTool extends Tool {
   get name() { return 'web_fetch' }
 
@@ -36,6 +64,34 @@ export class FetchTool extends Tool {
   }
 
   get parallelSafe() { return true }
+
+  async checkPermission(args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
+    const url = (args.url ?? '') as string
+    if (!url.trim()) return { action: 'defer' }
+
+    // 可疑模式 → 阻断
+    for (const pattern of SUSPICIOUS_PATTERNS) {
+      if (pattern.test(url)) {
+        return { action: 'block', reason: `URL blocked: ${url.match(pattern)?.[0]} URLs are not allowed` }
+      }
+    }
+
+    // 安全域名 → 直接放行
+    try {
+      const parsed = new URL(url)
+      const hostname = parsed.hostname.toLowerCase()
+      for (const domain of SAFE_DOMAINS) {
+        if (domain.endsWith('.') ? hostname.startsWith(domain) : (hostname === domain || hostname.endsWith('.' + domain))) {
+          return { action: 'continue' }
+        }
+      }
+    } catch {
+      // URL 解析失败，交给上层
+    }
+
+    // 未知域名 → 交给上层决定
+    return { action: 'defer' }
+  }
 
   async execute(args: any): Promise<string> {
     const { url } = args

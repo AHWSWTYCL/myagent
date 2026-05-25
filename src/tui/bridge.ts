@@ -1,5 +1,6 @@
 import EventEmitter from 'events'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
+import type { DiffLine } from '../tools/edittool.js'
 import type { ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 
 export class TuiBridge extends EventEmitter {
@@ -70,8 +71,14 @@ export class TuiBridge extends EventEmitter {
     this.emit('usageReset')
   }
 
+  /** Called when an edit_file result is received, with structured diff data. */
+  emitEditDiff(filePath: string, lines: DiffLine[], additions: number, removals: number) {
+    this.emit('editDiff', { filePath, lines, additions, removals })
+  }
+
   /** Called when relevant memory is recalled for the current query. */
   emitRecall(memory: string) {
     this.emit('recall', memory)
   }
+
 }

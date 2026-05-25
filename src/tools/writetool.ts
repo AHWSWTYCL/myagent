@@ -1,7 +1,22 @@
 import fs from 'fs'
 import path from 'path'
+import os from 'os'
 import { cwd } from 'process'
 import { Tool } from "./tool";
+
+// 系统敏感路径前缀——写这些路径直接阻断
+const SENSITIVE_PATH_PREFIXES = [
+    '/etc',
+    '/sys',
+    '/proc',
+    '/dev',
+    '/boot',
+    '/var/log',
+    path.join(os.homedir(), '.ssh'),
+    path.join(os.homedir(), '.aws'),
+    path.join(os.homedir(), '.config'),
+    path.join(os.homedir(), '.gnupg'),
+]
 
 export class WriteTool extends Tool {
 
@@ -22,6 +37,23 @@ export class WriteTool extends Tool {
             },
             required: ['path', 'content'],
         }
+    }
+
+    async checkPermission(args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
+        const filePath = (args.path ?? '') as string
+        if (!filePath.trim()) return { action: 'defer' }
+
+        const resolvedPath = path.resolve(filePath)
+
+        // 系统敏感路径 → 阻断
+        for (const prefix of SENSITIVE_PATH_PREFIXES) {
+            if (resolvedPath === prefix || resolvedPath.startsWith(prefix + path.sep)) {
+                return { action: 'block', reason: `Writing to sensitive path '${prefix}' is not allowed` }
+            }
+        }
+
+        // 项目内文件 → 让上层决定
+        return { action: 'defer' }
     }
 
     get output_schema(): object {

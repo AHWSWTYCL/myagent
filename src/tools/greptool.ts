@@ -27,6 +27,10 @@ export class GrepTool extends Tool {
 
     get parallelSafe(): boolean { return true }
 
+    async checkPermission(_args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
+        return { action: 'continue' }
+    }
+
     async execute(args: any): Promise<string> {
         const { pattern, path: searchPath, recursive = true, case_insensitive = false, include } = args
 

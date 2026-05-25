@@ -27,6 +27,26 @@ const BLACKLIST: { pattern: RegExp; reason: string }[] = [
     { pattern: /(curl|wget)\s+.*\|\s*(ba)?sh/i, reason: 'piping remote scripts to shell is not allowed' },
 ]
 
+// 只读命令前缀——检查到这些命令直接允许，不触发权限链
+const READONLY_PREFIXES = [
+    'ls', 'cat', 'head', 'tail', 'less', 'more', 'echo',
+    'pwd', 'which', 'type', 'where',
+    'git status', 'git log', 'git diff', 'git show', 'git branch', 'git stash list',
+    'git config', 'git remote', 'git ls-files', 'git ls-tree',
+    'npm ls', 'npm list', 'pnpm ls', 'pnpm list', 'yarn why',
+    'find ', 'wc ', 'sort ', 'uniq ', 'od ', 'xxd ', 'hexdump',
+]
+
+function isReadonlyCommand(command: string): boolean {
+    const trimmed = command.trim()
+    for (const prefix of READONLY_PREFIXES) {
+        if (trimmed === prefix || trimmed.startsWith(prefix + ' ')) {
+            return true
+        }
+    }
+    return false
+}
+
 export class BashTool extends Tool {
 
     get name(): string {
@@ -54,6 +74,25 @@ export class BashTool extends Tool {
             }
         }
         return null
+    }
+
+    async checkPermission(args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
+        const command = (args.command ?? '') as string
+        if (!command.trim()) return { action: 'defer' }
+
+        // 只读命令 → 安全，直接放行
+        if (isReadonlyCommand(command)) {
+            return { action: 'continue' }
+        }
+
+        // 黑名单命令 → 阻断
+        const blocked = this.checkBlacklist(command)
+        if (blocked) {
+            return { action: 'block', reason: blocked }
+        }
+
+        // 其他写操作 → 交给上层决定
+        return { action: 'defer' }
     }
 
     async execute(args: any): Promise<string> {

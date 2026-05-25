@@ -1,3 +1,14 @@
+/**
+ * 工具权限检查结果
+ * - continue: 工具自身认为该操作是安全的，跳过后续所有权限检查
+ * - block: 工具自身认为该操作是危险的，直接阻断
+ * - defer: 工具无法判断，交由上层（auto/manual）决定
+ */
+export type ToolPermissionResult =
+  | { action: 'continue' }
+  | { action: 'block'; reason: string }
+  | { action: 'defer' }
+
 export class Tool {
 
   get name(): string {
@@ -29,7 +40,16 @@ export class Tool {
     return false
   }
 
-  async execute(args: any): Promise<string> {
+  /**
+   * 工具自身的权限检查。
+   * 在权限 hook 链中，此方法会在 auto-mode 之前被调用。
+   * 默认行为是 defer（交由上层决策），子类按需覆盖。
+   */
+  async checkPermission(_args: Record<string, unknown>): Promise<ToolPermissionResult> {
+    return { action: 'defer' }
+  }
+
+  async execute(_args: any): Promise<string> {
     throw new Error(`Tool "${this.name}" does not implement execute()`)
   }
 }

@@ -87,7 +87,7 @@ agentTool.setExecutionContext({
 // ── Hooks ─────────────────────────────────────────────────────────────────────
 const hookManager = new HookManager()
 hookManager.register(new LoggerHook(bridge))
-const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt))
+const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt), toolRegistrar)
 const autoPermissionAgent = new AutoPermissionAgent(client)
 hookManager.register(permissionHook)
 hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
@@ -95,6 +95,21 @@ hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
 bridge.on('autoModeChange', (enabled: boolean) => {
   permissionHook.setAutoMode(enabled, autoPermissionAgent)
 })
+
+// ── ! 命令：执行 bash 并推入 messages (Claude Code 模式) ───────────
+// 复用 toolRegistry 中的 BashTool（和 LLM 调用的同个工具），而非另起 execSync。
+// 结果以 XML 标签格式推入 messages 供后续 LLM 回合引用，本身不触发 LLM query。
+export async function runBash(cmd: string): Promise<string> {
+  const tool = toolRegistrar.getTool('bash')
+  if (!tool) return 'Error: Bash tool not found'
+  // 跳过权限检查：用户主动输入 ! 命令即已授权
+  const result = await tool.execute({ command: cmd })
+  messages.push(
+    { role: 'user', content: `<bash-input>${cmd}</bash-input>` },
+    { role: 'user', content: `<bash-stdout>${result}</bash-stdout>` },
+  )
+  return result
+}
 
 async function executeTool(name: string, input: unknown, skipHooks = false): Promise<string> {
   const args = input as Record<string, string>
@@ -252,4 +267,4 @@ const scheduler = new Scheduler(
 scheduler.start()
 
 // ── Render TUI ────────────────────────────────────────────────────────────────
-render(React.createElement(App, { bridge, commandParser, runTurn }))
+render(React.createElement(App, { bridge, commandParser, runTurn, runBash }))

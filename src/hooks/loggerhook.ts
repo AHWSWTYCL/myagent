@@ -1,5 +1,6 @@
 import { Hook, HookContext, HookResult } from './hook.js'
 import type { TuiBridge } from '../tui/bridge.js'
+import type { EditDiffResult } from '../tools/edittool.js'
 
 export class LoggerHook implements Hook {
   name = 'LoggerHook'
@@ -16,6 +17,20 @@ export class LoggerHook implements Hook {
       const path = (ctx.toolInput as Record<string, unknown>)?.path ?? ''
       this.bridge.emitMessage('tool', `◀ read_file  ${path}`)
       return
+    }
+
+    // edit_file：解析结构化的 diff 数据，走专门的 diff 渲染
+    if (ctx.toolName === 'edit_file') {
+      const result = ctx.toolResult ?? ''
+      try {
+        const parsed = JSON.parse(result) as { summary: string; diff: EditDiffResult }
+        if (parsed.diff?.lines) {
+          this.bridge.emitEditDiff(parsed.diff.filePath, parsed.diff.lines, parsed.diff.additions, parsed.diff.removals)
+          return
+        }
+      } catch {
+        // 不是 JSON 格式，回退到普通消息
+      }
     }
 
     const result = ctx.toolResult ?? ''
