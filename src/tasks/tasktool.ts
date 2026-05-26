@@ -151,6 +151,17 @@ export class TaskTool extends Tool {
       lines.push(formatTaskLine(task))
     }
 
+    // Append a structured payload so the TUI can render a Claude Code-style
+    // checklist. The TUI strips this line; the LLM still sees the human text
+    // above. Sentinel format: __TASK_JSON__:{json}
+    const payload = tasks.map(t => ({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      depends_on: t.depends_on,
+    }))
+    lines.push(`__TASK_JSON__:${JSON.stringify(payload)}`)
+
     return lines.join('\n')
   }
 

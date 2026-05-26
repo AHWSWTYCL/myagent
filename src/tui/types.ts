@@ -2,10 +2,35 @@ import type { PermissionAnswer } from '../hooks/permissionhook.js'
 
 export type MessageRole = 'user' | 'agent' | 'tool' | 'system'
 
+export interface ToolCallPayload {
+  /** Tool name, as registered (e.g. "bash", "read_file"). */
+  name: string
+  /** Raw tool input (already JSON-decoded). */
+  input: unknown
+  /** Stringified tool result. */
+  output: string
+  /** Whether the tool reported an error (output starts with "Error:" etc). */
+  isError?: boolean
+}
+
 export interface ChatMessage {
   id: string
   role: MessageRole
   content: string
+  /** Optional structured payload — when present, MessageRow renders via ToolCallView. */
+  toolCall?: ToolCallPayload
+  /**
+   * Per-round exploration tool summary, archived by turnToolReset.
+   * When present, MessageRow renders a TurnSummary component (GlowingDot + Ctrl+O to expand).
+   * Multiple entries = one per LLM round.
+   */
+  explorationSummary?: {
+    readCount: number
+    searchCount: number
+    listCount: number
+    tools: TurnToolItem[]
+    anyError: boolean
+  }
 }
 
 export interface PermissionEvent {
@@ -40,4 +65,22 @@ export interface UsageStats {
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+}
+
+/**
+ * A tool call in progress or completed, within a single user turn.
+ *
+ * Claude Code groups all tool calls from a user's single message into one
+ * visual group, even when they span multiple LLM response rounds. Each item
+ * carries its own status so the group can contain mixed pending/completed state.
+ */
+export interface TurnToolItem {
+  id: string
+  name: string
+  input: unknown
+  output: string
+  isError: boolean
+  isPending: boolean
+  liveOutput?: string
+  isHeartbeating?: boolean
 }

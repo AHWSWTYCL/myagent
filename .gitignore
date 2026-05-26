@@ -3,4 +3,5 @@ dist/
 .env
 *.local
 .claude/
+.myagent/
 playground/

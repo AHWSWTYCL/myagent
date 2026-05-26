@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Box, Text, Static, useInput, useApp, useWindowSize } from 'ink'
-import TextInput from 'ink-text-input'
+import { Box, Text, Static, useInput, useApp } from 'ink'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { TuiBridge } from './bridge.js'
@@ -9,10 +8,18 @@ import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
 import type { FileAttachment } from '../utils/attachments.js'
 import { parseAttachments, buildUserContent, autoPrefixAttachments } from '../utils/attachments.js'
-import { MarkdownRenderer, StreamingText } from './MarkdownRenderer.js'
+import { StreamingText } from './MarkdownRenderer.js'
 import { Banner } from './banner.js'
 import { McpStatusPanel } from './McpStatusPanel.js'
 import type { MCPServerInfo } from '../mcp/mcpmanager.js'
+import { MessageRow } from './MessageRow.js'
+import { Spinner } from './Spinner.js'
+import { PermissionPrompt, ChoicePrompt } from './Prompts.js'
+import { InputBox, Footer, buildCtx } from './InputBox.js'
+import { PendingToolRow, ToolCallView } from './ToolCallView.js'
+import { GroupedToolCallView } from './GroupedToolCallView.js'
+import { TurnSummary, EXPLORATION_TOOLS } from './TurnSummary.js'
+import type { TurnToolItem } from './types.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 
@@ -23,31 +30,78 @@ interface Props {
   runBash: (cmd: string) => Promise<string>
 }
 
-const ROLE_COLOR: Record<string, string> = {
-  user: 'cyan',
-  agent: 'white',
-  tool: 'yellow',
-  system: 'gray',
-}
-
-const ROLE_LABEL: Record<string, string> = {
-  user: 'you  ',
-  agent: 'agent',
-  tool: 'tool ',
-  system: '     ',
-}
-
 const MAX_HISTORY = 100
 const MAX_CONTEXT = 200_000
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
+/**
+ * Build a render plan that preserves the original tool call order.
+ *
+ * Claude Code design: no separate "exploration zone" and "non-exploration zone".
+ * Instead, all tools are rendered in their natural order, with exploration
+ * tools collapsed into a single TurnSummary at the position of the first one.
+ *
+ * Example: if LLM calls bash → read_file → bash → grep → edit
+ *   plan = [
+ *     { type: 'tool-group', items: [bash1] },
+ *     { type: 'summary' },
+ *     { type: 'tool-group', items: [bash2] },     ← NOT merged with bash1
+ *     { type: 'tool-group', items: [edit1] },
+ *   ]
+ *
+ * Consecutive same-name non-exploration tools are still grouped for display
+ * (e.g. bash, bash → Bash ×2), but tools on different sides of the TurnSummary
+ * boundary are NOT merged.
+ */
+type RenderPlanItem =
+  | { type: 'summary' }
+  | { type: 'tool-group'; items: TurnToolItem[] }
+
+function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
+  const plan: RenderPlanItem[] = []
+  let explorationRendered = false
+  let pendingGroup: TurnToolItem[] | null = null
+
+  function flushGroup() {
+    if (pendingGroup && pendingGroup.length > 0) {
+      plan.push({ type: 'tool-group', items: pendingGroup })
+      pendingGroup = null
+    }
+  }
+
+  for (const tool of turnTools) {
+    if (EXPLORATION_TOOLS.has(tool.name)) {
+      if (!explorationRendered) {
+        flushGroup()
+        plan.push({ type: 'summary' })
+        explorationRendered = true
+      }
+      // Skip individual exploration tools — TurnSummary covers them all.
+      continue
+    }
+
+    // Non-exploration tool: group consecutive same-name tools.
+    if (pendingGroup && pendingGroup[0].name === tool.name) {
+      pendingGroup.push(tool)
+    } else {
+      flushGroup()
+      pendingGroup = [tool]
+    }
+  }
+
+  flushGroup()
+  return plan
+}
 
 export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   const { exit } = useApp()
-  const { columns } = useWindowSize()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streamingText, setStreamingText] = useState('')
   const [status, setStatus] = useState('')
-  const [toolRunning, setToolRunning] = useState('')
+  // 当前用户输入轮次内的所有工具调用。
+  // 场景 B：探索工具在每个 LLM round 结束时由 turnToolReset 归档为
+  // TurnSummary 静态消息并从 turnTools 移除。底部 TurnSummary 只展示
+  // 当前 round 中尚未完成的探索工具。非探索工具跨 round 累积。
+  const [turnTools, setTurnTools] = useState<TurnToolItem[]>([])
   const [usage, setUsage] = useState<UsageStats | null>(null)
   const [inputValue, setInputValue] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
@@ -66,14 +120,15 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
   const [autoMode, setAutoMode] = useState(false)
+  // Ctrl+O toggles full output for every tool message in the chat.
+  const [expandAll, setExpandAll] = useState(false)
   const [compactingState, setCompactingState] = useState<'idle' | 'running' | 'micro'>('idle')
   // 临时提示条（footer 上方淡出消息），不进聊天历史
   const [transientHint, setTransientHint] = useState('')
   const transientHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // 历史导航前的草稿（首次按 ↑ 时暂存，回到底时还原）
   const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null)
-  // spinner 帧 + 当前 tool/status 开始时间
-  const [spinnerFrame, setSpinnerFrame] = useState(0)
+  // spinner state lives inside Spinner component now; we just track elapsed time
   const [activityStartedAt, setActivityStartedAt] = useState<number | null>(null)
   const [elapsedSec, setElapsedSec] = useState(0)
   // ── 命令补全相关状态 ──────────────────────────────────────────────
@@ -92,6 +147,13 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   // ── Edit diff 状态 ──────────────────────────────────────────────────
   const [editDiffs, setEditDiffs] = useState<Array<{ id: string; filePath: string; lines: DiffLine[]; additions: number; removals: number }>>([])
 
+  // ── 工具卡片键盘导航 ──────────────────────────────────────────────
+  // 指向 turnTools 中已完成（!isPending）工具项的索引。-1 表示无焦点。
+  // 按 Tab 在已完成工具间循环，Enter 展开/折叠输出。
+  const [focusedToolIdx, setFocusedToolIdx] = useState(-1)
+  // 被单独展开的工具 ID 集合（Ctrl+O 全局展开之外的细粒度控制）
+  const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(new Set())
+
   // ── 附件状态 ────────────────────────────────────────────────────────
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
   const [attachmentErrors, setAttachmentErrors] = useState<string[]>([])
@@ -100,46 +162,27 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   // ── MCP 状态 ─────────────────────────────────────────────────────────
   const [mcpServers, setMcpServers] = useState<MCPServerInfo[]>([])
 
-  // ── 子 agent 实时输出 ────────────────────────────────────────────────
-  const [subAgentOutputs, setSubAgentOutputs] = useState<Record<string, string>>({})
-  const subAgentOutputsRef = useRef<Record<string, string>>({})
-  const activeSubAgentRef = useRef<string | null>(null)
-  // 子 agent 内静默命令的心跳：name -> { elapsedMs, lastBeatAt }。
-  // lastBeatAt 用于让 TUI 在没有新心跳后自动清掉动画（命令真正结束时 BuildBashTool 会停发）。
-  const [subAgentHeartbeats, setSubAgentHeartbeats] = useState<
-    Record<string, { elapsedMs: number; lastBeatAt: number }>
-  >({})
+  // ── 子 agent 实时输出（路由到 pending agent tool 的 liveOutput）────
+
+  // turnToolsRef：同步最新 turnTools，供 useEffect 中的事件回调访问
+  const turnToolsRef = useRef(turnTools)
+  turnToolsRef.current = turnTools
 
   historyIndexRef.current = historyIndex
   // 同步 ref 与 state，供 useInput/handleSubmit 使用最新值避免闭包过期
   isProcessingRef.current = isProcessing
 
-  // ── spinner 帧动画 + 已用秒数 ──────────────────────────────────
-  const isActive = !!toolRunning || (!!status && !toolRunning)
+  // ── activity (tool/status) elapsed seconds ────────────────────────
+  const isActive = turnTools.some(t => t.isPending) || !!status
   useEffect(() => {
     if (!isActive) {
       setActivityStartedAt(null)
       setElapsedSec(0)
-      setSpinnerFrame(0)
       return
     }
     setActivityStartedAt(Date.now())
-    const tick = setInterval(() => {
-      setSpinnerFrame(f => (f + 1) % SPINNER_FRAMES.length)
-      // 清掉 1.5s 内没新心跳的项 —— BuildBashTool 命令一结束就停发心跳
-      setSubAgentHeartbeats(prev => {
-        const now = Date.now()
-        let changed = false
-        const next: typeof prev = {}
-        for (const [k, v] of Object.entries(prev)) {
-          if (now - v.lastBeatAt < 1500) next[k] = v
-          else changed = true
-        }
-        return changed ? next : prev
-      })
-    }, 80)
-    return () => clearInterval(tick)
-  }, [isActive, toolRunning, status])
+    return
+  }, [isActive])
 
   useEffect(() => {
     if (!activityStartedAt) return
@@ -181,44 +224,52 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       setMessages(prev => [...prev, { id: nextId(), role, content }])
     })
 
-    bridge.on('toolStart', ({ name, summary }: { name: string; summary: string }) => {
-      setToolRunning(`${name}  ${summary}`)
+    bridge.on('toolStart', ({ callId, name, input }: { callId: string; name: string; input: unknown }) => {
       setStatus('')
-      // 当主 agent 调用 agent 工具时，记录当前子 agent 名，准备接收实时输出
-      if (name === 'agent') {
-        // summary 格式如 "agent  project_builder  (task)"
-        const parts = summary.split(/\s+/)
-        const agentName = parts[1] || 'sub-agent'
-        activeSubAgentRef.current = agentName
-        // 清空该 agent 的历史积累（重新开始）
-        subAgentOutputsRef.current = { ...subAgentOutputsRef.current, [agentName]: '' }
-        setSubAgentOutputs(prev => ({ ...prev, [agentName]: '' }))
-      }
+      // Tools are about to execute — hide streaming text from the dynamic area
+      // so the display order is: user msg → tools → agent summary text.
+      // The text is preserved in streamingRef and will be archived on onTurnEnd.
+      setStreamingText('')
+      setTurnTools(prev => [...prev, { id: callId, name, input, output: '', isError: false, isPending: true }])
     })
 
     bridge.on('usage', (stats: UsageStats) => {
       setUsage(stats)
-      setToolRunning('')
-      // 子 agent 执行完毕：归档实时输出为静态系统消息
-      const name = activeSubAgentRef.current
-      if (name) {
-        const text = subAgentOutputsRef.current[name]
-        if (text) {
-          setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `[${name}] 输出:\n${text.trimEnd()}` }])
-        }
-        // 清理
-        activeSubAgentRef.current = null
-        subAgentOutputsRef.current = { ...subAgentOutputsRef.current, [name]: '' }
-        setSubAgentOutputs(prev => {
-          const next = { ...prev }
-          delete next[name]
-          return next
-        })
-      }
     })
 
     bridge.on('usageReset', () => {
       setUsage(null)
+    })
+
+    // 场景 B：每个 LLM round 结束时，将本轮的探索工具归档为 TurnSummary 静态消息。
+    // 多条 round = 多条 TurnSummary 出现在 Static 区域。
+    // 归档后从 turnTools 中移除，底部 TurnSummary 不再展示已归档的工具。
+    //
+    // 注意：不依赖 isPending 过滤——toolEnd 已在 turnToolReset 之前触发，
+    // 但 React state 更新是异步的，turnToolsRef.current 可能尚未反映 completed 状态。
+    // 而 turnToolReset 发生时，turnTools 中的所有探索工具必然已经执行完毕，
+    // 所以直接归档全部探索工具是安全的。
+    bridge.on('turnToolReset', () => {
+      const currentTools = turnToolsRef.current
+      const explorationTools = currentTools.filter(t => EXPLORATION_TOOLS.has(t.name))
+      if (explorationTools.length === 0) return
+
+      const readCount = explorationTools.filter(t => t.name === 'read_file').length
+      const searchCount = explorationTools.filter(t => t.name === 'glob' || t.name === 'grep').length
+      const listCount = explorationTools.filter(t => t.name === 'list_dir').length
+      const anyError = explorationTools.some(t => t.isError)
+
+      const msgId = nextId()
+      setMessages(prev => [...prev, {
+        id: msgId,
+        role: 'system',
+        content: '',
+        explorationSummary: { readCount, searchCount, listCount, tools: explorationTools, anyError },
+      }])
+
+      // 从 turnTools 中移除所有探索工具（排除 pending 探索工具，防止 toolEnd
+      // 还没到来时新工具被误删。但理论上 turnToolReset 不在此场景发生。）
+      setTurnTools(prev => prev.filter(t => !EXPLORATION_TOOLS.has(t.name) || t.isPending))
     })
 
     bridge.on('compacting', ({ state, detail }: { state: 'start' | 'done' | 'micro'; detail?: string }) => {
@@ -240,6 +291,31 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       setMessages(prev => [...prev, { id, role: 'tool', content: `◀ Edited ${filePath} (${additions} added, ${removals} removed)` }])
     })
 
+    bridge.on('toolEnd', ({ callId, name, input, output }: { callId: string; name: string; input: unknown; output: string }) => {
+      // Update the turnTools entry: pending → completed
+      const isError = /^Error:/i.test(output) || /^Permission denied/i.test(output)
+      setTurnTools(prev => prev.map(p =>
+        p.id === callId ? { ...p, isPending: false, output, isError } : p
+      ))
+      // edit_file is rendered via editDiff (full diff). Skip the generic entry to avoid duplication.
+      if (name === 'edit_file') return
+      // ask_user / ask_user_choice are interactive — the prompt itself is the visible UI.
+      if (name === 'ask_user' || name === 'ask_user_choice') return
+      // Exploration tools (read_file/list_dir/glob/grep) are rendered by TurnSummary
+      // from turnTools, not as individual messages. This matches Claude Code's
+      // CollapsedReadSearchContent approach — one consolidated group per turn.
+      if (EXPLORATION_TOOLS.has(name)) return
+      // 使用 callId 作为消息 id，这样 <Static> 的过滤条件 (toolIdsInGroup.has(m.id))
+      // 能正确匹配，避免工具在 <Static> 和 turnTools 区域中重复渲染。
+      setMessages(prev => [...prev, {
+        id: callId,
+        role: 'tool',
+        content: '',
+        toolCall: { name, input, output, isError },
+      }])
+      setFocusedToolIdx(-1) // Reset focus when new tools arrive
+    })
+
     bridge.on('recall', (memory: string) => {
       setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `[recalled memory]\n${memory}` }])
     })
@@ -249,27 +325,22 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     })
 
     bridge.on('subAgentDelta', ({ name, delta }: { name: string; delta: string }) => {
-      // Accumulate in ref for reliable reads in other handlers
-      subAgentOutputsRef.current[name] = (subAgentOutputsRef.current[name] ?? '') + delta
-      // Trigger re-render for live display (throttled via React batching)
-      setSubAgentOutputs(prev => ({
-        ...prev,
-        [name]: (prev[name] ?? '') + delta,
-      }))
-      // 一旦有新输出，立刻清掉该 agent 的心跳动画（不沉默了）
-      setSubAgentHeartbeats(prev => {
-        if (!(name in prev)) return prev
-        const next = { ...prev }
-        delete next[name]
-        return next
-      })
+      // Route sub-agent live output to the pending agent tool's liveOutput,
+      // so it renders inline under the tool card header (Claude Code style).
+      setTurnTools(prev => prev.map(p =>
+        p.name === 'agent' && (p.input as Record<string, unknown>)?.agent === name
+          ? { ...p, liveOutput: (p.liveOutput ?? '') + delta, isHeartbeating: false }
+          : p
+      ))
     })
 
     bridge.on('subAgentHeartbeat', ({ name, elapsedMs }: { name: string; elapsedMs: number }) => {
-      setSubAgentHeartbeats(prev => ({
-        ...prev,
-        [name]: { elapsedMs, lastBeatAt: Date.now() },
-      }))
+      // Show heartbeat as a subtle indicator on the pending agent tool
+      setTurnTools(prev => prev.map(p =>
+        p.name === 'agent' && (p.input as Record<string, unknown>)?.agent === name
+          ? { ...p, isHeartbeating: true }
+          : p
+      ))
     })
 
     bridge.on('autoModeChange', (enabled: boolean) => {
@@ -322,6 +393,16 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     showHint(next ? 'Auto mode ON — permissions handled by AI agent.' : 'Auto mode OFF — manual permission prompts restored.')
   })
 
+  // Ctrl+O: toggle expanded view of all tool outputs (Claude Code parity).
+  useInput((input, key) => {
+    if (!key.ctrl || input !== 'o') return
+    setExpandAll(prev => {
+      const next = !prev
+      showHint(next ? 'Tool outputs expanded — Ctrl+O to collapse.' : 'Tool outputs collapsed.')
+      return next
+    })
+  })
+
   // Permission mode: ↑/↓ navigate, Enter confirm, Esc = no
   useInput((input, key) => {
     const answers: PermissionAnswer[] = ['yes', 'session', 'no']
@@ -372,7 +453,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     /** 当前选中是否为 "Other…" */
     function isOther(qi: number): boolean {
       const q = choiceQuestions[qi]
-      return q.allowOther && choiceSelections[qi] === q.options.length
+      return !!(q.allowOther && choiceSelections[qi] === q.options.length)
     }
     /** 获取某个问题的最终答案值 */
     function answerFor(qi: number): string {
@@ -542,6 +623,37 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       return
     }
 
+    // ── 已完成工具的键盘导航 ──────────────────────────────────────────
+    // Tab/Shift+Tab: 在已完成工具间切换焦点
+    // Enter: 展开/折叠输出
+    // 探索类工具（read_file/list_dir/glob/grep）由 TurnSummary + Ctrl+O 统一控制，
+    // 不参与单独的焦点导航。
+    const nonExplorationCompleted = turnTools.filter(t => !t.isPending && !EXPLORATION_TOOLS.has(t.name))
+    const toolCount = nonExplorationCompleted.length
+    if (toolCount > 0) {
+      // Tab → 聚焦下一个工具 / 退出焦点（循环: -1→0→1→...→last→-1）
+      if (key.tab && !key.shift && !inputValue) {
+        setFocusedToolIdx(prev => prev >= toolCount - 1 ? -1 : prev + 1)
+        return
+      }
+      // Shift+Tab → 聚焦上一个工具
+      if (key.tab && key.shift && !inputValue && focusedToolIdx >= 0) {
+        setFocusedToolIdx(prev => (prev - 1 + toolCount) % toolCount)
+        return
+      }
+      // Enter → 当有焦点（且 input 为空）时展开/折叠工具输出
+      if (key.return && !inputValue && focusedToolIdx >= 0 && focusedToolIdx < toolCount) {
+        const tool = nonExplorationCompleted[focusedToolIdx]
+        setExpandedToolIds(prev => {
+          const next = new Set(prev)
+          if (next.has(tool.id)) next.delete(tool.id)
+          else next.add(tool.id)
+          return next
+        })
+        return
+      }
+    }
+
     // Ctrl+U: 清空当前输入
     if (key.ctrl && _input === 'u') {
       setInputValue('')
@@ -671,17 +783,37 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         addToHistory(trimmed)
         setMessages(prev => [...prev, { id: nextId(), role: 'user', content: trimmed }])
         setIsProcessing(true)
-        setToolRunning(`bash  ${cmd}`)
+        const bashCallId = `local-bash-${nextId()}`
+        setTurnTools(prev => [...prev, { id: bashCallId, name: 'bash', input: { command: cmd }, output: '', isError: false, isPending: true }])
 
         try {
           const output = await runBash(cmd)
           const text = output || '(empty output)'
-          setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: text }])
+          const isError = /^Error:/i.test(text)
+          setTurnTools(prev => prev.map(p =>
+            p.id === bashCallId ? { ...p, isPending: false, output: text, isError } : p
+          ))
+          setMessages(prev => [...prev, {
+            id: bashCallId,
+            role: 'tool',
+            content: '',
+            toolCall: { name: 'bash', input: { command: cmd }, output: text, isError },
+          }])
+          setFocusedToolIdx(-1)
           if (text.length > 2000) console.log(`[!] ${cmd}\n${text}`)
         } catch (err: any) {
-          setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: `Error: ${err.message ?? err}` }])
+          const text = `Error: ${err.message ?? err}`
+          setTurnTools(prev => prev.map(p =>
+            p.id === bashCallId ? { ...p, isPending: false, output: text, isError: true } : p
+          ))
+          setMessages(prev => [...prev, {
+            id: bashCallId,
+            role: 'tool',
+            content: '',
+            toolCall: { name: 'bash', input: { command: cmd }, output: text, isError: true },
+          }])
+          setFocusedToolIdx(-1)
         } finally {
-          setToolRunning('')
           setIsProcessing(false)
         }
         return
@@ -730,6 +862,11 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       setMessages(prev => [...prev, { id: nextId(), role: 'user', content: displayText }])
       setAttachments([])
       setAttachmentErrors([])
+      // 场景 B：探索工具已在每次 turnToolReset 时逐 round 归档为 TurnSummary
+      // 静态消息。这里不再重复归档。直接清空上一轮的工具数据开始新轮次。
+      setTurnTools([])
+      setFocusedToolIdx(-1)
+      setExpandedToolIds(new Set())
       setIsProcessing(true)
       setStatus('thinking...')
       streamingRef.current = ''
@@ -743,7 +880,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       } catch (err: unknown) {
         const msg = ac.signal.aborted
           ? 'Cancelled.'
-          : `Error: ${err instanceof Error ? err.message : String(err)}`
+          : `Error: ${err instanceof Error ? err.message + '\n' + (err.stack || '').split('\n').slice(0, 5).join('\n') : String(err)}`
         setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
       } finally {
         const remaining = streamingRef.current
@@ -752,7 +889,9 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         }
         streamingRef.current = ''
         setStreamingText('')
-        setToolRunning('')
+        // turnTools 不清空——保留非探索工具的已完成展示。
+        // 探索工具已在每轮 turnToolReset 时归档，不会出现在这里。
+        // handleSubmit 开始时才会清空 turnTools，开始新轮次。
         abortControllerRef.current = null
         setIsProcessing(false)
         setStatus('')
@@ -762,343 +901,177 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     }
   }
 
-  // ── helpers ──────────────────────────────────────────────────────────────────
-
-  function fmtTokens(n: number): string {
-    return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
-  }
-
   // ── 消息渲染 ────────────────────────────────────────────────────────
+  // Rendering moved to MessageRow / DiffView components.
 
-  function renderMessage(msg: ChatMessage) {
-    // 检查是否是 edit_file 的 diff 消息
-    if (msg.role === 'tool') {
-      const diff = editDiffs.find(d => d.id === msg.id)
-      if (diff) {
-        return (
-          <Box key={msg.id} flexDirection="column">
-            <Box>
-              <Text color="gray">tool  </Text>
-              <Text color="yellow">◀ {diff.filePath}</Text>
-              <Text color="gray">  ({diff.additions} added, {diff.removals} removed)</Text>
-            </Box>
-            <Box paddingLeft={6} marginTop={0}>
-              <DiffView lines={diff.lines} additions={diff.additions} removals={diff.removals} />
-            </Box>
-          </Box>
-        )
-      }
-      return (
-        <Box key={msg.id}>
-          <Text color="gray">{ROLE_LABEL[msg.role]} </Text>
-          <Text color={ROLE_COLOR[msg.role] as any} wrap="wrap">{msg.content}</Text>
-        </Box>
-      )
-    }
+  const ctx = buildCtx(usage, MAX_CONTEXT)
 
-    if (msg.role === 'system') {
-      return (
-        <Box key={msg.id}>
-          <Text color="gray">{ROLE_LABEL[msg.role]} </Text>
-          <Text color={ROLE_COLOR[msg.role] as any} wrap="wrap">{msg.content}</Text>
-        </Box>
-      )
-    }
-
-    return (
-      <Box key={msg.id} flexDirection="column">
-        <Text color="gray">{ROLE_LABEL[msg.role]} </Text>
-        <Box paddingLeft={msg.role === 'agent' ? 6 : 5}>
-          <MarkdownRenderer content={msg.content} />
-        </Box>
-      </Box>
-    )
-  }
-
-  // ── 命令补全建议列表渲染 ──────────────────────────────────────────
-
-  function renderSuggestions() {
-    if (!hasSuggestions) return null
-
-    return (
-      <Box
-        borderStyle="round"
-        borderColor="cyan"
-        marginLeft={2}
-        flexDirection="column"
-        paddingX={1}
-        paddingY={0}
-      >
-        {suggestions.map((s, i) => {
-          const isSelected = i === selectedSuggestionIndex
-          return (
-            <Box key={s.name} flexDirection="column">
-              <Box>
-                <Text color={isSelected ? 'cyan' : 'gray'}>
-                  {isSelected ? '▸ ' : '  '}
-                </Text>
-                <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>
-                  /{s.name}
-                </Text>
-                <Text color="gray">
-                  {'  '}{s.description}
-                </Text>
-              </Box>
-              {isSelected && s.usage ? (
-                <Box paddingLeft={4}>
-                  <Text color="gray" dimColor>usage: {s.usage}</Text>
-                </Box>
-              ) : null}
-            </Box>
-          )
-        })}
-      </Box>
-    )
-  }
-
-  // ── Diff 渲染组件 ───────────────────────────────────────────────────
-
-  function DiffView({ lines, additions, removals }: { lines: DiffLine[]; additions: number; removals: number }) {
-    return (
-      <Box flexDirection="column">
-        {lines.length > 80 ? (
-          // 太多行时简略展示
-          <Text color="gray">  {additions} added, {removals} removed</Text>
-        ) : (
-          lines.map((line, i) => {
-            const color = line.type === 'add' ? 'green' : line.type === 'remove' ? 'red' : 'gray'
-            const prefix = line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '
-            const lineNum = line.type === 'remove' ? String(line.oldLine ?? '') : String(line.newLine ?? '')
-            return (
-              <Box key={i}>
-                <Text color={color as any}>{prefix} {lineNum.padStart(3)}  {line.content}</Text>
-              </Box>
-            )
-          })
-        )}
-      </Box>
-    )
-  }
+  // 当 turnTools 中有工具卡片时，它们在下方区域显示。
+  // 为避免同一工具在 Static 中重复显示，过滤掉对应 toolCall 消息。
+  // 只过滤已完成（isPending=false）的工具——pending 状态的工具还没有消息可过滤。
+  const toolIdsInGroup = new Set(turnTools.filter(Boolean).map(t => t.id))
+  const staticMessages = messages.filter(
+    m => !(m.role === 'tool' && m.toolCall && toolIdsInGroup.has(m.id))
+  )
 
   return (
     <Box flexDirection="column">
-      <Static items={[{ id: '__banner__', role: 'system', content: '' } as ChatMessage, ...messages]}>
+      <Static
+        key={expandAll ? 'static-expanded' : 'static-collapsed'}
+        items={[{ id: "__banner__", role: "system", content: "" } as ChatMessage, ...staticMessages].filter(Boolean)}
+      >
         {(msg) => {
-          if (msg.id === '__banner__') {
-            return <Banner key="__banner__" />
-          }
-          return renderMessage(msg)
+          if (msg.id === '__banner__') return <Banner key="__banner__" />
+          return <MessageRow key={msg.id} msg={msg} diffs={editDiffs} expanded={expandAll} />
         }}
       </Static>
 
-      {streamingText ? (
+      {/* 当前轮次的工具调用（动态区域，不在 Static 中）。
+          方案 B：按 LLM 原始调用顺序渲染，TurnSummary 嵌入到第一个探索工具的位置，
+          而非固定放在顶部。非探索工具跨 round 累积，在 handleSubmit 开始时清空。 */}
+      {turnTools.length > 0 ? (
         <Box flexDirection="column">
-          <Text color="gray">agent </Text>
-          <Box paddingLeft={6}>
-            <StreamingText text={streamingText} showCursor />
+          {buildRenderPlan(turnTools).map((item, idx) => {
+            if (item.type === 'summary') {
+              const hasExploration = turnTools.some(t => EXPLORATION_TOOLS.has(t.name))
+              if (!hasExploration) return null
+              return (
+                <TurnSummary
+                  key="turn-summary"
+                  turnTools={turnTools}
+                  expanded={expandAll}
+                  anyPending={turnTools.some(t => t.isPending && EXPLORATION_TOOLS.has(t.name))}
+                  anyExplorationError={turnTools.some(t => !t.isPending && t.isError && EXPLORATION_TOOLS.has(t.name))}
+                />
+              )
+            }
+
+            // tool-group: render as individual or grouped card
+            const group = item.items
+            if (group.length === 1) {
+              const tool = group[0]
+              const nonExplorationCompleted = turnTools.filter(t => !t.isPending && !EXPLORATION_TOOLS.has(t.name))
+              const flatIdx = nonExplorationCompleted.indexOf(tool)
+              const isFocused = !tool.isPending && flatIdx >= 0 ? flatIdx === focusedToolIdx : false
+              const isExpanded = expandAll || expandedToolIds.has(tool.id)
+              if (tool.isPending) {
+                return (
+                  <PendingToolRow
+                    key={tool.id}
+                    name={tool.name}
+                    input={tool.input}
+                    liveOutput={tool.liveOutput}
+                    isHeartbeating={tool.isHeartbeating}
+                  />
+                )
+              }
+              return (
+                <ToolCallView
+                  key={tool.id}
+                  payload={{ name: tool.name, input: tool.input, output: tool.output, isError: tool.isError }}
+                  expanded={isExpanded}
+                  focused={isFocused}
+                />
+              )
+            }
+            // Multiple consecutive same-name tools: grouped with mixed status
+            return (
+              <GroupedToolCallView
+                key={`turn-group-${idx}`}
+                name={group[0].name}
+                calls={group.map(t => ({
+                  id: t.id,
+                  name: t.name,
+                  input: t.input,
+                  output: t.output,
+                  isError: t.isError,
+                  isPending: t.isPending,
+                }))}
+                anyPending={group.some(t => t.isPending)}
+              />
+            )
+          })}
+          {focusedToolIdx >= 0 ? (
+            <Box>
+              <Text color="gray" dimColor>  Tab ↑↓ navigate · Enter expand/collapse</Text>
+            </Box>
+          ) : null}
+        </Box>
+      ) : null}
+
+      {/* Streaming LLM response text — rendered AFTER tools because
+          tools execute before the LLM generates its response. */}
+      {streamingText ? (
+        <Box flexDirection="column" marginBottom={1}>
+          <Box>
+            <Text color="cyan">⏺ </Text>
+            <Box flexDirection="column" flexGrow={1}>
+              <StreamingText text={streamingText} showCursor />
+            </Box>
           </Box>
         </Box>
       ) : null}
 
-      {toolRunning ? (
-        <Box>
-          <Text color="yellow">  {SPINNER_FRAMES[spinnerFrame]} </Text>
-          <Text color="yellow" dimColor>{toolRunning}</Text>
-          {elapsedSec > 0 ? <Text color="gray" dimColor>{`  ${elapsedSec}s`}</Text> : null}
+      {/* Status spinner — only when nothing else is running */}
+      {!turnTools.some(t => t.isPending) && status ? (
+        <Box marginBottom={0}>
+          <Spinner active elapsedSec={elapsedSec} color="cyan" />
         </Box>
       ) : null}
 
-      {/* 子 agent 实时输出面板 */}
-      {activeSubAgentRef.current ? (
-        (() => {
-          const name = activeSubAgentRef.current
-          const text = subAgentOutputs[name]
-          const heartbeat = subAgentHeartbeats[name]
-          if (!text && !heartbeat) return null
-          // 取最后 20 行显示
-          const lines = (text ?? '').split('\n')
-          const displayLines = lines.length > 20 ? lines.slice(-20) : lines
-          return (
-            <Box flexDirection="column" paddingLeft={2} paddingTop={0}>
-              <Text color="magenta" bold>── {name} ──</Text>
-              {displayLines.map((line, i) => (
-                <Text key={i} color="gray" wrap="wrap">{line}</Text>
-              ))}
-              {heartbeat ? (
-                <Text color="cyan">
-                  {SPINNER_FRAMES[spinnerFrame]} {name} still working — {Math.floor(heartbeat.elapsedMs / 1000)}s
-                </Text>
-              ) : null}
-              <Text color="magenta" dimColor>── {name} (running {elapsedSec}s) ──</Text>
-            </Box>
-          )
-        })()
-      ) : null}
-
-      {status && !toolRunning ? (
-        <Box>
-          <Text color="gray" dimColor>  {SPINNER_FRAMES[spinnerFrame]} {status}</Text>
-          {elapsedSec > 0 ? <Text color="gray" dimColor>{`  ${elapsedSec}s`}</Text> : null}
-        </Box>
-      ) : null}
-
+      {/* Compaction indicator */}
       {compactingState === 'running' ? (
-        <Box>
-          <Text color="blue">  {SPINNER_FRAMES[spinnerFrame]} </Text>
-          <Text color="blue">compacting context...</Text>
+        <Box marginBottom={0}>
+          <Spinner active label="Compacting context" elapsedSec={elapsedSec} color="blue" showInterruptHint={false} />
         </Box>
       ) : compactingState === 'micro' ? (
-        <Box>
-          <Text color="blue" dimColor>  ✦ microcompact done</Text>
+        <Box marginBottom={0}>
+          <Text color="blue" dimColor>✦ microcompact done</Text>
         </Box>
       ) : null}
 
-      {/* Input box */}
-      <Box
-        borderStyle="single"
-        borderColor={inputMode !== 'chat' ? 'yellow' : inputValue.startsWith('!') ? 'green' : isProcessing ? 'gray' : 'cyan'}
-        paddingX={1}
-        flexDirection="column"
-      >
-        <Box flexDirection="column">
-          {inputMode === 'permission' ? (
-            <Box flexDirection="column">
-              <Text color="yellow">{promptText}</Text>
-              {(['Yes, just this once', 'Yes, allow for the rest of session', 'No'] as const).map((label, i) => {
-                const sel = i === permissionChoice
-                return (
-                  <Text key={i} color={sel ? 'cyan' : 'gray'} bold={sel}>
-                    {sel ? '▸ ' : '  '}{i + 1}. {label}
-                  </Text>
-                )
-              })}
-              <Text color="gray" dimColor>↑↓ navigate  Enter confirm  Esc cancel  (y/a/n shortcuts)</Text>
-            </Box>
-          ) : inputMode === 'choice' ? (
-            <Box flexDirection="column">
-              <Text color="yellow" bold>Please answer the following:</Text>
-              {choiceQuestions.map((q, qi) => {
-                const focused = choiceFocus === qi
-                const selected = choiceSelections[qi] ?? 0
-                const effectiveOpts = q.allowOther
-                  ? [...q.options, { value: '__other__', label: 'Other (type custom value)' }]
-                  : q.options
-                return (
-                  <Box key={q.id} flexDirection="column" marginTop={1}>
-                    <Text color={focused ? 'cyan' : 'white'} bold={focused}>
-                      {focused ? '▸ ' : '  '}{qi + 1}. {q.prompt}
-                    </Text>
-                    <Box marginLeft={4} flexDirection="column">
-                      <Box>
-                        {effectiveOpts.map((opt, oi) => {
-                          const isSel = oi === selected
-                          return (
-                            <Text key={opt.value} color={isSel ? (focused ? 'cyan' : 'green') : 'gray'} bold={isSel}>
-                              {isSel ? '[●] ' : '[ ] '}{opt.label}
-                              {oi < effectiveOpts.length - 1 ? '   ' : ''}
-                            </Text>
-                          )
-                        })}
-                      </Box>
-                      {/* "Other…" 自定义输入框 */}
-                      {choiceCustomActive === qi ? (
-                        <Box marginTop={1}>
-                          <Text color="cyan">  Type: </Text>
-                          <Text color="white">{choiceCustomInput}</Text>
-                          <Text color="cyan">▎</Text>
-                          <Text color="gray" dimColor>  Enter confirm  Esc cancel</Text>
-                        </Box>
-                      ) : null}
-                    </Box>
-                  </Box>
-                )
-              })}
-              <Box marginTop={1}>
-                {(['Submit', 'Cancel'] as const).map((label, bi) => {
-                  const rowIdx = choiceQuestions.length + bi
-                  const focused = choiceFocus === rowIdx
-                  return (
-                    <Text key={label} color={focused ? (label === 'Submit' ? 'green' : 'red') : 'gray'} bold={focused}>
-                      {focused ? '▸ ' : '  '}[ {label} ]{bi === 0 ? '   ' : ''}
-                    </Text>
-                  )
-                })}
-              </Box>
-              <Text color="gray" dimColor>↑↓ row  ←→ option/button  Enter confirm/type  Esc cancel</Text>
-            </Box>
-          ) : (
-            <Box flexDirection="column">
-              {/* 附件指示器 */}
-              {(attachments.length > 0 || attachmentErrors.length > 0) ? (
-                <Box flexDirection="column" marginBottom={1}>
-                  {attachments.map((att, i) => (
-                    <Box key={i}>
-                      <Text color="cyan">  📎 </Text>
-                      <Text color="white">{att.name}</Text>
-                      <Text color="gray">  ({att.kind === 'image' ? '🖼️' : att.kind === 'pdf' ? '📄' : '📝'} {att.kind})</Text>
-                    </Box>
-                  ))}
-                  {attachmentErrors.map((err, i) => (
-                    <Box key={`err-${i}`}>
-                      <Text color="yellow">  ⚠ </Text>
-                      <Text color="yellow" dimColor>{err}</Text>
-                    </Box>
-                  ))}
-                </Box>
-              ) : null}
-              <Box>
-                <Text color={inputMode === 'question' ? 'yellow' : isProcessing ? 'gray' : inputValue.startsWith('!') ? 'green' : 'cyan'}>
-                  {inputMode === 'question' ? promptText + ' ' : isProcessing ? '  ' : inputValue.startsWith('!') ? <Text bold color="green">$ </Text> : '> '}
-                </Text>
-                <TextInput
-                  value={inputValue}
-                  onChange={handleInputChange}
-                  onSubmit={handleSubmit}
-                  focus={!isProcessing || inputMode === 'question'}
-                  placeholder={isProcessing ? 'Esc to cancel…' : ''}
-                />
-              </Box>
-            </Box>
-          )}
-        </Box>
-        {/* 命令补全建议列表 */}
-        {renderSuggestions()}
-      </Box>
+      {/* Mode-specific prompts */}
+      {inputMode === 'permission' ? (
+        <PermissionPrompt prompt={promptText} selected={permissionChoice} />
+      ) : inputMode === 'choice' ? (
+        <ChoicePrompt
+          questions={choiceQuestions}
+          selections={choiceSelections}
+          focus={choiceFocus}
+          customActive={choiceCustomActive}
+          customInput={choiceCustomInput}
+          customValues={choiceCustomValues}
+        />
+      ) : (
+        <InputBox
+          inputValue={inputValue}
+          onChange={handleInputChange}
+          onSubmit={handleSubmit}
+          isProcessing={isProcessing}
+          isQuestion={inputMode === 'question'}
+          questionPrompt={promptText}
+          attachments={attachments}
+          attachmentErrors={attachmentErrors}
+          suggestions={suggestions}
+          selectedSuggestionIndex={selectedSuggestionIndex}
+        />
+      )}
 
-      {/* Transient hint (cleared after a couple seconds, doesn't pollute history) */}
-      {transientHint ? (
-        <Box paddingX={1}>
-          <Text color="yellow" dimColor>{transientHint}</Text>
-        </Box>
-      ) : null}
+      <Footer
+        isProcessing={isProcessing}
+        hasSuggestions={hasSuggestions}
+        autoMode={autoMode}
+        expanded={expandAll}
+        ctxPercent={ctx.pct}
+        ctxText={ctx.text}
+        transientHint={transientHint}
+      />
 
-      {/* Footer */}
-      <Box justifyContent="space-between" paddingX={1}>
-        {mcpServers.length > 0 ? (
+      {mcpServers.length > 0 ? (
+        <Box paddingX={1} marginTop={0}>
           <McpStatusPanel serverInfos={mcpServers} />
-        ) : null}
-        <Box>
-          <Text color="gray" dimColor>
-          {hasSuggestions
-            ? '↑↓ navigate  Tab/→ accept  Esc close  Enter execute'
-            : '↑↓ history  @file  /help  Shift+Tab auto  Ctrl+U clear  Esc ' + (isProcessing ? 'cancel' : '/exit quit')}
-          </Text>
-          <Box>
-            {autoMode ? (
-              <Text color="green" bold>AUTO  </Text>
-            ) : null}
-            {usage ? (
-              <Text color="gray" dimColor>
-                {(() => {
-                  const total = usage.inputTokens + usage.cacheReadTokens
-                  const pct = Math.min(100, Math.round((total / MAX_CONTEXT) * 100))
-                  return `ctx ${pct}% (${fmtTokens(total)}/${fmtTokens(MAX_CONTEXT)})  out ${fmtTokens(usage.outputTokens)}`
-                })()}
-              </Text>
-            ) : null}
-          </Box>
         </Box>
-      </Box>
+      ) : null}
     </Box>
   )
 }

@@ -52,14 +52,24 @@ export class TuiBridge extends EventEmitter {
     this.emit('message', { role, content })
   }
 
-  /** Called just before a tool starts executing — lets the TUI show a spinner. */
-  emitToolStart(name: string, summary: string) {
-    this.emit('toolStart', { name, summary })
+  /** Called just before a tool starts executing — lets the TUI show a pending row keyed by callId. */
+  emitToolStart(callId: string, name: string, input: unknown) {
+    this.emit('toolStart', { callId, name, input })
+  }
+
+  /** Called when a tool finishes (success or error). */
+  emitToolEnd(callId: string, name: string, input: unknown, output: string) {
+    this.emit('toolEnd', { callId, name, input, output })
   }
 
   /** Called after each API turn with cumulative token counts. */
   emitUsage(stats: UsageStats) {
     this.emit('usage', stats)
+  }
+
+  /** Called at the start of each new LLM round's tool phase — UI clears previous round's tool entries. */
+  emitTurnToolReset() {
+    this.emit('turnToolReset')
   }
 
   /** Called when context compaction starts or finishes. state='start'|'done'|'micro' */

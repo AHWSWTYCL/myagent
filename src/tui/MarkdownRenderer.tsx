@@ -70,35 +70,37 @@ function InlineContent({ tokens }: { tokens?: Token[] }) {
 function HeadingContent({ token }: { token: Tokens.Heading }) {
   const colors: Record<number, string> = { 1: 'cyanBright', 2: 'cyan', 3: 'blue', 4: 'blue' }
   const color = colors[token.depth] ?? 'white'
-  const prefix = token.depth <= 2 ? '#'.repeat(token.depth) + ' ' : ''
+  const prefix = '#'.repeat(token.depth) + ' '
   return (
-    <Box marginY={1}>
+    <Box>
       <Text bold color={color as any}>{prefix}<InlineContent tokens={token.tokens} /></Text>
     </Box>
   )
 }
 
-function CodeBlock({ token, columns }: { token: Tokens.Code; columns: number }) {
-  const lang = token.lang ? ' ' + token.lang + ' ' : ''
-  const innerWidth = Math.max(20, columns - 12)
-  const topRule = '┌─' + lang + '─'.repeat(Math.max(0, innerWidth - lang.length - 2))
-  const botRule = '└' + '─'.repeat(innerWidth)
+function CodeBlock({ token }: { token: Tokens.Code }) {
+  // Claude Code style: no border, just a dim language label and indented body.
+  const lines = token.text.split('\n')
   return (
-    <Box flexDirection="column" marginY={1}>
-      <Text color="gray">{topRule}</Text>
-      <Box flexDirection="column" paddingX={2}>
-        {token.text.split('\n').map((line, i) => (
-          <Text key={i} color="yellow">{line || ' '}</Text>
+    <Box flexDirection="column">
+      {token.lang ? (
+        <Text color="gray" dimColor>{`\`\`\`${token.lang}`}</Text>
+      ) : null}
+      <Box flexDirection="column" paddingLeft={2}>
+        {lines.map((line, i) => (
+          <Text key={i} color="yellow" dimColor>{line || ' '}</Text>
         ))}
       </Box>
-      <Text color="gray">{botRule}</Text>
+      {token.lang ? (
+        <Text color="gray" dimColor>```</Text>
+      ) : null}
     </Box>
   )
 }
 
 function ParagraphContent({ token }: { token: Tokens.Paragraph }) {
   return (
-    <Box marginBottom={1}>
+    <Box>
       <Text wrap="wrap"><InlineContent tokens={token.tokens} /></Text>
     </Box>
   )
@@ -126,13 +128,13 @@ function ListItemContent({ item, columns }: { item: Tokens.ListItem; columns: nu
 
 function ListContent({ token, indent = 0, columns }: { token: Tokens.List; indent?: number; columns: number }) {
   return (
-    <Box flexDirection="column" marginLeft={indent} marginBottom={indent === 0 ? 1 : 0}>
+    <Box flexDirection="column" marginLeft={indent}>
       {token.items.map((item, i) => {
         let bullet: string
         if (item.task) {
-          bullet = item.checked ? '[x] ' : '[ ] '
+          bullet = item.checked ? '☒ ' : '☐ '
         } else {
-          bullet = token.ordered ? `${i + 1}. ` : '• '
+          bullet = token.ordered ? `${i + 1}. ` : '- '
         }
         return (
           <Box key={i}>
@@ -157,7 +159,6 @@ function BlockquoteContent({ token, columns }: { token: Tokens.Blockquote; colum
       borderLeft={true}
       borderColor="gray"
       paddingLeft={1}
-      marginY={1}
     >
       <Box flexDirection="column">
         {token.tokens.map((t, i) => renderToken(t, i, columns))}
@@ -184,27 +185,31 @@ function TableContent({ token }: { token: Tokens.Table }) {
     return text.padEnd(width)
   }
 
+  // Claude Code table style: GitHub-flavored markdown, no box-drawing.
+  //   | header | header |
+  //   | ------ | ------ |
+  //   | cell   | cell   |
   const headerCells = token.header.map((h, i) =>
     padCell(plainText(h.tokens as Token[]), colWidths[i], token.align[i])
   )
   const separator = colWidths.map((w, i) => {
-    const line = '─'.repeat(w)
+    const line = '-'.repeat(Math.max(3, w))
     if (token.align[i] === 'center') return ':' + line.slice(1, -1) + ':'
     if (token.align[i] === 'right') return line.slice(0, -1) + ':'
+    if (token.align[i] === 'left') return ':' + line.slice(1)
     return line
   })
 
   return (
-    <Box flexDirection="column" marginY={1}>
-      <Text bold>{'│ ' + headerCells.join(' │ ') + ' │'}</Text>
-      <Text color="gray">{'├─' + separator.join('─┼─') + '─┤'}</Text>
+    <Box flexDirection="column">
+      <Text bold>{'| ' + headerCells.join(' | ') + ' |'}</Text>
+      <Text color="gray" dimColor>{'| ' + separator.join(' | ') + ' |'}</Text>
       {token.rows.map((row, ri) => {
         const cells = row.map((cell, ci) =>
           padCell(plainText((cell.tokens ?? []) as Token[]), colWidths[ci], token.align[ci])
         )
-        return <Text key={ri}>{'│ ' + cells.join(' │ ') + ' │'}</Text>
+        return <Text key={ri}>{'| ' + cells.join(' | ') + ' |'}</Text>
       })}
-      <Text color="gray">{'└─' + colWidths.map(w => '─'.repeat(w)).join('─┴─') + '─┘'}</Text>
     </Box>
   )
 }
@@ -214,7 +219,7 @@ function TableContent({ token }: { token: Tokens.Table }) {
 function renderToken(token: Token, index: number, columns: number): React.ReactNode {
   switch (token.type) {
     case 'heading':    return <HeadingContent key={index} token={token as Tokens.Heading} />
-    case 'code':       return <CodeBlock key={index} token={token as Tokens.Code} columns={columns} />
+    case 'code':       return <CodeBlock key={index} token={token as Tokens.Code} />
     case 'paragraph':  return <ParagraphContent key={index} token={token as Tokens.Paragraph} />
     case 'list':       return <ListContent key={index} token={token as Tokens.List} columns={columns} />
     case 'blockquote': return <BlockquoteContent key={index} token={token as Tokens.Blockquote} columns={columns} />
@@ -232,13 +237,40 @@ export function MarkdownRenderer({ content }: { content: string }) {
   const { columns } = useWindowSize()
   const elements = useMemo(() => {
     const tokens = lexer(content)
-    return tokens.map((token, i) => renderToken(token, i, columns))
+    // Insert a blank line between block-level tokens (mirrors Claude Code's
+    // single-blank-line spacing). Inline 'space' tokens already provide
+    // separation where the source had explicit blank lines.
+    const out: React.ReactNode[] = []
+    tokens.forEach((token, i) => {
+      const node = renderToken(token, i, columns)
+      if (!node) return
+      if (out.length > 0 && needsLeadingGap(token)) {
+        out.push(<Text key={`gap-${i}`}> </Text>)
+      }
+      out.push(node)
+    })
+    return out
   }, [content, columns])
   return (
     <MarkdownErrorBoundary fallback={content}>
       <Box flexDirection="column">{elements}</Box>
     </MarkdownErrorBoundary>
   )
+}
+
+/** Block tokens that should be visually separated from the previous block. */
+function needsLeadingGap(token: Token): boolean {
+  switch (token.type) {
+    case 'paragraph':
+    case 'list':
+    case 'code':
+    case 'blockquote':
+    case 'table':
+    case 'heading':
+      return true
+    default:
+      return false
+  }
 }
 
 // ── Streaming text ────────────────────────────────────────────────────────────

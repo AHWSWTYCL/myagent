@@ -10,6 +10,23 @@ console.log = (...args: unknown[]) => {
   bridge.emitMessage('system', args.map(String).join(' '))
 }
 
+// ── 全局错误处理器：防止 unhandledRejection / uncaughtException 静默退出 ──
+// Node.js v15+ 默认在 unhandledRejection 时以 code 1 退出，但我们希望
+// 在 TUI 中显示错误而非让进程悄无声息地消失。
+process.on('unhandledRejection', (reason: unknown) => {
+  const msg = reason instanceof Error ? `${reason.name}: ${reason.message}\n${reason.stack}` : String(reason)
+  bridge.emitMessage('system', `❌ Unhandled Rejection:\n${msg}`)
+  console.error('[myagent] Unhandled Rejection:', reason)
+})
+
+process.on('uncaughtException', (err: Error) => {
+  const msg = `${err.name}: ${err.message}\n${err.stack?.split('\n').slice(0, 6).join('\n')}`
+  bridge.emitMessage('system', `❌ Uncaught Exception:\n${msg}`)
+  console.error('[myagent] Uncaught Exception:', err)
+  // uncaughtException 后进程状态不可靠，延迟退出让用户看到错误
+  setTimeout(() => process.exit(1), 2000)
+})
+
 import Anthropic from '@anthropic-ai/sdk'
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages/messages.js'
 import { createClient } from './client.js'
@@ -260,7 +277,9 @@ export async function runTurn(
           userInput: recallText,
         })
       },
-      onToolStart: (name, input) => bridge.emitToolStart(name, toolLabel(name, input as Record<string, unknown>)),
+      onToolStart: (callId, name, input) => bridge.emitToolStart(callId, name, input),
+      onToolEnd: (callId, name, input, output) => bridge.emitToolEnd(callId, name, input, output),
+      onTurnToolReset: () => bridge.emitTurnToolReset(),
       onUsage: stats => {
         lastUsage = stats
         bridge.emitUsage(stats)
