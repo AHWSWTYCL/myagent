@@ -71,6 +71,7 @@ function runStreamingBash(
     const child = spawn('bash', ['-lc', command], {
       cwd: cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,  // 创建新进程组，确保 kill 能传播到 cargo 及其子进程
       env: {
         ...process.env,
         // 让常见运行时尽量不要做行缓冲，这样进度可以实时流出
@@ -120,24 +121,28 @@ function runStreamingBash(
       }
     }, 500)
 
+    const killProcessGroup = (sig: NodeJS.Signals) => {
+      try { process.kill(-child.pid!, sig) } catch { /* already dead */ }
+    }
+
     let timedOut = false
     let aborted = false
     let killTimer: NodeJS.Timeout | null = null
     const timeout = setTimeout(() => {
       timedOut = true
-      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killProcessGroup('SIGTERM')
       killTimer = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch { /* already dead */ }
+        killProcessGroup('SIGKILL')
       }, KILL_GRACE_MS)
     }, BUILD_TIMEOUT_MS)
 
-    // ── AbortSignal 支持：用户按 Esc 时杀掉子进程 ──────────────
+    // ── AbortSignal 支持：用户按 Esc 时杀掉整个进程组 ──────────
     const onAbort = () => {
       aborted = true
       clearTimeout(timeout)
-      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killProcessGroup('SIGTERM')
       killTimer = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch { /* already dead */ }
+        killProcessGroup('SIGKILL')
       }, KILL_GRACE_MS)
     }
     if (signal) {

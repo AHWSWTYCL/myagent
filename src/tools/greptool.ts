@@ -54,6 +54,7 @@ function runGrepAsync(cmd: string, signal?: AbortSignal): Promise<string> {
     const child = spawn('bash', ['-lc', cmd], {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     })
 
     let stdout = ''
@@ -72,15 +73,19 @@ function runGrepAsync(cmd: string, signal?: AbortSignal): Promise<string> {
       }
     })
 
+    const killProcessGroup = (sig: NodeJS.Signals) => {
+      try { process.kill(-child.pid!, sig) } catch { /* already dead */ }
+    }
+
     let timedOut = false
     const timeout = setTimeout(() => {
       timedOut = true
-      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killProcessGroup('SIGTERM')
     }, TIMEOUT_MS)
 
     const onAbort = () => {
       clearTimeout(timeout)
-      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killProcessGroup('SIGTERM')
     }
     if (signal) {
       if (signal.aborted) onAbort()

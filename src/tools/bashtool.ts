@@ -57,6 +57,7 @@ function runBashAsync(
     const child = spawn('bash', ['-lc', command], {
       cwd: cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,  // 创建新进程组，确保 kill 能传播到所有子进程
     })
 
     let stdout = ''
@@ -89,21 +90,25 @@ function runBashAsync(
     let aborted = false
     let killTimer: NodeJS.Timeout | null = null
 
+    const killProcessGroup = (sig: NodeJS.Signals) => {
+      try { process.kill(-child.pid!, sig) } catch { /* already dead */ }
+    }
+
     const timeout = setTimeout(() => {
       timedOut = true
-      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killProcessGroup('SIGTERM')
       killTimer = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch { /* already dead */ }
+        killProcessGroup('SIGKILL')
       }, KILL_GRACE_MS)
     }, TIMEOUT_MS)
 
-    // ── AbortSignal 支持：用户按 Esc 时杀掉子进程 ──────────────
+    // ── AbortSignal 支持：用户按 Esc 时杀掉整个进程组 ──────────
     const onAbort = () => {
       aborted = true
       clearTimeout(timeout)
-      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killProcessGroup('SIGTERM')
       killTimer = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch { /* already dead */ }
+        killProcessGroup('SIGKILL')
       }, KILL_GRACE_MS)
     }
     if (signal) {
