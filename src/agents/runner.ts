@@ -58,7 +58,13 @@ export async function runAgent(
 
   // ── 4. 跑循环 ────────────────────────────────────────────────────────
   const prefix = `[${def.name}]`
-  const onText = makePrefixedEmit(prefix, ctx.emitLine)
+  const prefixedEmit = makePrefixedEmit(prefix, ctx.emitLine)
+  const onText = (delta: string) => {
+    // 实时流：TUI 侧直接渲染增量（无前缀，由 TUI 面板负责标识）
+    ctx.onSubAgentDelta?.(def.name, delta)
+    // 持久记录：按行缓冲后走 emitLine（带 [agent-name] 前缀）
+    prefixedEmit(delta)
+  }
   ctx.emitLine(`${prefix} ← invoked by ${ctx.source}`)
 
   await runAgentLoopStream({

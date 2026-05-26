@@ -86,6 +86,7 @@ agentTool.setExecutionContext({
   client,
   executeTool: (name, input) => executeTool(name, input),
   emitLine: line => bridge.emitMessage('system', line),
+  onSubAgentDelta: (name, delta) => bridge.emitSubAgentDelta(name, delta),
 })
 
 // ── MCP Manager ───────────────────────────────────────────────────────────────
@@ -290,6 +291,7 @@ function toolLabel(name: string, args: Record<string, unknown>): string {
     case 'glob':        return `glob ${args.pattern}`
     case 'grep':        return `grep ${args.pattern}`
     case 'edit_file':   return `edit ${args.path}`
+    case 'agent':       return `agent  ${args.agent ?? 'sub-agent'}${args.task ? `  (${String(args.task).slice(0, 60)})` : ''}`
     default:           return name
   }
 }

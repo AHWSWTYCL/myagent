@@ -87,4 +87,17 @@ export class TuiBridge extends EventEmitter {
     this.emit('mcp-status', servers)
   }
 
+  /**
+   * 子 agent 实时输出：逐字符或逐段推送，TUI 在 tool spinner 下方渲染。
+   * name 是 agent 名（如 project_builder），delta 是增量文本。
+   */
+  emitSubAgentDelta(name: string, delta: string) {
+    this.emit('subAgentDelta', { name, delta })
+  }
+
+  /** 子 agent 执行完毕，TUI 清理实时面板并将输出归档为静态消息。 */
+  emitSubAgentDone(name: string) {
+    this.emit('subAgentDone', { name })
+  }
+
 }

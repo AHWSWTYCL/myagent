@@ -11,6 +11,13 @@ export interface AgentRunContext {
   executeTool: (name: string, input: unknown) => Promise<string>
   client: Anthropic
   emitLine: (line: string) => void
+  /**
+   * 子 agent 实时增量输出的回调。
+   * TUI 层会订阅这个 delta 流并实时渲染在 tool spinner 下方。
+   * name 是 agent 定义名（如 project_builder），delta 是纯文本增量（无前缀）。
+   * 可以不设，设了后 runner.ts 会在 emitLine 之外额外推送。
+   */
+  onSubAgentDelta?: (name: string, delta: string) => void
 }
 
 /** Agent 接收的参数 schema 暴露给主 LLM */

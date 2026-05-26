@@ -8,11 +8,13 @@ import { generalPurposeAgent } from './general.js'
 import { analystAgent } from './analyst.js'
 import { bugIntakeAgent } from './bug_intake.js'
 import { debugExpertAgent } from './debug_expert.js'
+import { projectBuilderAgent } from './project_builder.js'
 
 export const builtinAgents: AgentDefinition[] = [
   analystAgent,
   bugIntakeAgent,
   debugExpertAgent,
+  projectBuilderAgent,
   exploreAgent,
   plannerAgent,
   generatorAgent,

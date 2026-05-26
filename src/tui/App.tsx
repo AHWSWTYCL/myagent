@@ -100,6 +100,11 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   // ── MCP 状态 ─────────────────────────────────────────────────────────
   const [mcpServers, setMcpServers] = useState<MCPServerInfo[]>([])
 
+  // ── 子 agent 实时输出 ────────────────────────────────────────────────
+  const [subAgentOutputs, setSubAgentOutputs] = useState<Record<string, string>>({})
+  const subAgentOutputsRef = useRef<Record<string, string>>({})
+  const activeSubAgentRef = useRef<string | null>(null)
+
   historyIndexRef.current = historyIndex
 
   // ── spinner 帧动画 + 已用秒数 ──────────────────────────────────
@@ -161,11 +166,37 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     bridge.on('toolStart', ({ name, summary }: { name: string; summary: string }) => {
       setToolRunning(`${name}  ${summary}`)
       setStatus('')
+      // 当主 agent 调用 agent 工具时，记录当前子 agent 名，准备接收实时输出
+      if (name === 'agent') {
+        // summary 格式如 "agent  project_builder  (task)"
+        const parts = summary.split(/\s+/)
+        const agentName = parts[1] || 'sub-agent'
+        activeSubAgentRef.current = agentName
+        // 清空该 agent 的历史积累（重新开始）
+        subAgentOutputsRef.current = { ...subAgentOutputsRef.current, [agentName]: '' }
+        setSubAgentOutputs(prev => ({ ...prev, [agentName]: '' }))
+      }
     })
 
     bridge.on('usage', (stats: UsageStats) => {
       setUsage(stats)
       setToolRunning('')
+      // 子 agent 执行完毕：归档实时输出为静态系统消息
+      const name = activeSubAgentRef.current
+      if (name) {
+        const text = subAgentOutputsRef.current[name]
+        if (text) {
+          setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `[${name}] 输出:\n${text.trimEnd()}` }])
+        }
+        // 清理
+        activeSubAgentRef.current = null
+        subAgentOutputsRef.current = { ...subAgentOutputsRef.current, [name]: '' }
+        setSubAgentOutputs(prev => {
+          const next = { ...prev }
+          delete next[name]
+          return next
+        })
+      }
     })
 
     bridge.on('usageReset', () => {
@@ -197,6 +228,16 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
     bridge.on('mcp-status', (servers: MCPServerInfo[]) => {
       setMcpServers(servers)
+    })
+
+    bridge.on('subAgentDelta', ({ name, delta }: { name: string; delta: string }) => {
+      // Accumulate in ref for reliable reads in other handlers
+      subAgentOutputsRef.current[name] = (subAgentOutputsRef.current[name] ?? '') + delta
+      // Trigger re-render for live display (throttled via React batching)
+      setSubAgentOutputs(prev => ({
+        ...prev,
+        [name]: (prev[name] ?? '') + delta,
+      }))
     })
 
     bridge.on('autoModeChange', (enabled: boolean) => {
@@ -837,6 +878,27 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
           <Text color="yellow" dimColor>{toolRunning}</Text>
           {elapsedSec > 0 ? <Text color="gray" dimColor>{`  ${elapsedSec}s`}</Text> : null}
         </Box>
+      ) : null}
+
+      {/* 子 agent 实时输出面板 */}
+      {activeSubAgentRef.current ? (
+        (() => {
+          const name = activeSubAgentRef.current
+          const text = subAgentOutputs[name]
+          if (!text) return null
+          // 取最后 20 行显示
+          const lines = text.split('\n')
+          const displayLines = lines.length > 20 ? lines.slice(-20) : lines
+          return (
+            <Box flexDirection="column" paddingLeft={2} paddingTop={0}>
+              <Text color="magenta" bold>── {name} ──</Text>
+              {displayLines.map((line, i) => (
+                <Text key={i} color="gray" wrap="wrap">{line}</Text>
+              ))}
+              <Text color="magenta" dimColor>── {name} (running {elapsedSec}s) ──</Text>
+            </Box>
+          )
+        })()
       ) : null}
 
       {status && !toolRunning ? (

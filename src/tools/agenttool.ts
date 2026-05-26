@@ -24,6 +24,7 @@ export class AgentTool extends Tool {
   private client?: Anthropic
   private executeToolFn?: (name: string, input: unknown) => Promise<string>
   private emitLineFn?: (line: string) => void
+  private onSubAgentDeltaFn?: (name: string, delta: string) => void
 
   constructor(
     private registry: AgentRegistry,
@@ -34,10 +35,12 @@ export class AgentTool extends Tool {
     client: Anthropic
     executeTool: (name: string, input: unknown) => Promise<string>
     emitLine: (line: string) => void
+    onSubAgentDelta?: (name: string, delta: string) => void
   }) {
     this.client = opts.client
     this.executeToolFn = opts.executeTool
     this.emitLineFn = opts.emitLine
+    this.onSubAgentDeltaFn = opts.onSubAgentDelta
   }
 
   get name(): string { return 'agent' }
@@ -103,6 +106,7 @@ export class AgentTool extends Tool {
         executeTool: this.executeToolFn,
         client: this.client,
         emitLine: this.emitLineFn,
+        onSubAgentDelta: this.onSubAgentDeltaFn,
       })
     } catch (err) {
       return `Error running agent "${args.agent}": ${err instanceof Error ? err.message : String(err)}`
