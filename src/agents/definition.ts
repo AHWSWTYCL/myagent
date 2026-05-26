@@ -18,6 +18,15 @@ export interface AgentRunContext {
    * 可以不设，设了后 runner.ts 会在 emitLine 之外额外推送。
    */
   onSubAgentDelta?: (name: string, delta: string) => void
+  /**
+   * 子 agent 内长时间静默的命令的心跳事件。
+   * 用于让 TUI 显示一个动画（如 spinner）告诉用户「还活着」，而不是把心跳行
+   * 拼进文本面板。elapsedMs 是命令开始到此次心跳的总耗时（毫秒）。
+   * 数据一来到（如 stdout/stderr）应该停止发心跳，TUI 据此自动隐藏动画。
+   */
+  onSubAgentHeartbeat?: (name: string, elapsedMs: number) => void
+  /** 可选的 AbortSignal，用于取消正在运行的 sub-agent */
+  signal?: AbortSignal
 }
 
 /** Agent 接收的参数 schema 暴露给主 LLM */

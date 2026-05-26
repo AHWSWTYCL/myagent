@@ -95,6 +95,15 @@ export class TuiBridge extends EventEmitter {
     this.emit('subAgentDelta', { name, delta })
   }
 
+  /**
+   * 子 agent 内长时间静默命令的心跳。TUI 据此渲染一个动画行，告诉用户「还活着」。
+   * elapsedMs 是命令开始到此次心跳的总耗时（毫秒）。
+   * 一旦 stdout/stderr 有新数据，后端就停止发心跳；TUI 自己用计时器判断超时清掉动画。
+   */
+  emitSubAgentHeartbeat(name: string, elapsedMs: number) {
+    this.emit('subAgentHeartbeat', { name, elapsedMs })
+  }
+
   /** 子 agent 执行完毕，TUI 清理实时面板并将输出归档为静态消息。 */
   emitSubAgentDone(name: string) {
     this.emit('subAgentDone', { name })

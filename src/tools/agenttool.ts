@@ -25,6 +25,8 @@ export class AgentTool extends Tool {
   private executeToolFn?: (name: string, input: unknown) => Promise<string>
   private emitLineFn?: (line: string) => void
   private onSubAgentDeltaFn?: (name: string, delta: string) => void
+  private onSubAgentHeartbeatFn?: (name: string, elapsedMs: number) => void
+  private currentSignal?: AbortSignal
 
   constructor(
     private registry: AgentRegistry,
@@ -36,11 +38,18 @@ export class AgentTool extends Tool {
     executeTool: (name: string, input: unknown) => Promise<string>
     emitLine: (line: string) => void
     onSubAgentDelta?: (name: string, delta: string) => void
+    onSubAgentHeartbeat?: (name: string, elapsedMs: number) => void
   }) {
     this.client = opts.client
     this.executeToolFn = opts.executeTool
     this.emitLineFn = opts.emitLine
     this.onSubAgentDeltaFn = opts.onSubAgentDelta
+    this.onSubAgentHeartbeatFn = opts.onSubAgentHeartbeat
+  }
+
+  /** 设置当前 turn 的 AbortSignal，传递给 sub-agent 内部循环以实现 Esc 取消。 */
+  setSignal(signal?: AbortSignal) {
+    this.currentSignal = signal
   }
 
   get name(): string { return 'agent' }
@@ -107,6 +116,8 @@ export class AgentTool extends Tool {
         client: this.client,
         emitLine: this.emitLineFn,
         onSubAgentDelta: this.onSubAgentDeltaFn,
+        onSubAgentHeartbeat: this.onSubAgentHeartbeatFn,
+        signal: this.currentSignal,
       })
     } catch (err) {
       return `Error running agent "${args.agent}": ${err instanceof Error ? err.message : String(err)}`

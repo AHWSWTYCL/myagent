@@ -1,5 +1,8 @@
-import { execSync } from 'child_process'
+import { spawn } from 'child_process'
 import { Tool } from './tool'
+
+const TIMEOUT_MS = 10_000
+const MAX_OUTPUT_BYTES = 50_000
 
 export class GrepTool extends Tool {
 
@@ -31,7 +34,7 @@ export class GrepTool extends Tool {
         return { action: 'continue' }
     }
 
-    async execute(args: any): Promise<string> {
+    async execute(args: any, signal?: AbortSignal): Promise<string> {
         const { pattern, path: searchPath, recursive = true, case_insensitive = false, include } = args
 
         const flags: string[] = ['-n'] // line numbers
@@ -42,19 +45,72 @@ export class GrepTool extends Tool {
         const target = searchPath ?? '.'
         const cmd = `grep ${flags.join(' ')} ${JSON.stringify(pattern)} ${JSON.stringify(target)}`
 
-        try {
-            const output = execSync(cmd, {
-                cwd: process.cwd(),
-                timeout: 10_000,
-                maxBuffer: 50_000,
-                encoding: 'utf-8',
-                stdio: ['pipe', 'pipe', 'pipe'],
-            })
-            return output.trim() || 'No matches found.'
-        } catch (err: any) {
-            // grep exits with code 1 when no matches — not an error
-            if (err.status === 1) return 'No matches found.'
-            return `Error: ${err.stderr ?? err.message}`
-        }
+        return runGrepAsync(cmd, signal)
     }
+}
+
+function runGrepAsync(cmd: string, signal?: AbortSignal): Promise<string> {
+  return new Promise((resolve) => {
+    const child = spawn('bash', ['-lc', cmd], {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout.setEncoding('utf-8')
+    child.stderr.setEncoding('utf-8')
+    child.stdout.on('data', (chunk: string) => {
+      if (stdout.length < MAX_OUTPUT_BYTES) {
+        stdout += chunk.slice(0, MAX_OUTPUT_BYTES - stdout.length)
+      }
+    })
+    child.stderr.on('data', (chunk: string) => {
+      if (stderr.length < MAX_OUTPUT_BYTES) {
+        stderr += chunk.slice(0, MAX_OUTPUT_BYTES - stderr.length)
+      }
+    })
+
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      try { child.kill('SIGTERM') } catch { /* already dead */ }
+    }, TIMEOUT_MS)
+
+    const onAbort = () => {
+      clearTimeout(timeout)
+      try { child.kill('SIGTERM') } catch { /* already dead */ }
+    }
+    if (signal) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
+
+    child.on('error', (err) => {
+      clearTimeout(timeout)
+      if (signal) signal.removeEventListener('abort', onAbort)
+      resolve(`Error: ${err.message}`)
+    })
+
+    child.on('close', (code) => {
+      clearTimeout(timeout)
+      if (signal) signal.removeEventListener('abort', onAbort)
+
+      if (timedOut) {
+        resolve(`Timed out after ${TIMEOUT_MS / 1000}s:\n${stdout || '(no output)'}`)
+        return
+      }
+      // grep exits with code 1 when no matches — not an error
+      if (code === 1) {
+        resolve('No matches found.')
+        return
+      }
+      if (code !== 0) {
+        resolve(`Exit code ${code ?? '?'}:\n${stderr || stdout || '(no output)'}`)
+        return
+      }
+      resolve(stdout.trim() || 'No matches found.')
+    })
+  })
 }

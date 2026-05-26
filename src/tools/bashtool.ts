@@ -1,9 +1,10 @@
-import { execSync } from 'child_process'
+import { spawn } from 'child_process'
 import { cwd } from 'process'
 import { Tool } from './tool'
 
 const TIMEOUT_MS = 10_000
 const MAX_OUTPUT_BYTES = 50_000
+const KILL_GRACE_MS = 2_000  // SIGTERM 后 2 秒再 SIGKILL
 
 // 每条规则：pattern 用于匹配命令，reason 用于错误提示
 const BLACKLIST: { pattern: RegExp; reason: string }[] = [
@@ -45,6 +46,108 @@ function isReadonlyCommand(command: string): boolean {
         }
     }
     return false
+}
+
+/** 异步执行 bash 命令，返回 stdout（合并 stderr 仅在命令失败时）。 */
+function runBashAsync(
+  command: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return new Promise((resolve) => {
+    const child = spawn('bash', ['-lc', command], {
+      cwd: cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    let stdout = ''
+    let stderr = ''
+    let truncatedBytes = 0
+
+    const appendStdout = (chunk: string) => {
+      if (stdout.length < MAX_OUTPUT_BYTES) {
+        const room = MAX_OUTPUT_BYTES - stdout.length
+        stdout += chunk.slice(0, room)
+        truncatedBytes += Math.max(0, chunk.length - room)
+      } else {
+        truncatedBytes += chunk.length
+      }
+    }
+    const appendStderr = (chunk: string) => {
+      if (stderr.length < MAX_OUTPUT_BYTES) {
+        const room = MAX_OUTPUT_BYTES - stderr.length
+        stderr += chunk.slice(0, room)
+      }
+      // stderr 不计入 truncation 统计（避免和 stdout 的统计混淆）
+    }
+
+    child.stdout.setEncoding('utf-8')
+    child.stderr.setEncoding('utf-8')
+    child.stdout.on('data', appendStdout)
+    child.stderr.on('data', appendStderr)
+
+    let timedOut = false
+    let aborted = false
+    let killTimer: NodeJS.Timeout | null = null
+
+    const timeout = setTimeout(() => {
+      timedOut = true
+      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killTimer = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* already dead */ }
+      }, KILL_GRACE_MS)
+    }, TIMEOUT_MS)
+
+    // ── AbortSignal 支持：用户按 Esc 时杀掉子进程 ──────────────
+    const onAbort = () => {
+      aborted = true
+      clearTimeout(timeout)
+      try { child.kill('SIGTERM') } catch { /* already dead */ }
+      killTimer = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* already dead */ }
+      }, KILL_GRACE_MS)
+    }
+    if (signal) {
+      if (signal.aborted) {
+        onAbort()
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
+
+    child.on('error', (err) => {
+      clearTimeout(timeout)
+      if (killTimer) clearTimeout(killTimer)
+      if (signal) signal.removeEventListener('abort', onAbort)
+      resolve(`Error spawning bash: ${err.message}\nCommand: ${command}`)
+    })
+
+    child.on('close', (code, sig) => {
+      clearTimeout(timeout)
+      if (killTimer) clearTimeout(killTimer)
+      if (signal) signal.removeEventListener('abort', onAbort)
+
+      const bytesNote = truncatedBytes > 0
+        ? `\n...（${truncatedBytes} 字节因超出 ${MAX_OUTPUT_BYTES} 上限被丢弃）`
+        : ''
+
+      if (aborted) {
+        resolve(`Cancelled by user.\n${stdout || '(no output)'}${bytesNote}`)
+        return
+      }
+      if (timedOut) {
+        const combined = [stdout, stderr].filter(Boolean).join('\n')
+        resolve(`Timed out after ${TIMEOUT_MS / 1000}s (signal=${sig ?? 'SIGTERM'}):\n${combined || '(no output)'}${bytesNote}`)
+        return
+      }
+      if (code === 0) {
+        resolve(stdout || '(no output)')
+        return
+      }
+      // 非零退出码：合并 stdout + stderr 输出
+      const combined = [stdout, stderr].filter(Boolean).join('\n')
+      resolve(`Exit code ${code ?? '?'}${sig ? ` (signal ${sig})` : ''}:\n${combined || '(no output)'}${bytesNote}`)
+    })
+  })
 }
 
 export class BashTool extends Tool {
@@ -95,7 +198,7 @@ export class BashTool extends Tool {
         return { action: 'defer' }
     }
 
-    async execute(args: any): Promise<string> {
+    async execute(args: any, signal?: AbortSignal): Promise<string> {
         const command: string = args.command
 
         const blocked = this.checkBlacklist(command)
@@ -103,20 +206,6 @@ export class BashTool extends Tool {
             return `[BLOCKED] Command rejected: ${blocked}\nCommand: ${command}`
         }
 
-        try {
-            const output = execSync(command, {
-                cwd: cwd(),
-                timeout: TIMEOUT_MS,
-                maxBuffer: MAX_OUTPUT_BYTES,
-                encoding: 'utf-8',
-                stdio: ['pipe', 'pipe', 'pipe'],
-            })
-            return output || '(no output)'
-        } catch (err: any) {
-            const stdout = err.stdout ?? ''
-            const stderr = err.stderr ?? ''
-            const combined = [stdout, stderr].filter(Boolean).join('\n')
-            return `Exit code ${err.status ?? '?'}:\n${combined || err.message}`
-        }
+        return runBashAsync(command, signal)
     }
 }

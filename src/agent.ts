@@ -81,12 +81,16 @@ toolRegistrar.registerTool(agentTool)
 const client = createClient()
 const baseSystemPrompt = getSystemPrompt()
 
+// 当前 runTurn 的 AbortSignal（供 AgentTool 传递给 sub-agent 内部循环）
+let currentAbortSignal: AbortSignal | undefined
+
 // AgentTool 需要 client / executeTool / emitLine —— 这些此时才有，在这里注入
 agentTool.setExecutionContext({
   client,
   executeTool: (name, input) => executeTool(name, input),
   emitLine: line => bridge.emitMessage('system', line),
   onSubAgentDelta: (name, delta) => bridge.emitSubAgentDelta(name, delta),
+  onSubAgentHeartbeat: (name, elapsedMs) => bridge.emitSubAgentHeartbeat(name, elapsedMs),
 })
 
 // ── MCP Manager ───────────────────────────────────────────────────────────────
@@ -141,7 +145,7 @@ async function executeTool(name: string, input: unknown, skipHooks = false): Pro
       const pre = await hookManager.runOnToolCall({ toolName: name, toolInput: input })
       if (pre.action === 'block') return `Permission denied: ${pre.reason}`
     }
-    const result = await (toolRegistrar.getTool(name)?.execute(args) ?? Promise.resolve('Unknown tool'))
+    const result = await (toolRegistrar.getTool(name)?.execute(args, currentAbortSignal) ?? Promise.resolve('Unknown tool'))
     if (!skipHooks) {
       await hookManager.runOnToolResult({ toolName: name, toolInput: input, toolResult: result })
     }
@@ -218,6 +222,8 @@ export async function runTurn(
     await new Promise(r => setTimeout(r, 200))
   }
   agentRunning = true
+  currentAbortSignal = signal
+  agentTool.setSignal(signal)
 
   try {
     messages.push({ role: 'user', content: input as Anthropic.MessageParam['content'] })

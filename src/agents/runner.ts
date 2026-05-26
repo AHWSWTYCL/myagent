@@ -34,7 +34,7 @@ export async function runAgent(
     // Agent-only 工厂工具优先（不会出现在主 toolRegistrar 中），直接走自己的 execute
     const local = extras.find(t => t.name === name)
     if (local) {
-      try { return await local.execute(input as Record<string, string>) }
+      try { return await local.execute(input as Record<string, string>, ctx.signal) }
       catch (err) { return `Error: ${err}` }
     }
     // 全局工具走主流程，这样 hooks / 权限继续生效
@@ -77,6 +77,7 @@ export async function runAgent(
     executeTool: subExecuteTool,
     parallelSafeTools: subRegistrar.getParallelSafeNames(),
     onText,
+    signal: ctx.signal,
   })
 
   const lastText = extractLastText(messages)

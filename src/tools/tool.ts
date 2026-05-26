@@ -49,7 +49,11 @@ export class Tool {
     return { action: 'defer' }
   }
 
-  async execute(_args: any): Promise<string> {
+  /**
+   * @param _args 工具参数（来自 LLM 的 tool call）
+   * @param _signal 可选的 AbortSignal，用于取消正在执行的操作（如长时间运行的 bash 命令）
+   */
+  async execute(_args: any, _signal?: AbortSignal): Promise<string> {
     throw new Error(`Tool "${this.name}" does not implement execute()`)
   }
 }

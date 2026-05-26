@@ -84,8 +84,8 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   const streamingRef = useRef('')
   const historyIndexRef = useRef(-1)
   const abortControllerRef = useRef<AbortController | null>(null)
-  const ctrlCCountRef = useRef(0)
-  const ctrlCTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const isProcessingRef = useRef(false)    // 同步版 isProcessing，避免闭包过期
+  const submittingRef = useRef(false)      // 防止 handleSubmit 并发
 
   const nextId = () => String(++idCounter.current)
 
@@ -104,8 +104,15 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   const [subAgentOutputs, setSubAgentOutputs] = useState<Record<string, string>>({})
   const subAgentOutputsRef = useRef<Record<string, string>>({})
   const activeSubAgentRef = useRef<string | null>(null)
+  // 子 agent 内静默命令的心跳：name -> { elapsedMs, lastBeatAt }。
+  // lastBeatAt 用于让 TUI 在没有新心跳后自动清掉动画（命令真正结束时 BuildBashTool 会停发）。
+  const [subAgentHeartbeats, setSubAgentHeartbeats] = useState<
+    Record<string, { elapsedMs: number; lastBeatAt: number }>
+  >({})
 
   historyIndexRef.current = historyIndex
+  // 同步 ref 与 state，供 useInput/handleSubmit 使用最新值避免闭包过期
+  isProcessingRef.current = isProcessing
 
   // ── spinner 帧动画 + 已用秒数 ──────────────────────────────────
   const isActive = !!toolRunning || (!!status && !toolRunning)
@@ -119,6 +126,17 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     setActivityStartedAt(Date.now())
     const tick = setInterval(() => {
       setSpinnerFrame(f => (f + 1) % SPINNER_FRAMES.length)
+      // 清掉 1.5s 内没新心跳的项 —— BuildBashTool 命令一结束就停发心跳
+      setSubAgentHeartbeats(prev => {
+        const now = Date.now()
+        let changed = false
+        const next: typeof prev = {}
+        for (const [k, v] of Object.entries(prev)) {
+          if (now - v.lastBeatAt < 1500) next[k] = v
+          else changed = true
+        }
+        return changed ? next : prev
+      })
     }, 80)
     return () => clearInterval(tick)
   }, [isActive, toolRunning, status])
@@ -238,6 +256,20 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         ...prev,
         [name]: (prev[name] ?? '') + delta,
       }))
+      // 一旦有新输出，立刻清掉该 agent 的心跳动画（不沉默了）
+      setSubAgentHeartbeats(prev => {
+        if (!(name in prev)) return prev
+        const next = { ...prev }
+        delete next[name]
+        return next
+      })
+    })
+
+    bridge.on('subAgentHeartbeat', ({ name, elapsedMs }: { name: string; elapsedMs: number }) => {
+      setSubAgentHeartbeats(prev => ({
+        ...prev,
+        [name]: { elapsedMs, lastBeatAt: Date.now() },
+      }))
     })
 
     bridge.on('autoModeChange', (enabled: boolean) => {
@@ -271,25 +303,14 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     return () => { bridge.removeAllListeners() }
   }, [bridge])
 
-  // Ctrl+C: first press cancels current request, second press exits
+  // Esc: cancels current request (only when processing)
+  // 注意：permission/choice 模式中 Esc 已有自己的处理（拒绝/取消），
+  // 但它们和本 handler 不冲突 —— 双方都会触发，行为叠加合理。
   useInput((_input, key) => {
-    if (!key.ctrl || _input !== 'c') return
-
-    if (isProcessing) {
+    if (!key.escape) return
+    if (isProcessingRef.current) {
       abortControllerRef.current?.abort()
-      ctrlCCountRef.current = 0
-      return
     }
-
-    ctrlCCountRef.current += 1
-    if (ctrlCCountRef.current >= 2) {
-      exit()
-      return
-    }
-
-    showHint('Press Ctrl+C again to exit.')
-    if (ctrlCTimerRef.current) clearTimeout(ctrlCTimerRef.current)
-    ctrlCTimerRef.current = setTimeout(() => { ctrlCCountRef.current = 0 }, 2000)
   })
 
   // Shift+Tab: toggle auto permission mode
@@ -631,106 +652,113 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       return
     }
 
+    // 用 ref 检查避免闭包过期；若正在处理中或已有提交在执行，静默丢弃
+    if (isProcessingRef.current || submittingRef.current) return
+
+    submittingRef.current = true
     setInputValue('')
     setHistoryIndex(-1)
     clearSuggestions()
-    if (isProcessing) return
-
-    // ! 命令：走 agent 层的 BashTool（和 LLM 调用的同个工具），不走 LLM
-    if (trimmed.startsWith('!')) {
-      const cmd = trimmed.slice(1).trim()
-      if (!cmd) {
-        setMessages(prev => [...prev, { id: nextId(), role: 'system', content: '! 后面需要跟要执行的命令' }])
-        return
-      }
-      addToHistory(trimmed)
-      setMessages(prev => [...prev, { id: nextId(), role: 'user', content: trimmed }])
-      setIsProcessing(true)
-      setToolRunning(`bash  ${cmd}`)
-
-      try {
-        const output = await runBash(cmd)
-        const text = output || '(empty output)'
-        setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: text }])
-        if (text.length > 2000) console.log(`[!] ${cmd}\n${text}`)
-      } catch (err: any) {
-        setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: `Error: ${err.message ?? err}` }])
-      } finally {
-        setToolRunning('')
-        setIsProcessing(false)
-      }
-      return
-    }
-
-    if (commandParser.isCommand(trimmed)) {
-      await commandParser.dispatch(trimmed)
-      return
-    }
-
-    addToHistory(trimmed)
-
-    // ── 处理附件 ──────────────────────────────────────────────────────
-    // 兜底：确保裸文件路径已被 @ 前缀（防止用户在异步检测完成前按 Enter）
-    // autoPrefixAttachments 对已有 @ 的 token 是 no-op，所以安全
-    const safeValue = await autoPrefixAttachments(trimmed)
-    let userContent: string | any[]
-    let displayText = safeValue
-
-    if (safeValue.includes('@') && !safeValue.startsWith('/') && !safeValue.startsWith('!')) {
-      const { cleaned, attachments: atts, errors: attErrors } = await parseAttachments(safeValue)
-      if (atts.length > 0) {
-        userContent = buildUserContent(cleaned, atts)
-        // 构建显示文本（含附件标记）
-        const attSummary = atts.map(a => `📎 ${a.name} (${a.kind})`).join('  ')
-        displayText = cleaned.trim()
-          ? `${cleaned.trim()}  ${attSummary}`
-          : `[attachments: ${attSummary}]`
-        // 如果部分附件解析失败，附加错误到显示文本
-        if (attErrors.length > 0) {
-          displayText += `  ⚠ ${attErrors.join('; ')}`
-        }
-      } else {
-        // 没有成功解析到附件 — 清理 @token 避免模型看到字面路径
-        // 同时将错误加入消息内容让用户知晓
-        userContent = cleaned || trimmed.replace(/@\S+/g, '').trim()
-        if (!userContent) userContent = '(empty — file not found)'
-        const errorMsg = attErrors.length > 0 ? `[⚠ ${attErrors.join('; ')}]` : `[⚠ file not found]`
-        displayText = `${cleaned || '(empty)'}  ${errorMsg}`
-        setMessages(prev => [...prev, { id: nextId(), role: 'system', content: errorMsg }])
-      }
-    } else {
-      userContent = safeValue
-    }
-
-    setMessages(prev => [...prev, { id: nextId(), role: 'user', content: displayText }])
-    setAttachments([])
-    setAttachmentErrors([])
-    setIsProcessing(true)
-    setStatus('thinking...')
-    streamingRef.current = ''
-    setStreamingText('')
-
-    const ac = new AbortController()
-    abortControllerRef.current = ac
 
     try {
-      await runTurn(userContent, ac.signal)
-    } catch (err: unknown) {
-      const msg = ac.signal.aborted
-        ? 'Cancelled.'
-        : `Error: ${err instanceof Error ? err.message : String(err)}`
-      setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
-    } finally {
-      const remaining = streamingRef.current
-      if (remaining) {
-        setMessages(msgs => [...msgs, { id: nextId(), role: 'agent', content: remaining }])
+      // ! 命令：走 agent 层的 BashTool（和 LLM 调用的同个工具），不走 LLM
+      if (trimmed.startsWith('!')) {
+        const cmd = trimmed.slice(1).trim()
+        if (!cmd) {
+          setMessages(prev => [...prev, { id: nextId(), role: 'system', content: '! 后面需要跟要执行的命令' }])
+          return
+        }
+        addToHistory(trimmed)
+        setMessages(prev => [...prev, { id: nextId(), role: 'user', content: trimmed }])
+        setIsProcessing(true)
+        setToolRunning(`bash  ${cmd}`)
+
+        try {
+          const output = await runBash(cmd)
+          const text = output || '(empty output)'
+          setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: text }])
+          if (text.length > 2000) console.log(`[!] ${cmd}\n${text}`)
+        } catch (err: any) {
+          setMessages(prev => [...prev, { id: nextId(), role: 'tool', content: `Error: ${err.message ?? err}` }])
+        } finally {
+          setToolRunning('')
+          setIsProcessing(false)
+        }
+        return
       }
+
+      if (commandParser.isCommand(trimmed)) {
+        await commandParser.dispatch(trimmed)
+        return
+      }
+
+      addToHistory(trimmed)
+
+      // ── 处理附件 ──────────────────────────────────────────────────────
+      // 兜底：确保裸文件路径已被 @ 前缀（防止用户在异步检测完成前按 Enter）
+      // autoPrefixAttachments 对已有 @ 的 token 是 no-op，所以安全
+      const safeValue = await autoPrefixAttachments(trimmed)
+      let userContent: string | any[]
+      let displayText = safeValue
+
+      if (safeValue.includes('@') && !safeValue.startsWith('/') && !safeValue.startsWith('!')) {
+        const { cleaned, attachments: atts, errors: attErrors } = await parseAttachments(safeValue)
+        if (atts.length > 0) {
+          userContent = buildUserContent(cleaned, atts)
+          // 构建显示文本（含附件标记）
+          const attSummary = atts.map(a => `📎 ${a.name} (${a.kind})`).join('  ')
+          displayText = cleaned.trim()
+            ? `${cleaned.trim()}  ${attSummary}`
+            : `[attachments: ${attSummary}]`
+          // 如果部分附件解析失败，附加错误到显示文本
+          if (attErrors.length > 0) {
+            displayText += `  ⚠ ${attErrors.join('; ')}`
+          }
+        } else {
+          // 没有成功解析到附件 — 清理 @token 避免模型看到字面路径
+          // 同时将错误加入消息内容让用户知晓
+          userContent = cleaned || trimmed.replace(/@\S+/g, '').trim()
+          if (!userContent) userContent = '(empty — file not found)'
+          const errorMsg = attErrors.length > 0 ? `[⚠ ${attErrors.join('; ')}]` : `[⚠ file not found]`
+          displayText = `${cleaned || '(empty)'}  ${errorMsg}`
+          setMessages(prev => [...prev, { id: nextId(), role: 'system', content: errorMsg }])
+        }
+      } else {
+        userContent = safeValue
+      }
+
+      setMessages(prev => [...prev, { id: nextId(), role: 'user', content: displayText }])
+      setAttachments([])
+      setAttachmentErrors([])
+      setIsProcessing(true)
+      setStatus('thinking...')
       streamingRef.current = ''
       setStreamingText('')
-      setToolRunning('')
-      abortControllerRef.current = null
-      setIsProcessing(false)
-      setStatus('')
+
+      const ac = new AbortController()
+      abortControllerRef.current = ac
+
+      try {
+        await runTurn(userContent, ac.signal)
+      } catch (err: unknown) {
+        const msg = ac.signal.aborted
+          ? 'Cancelled.'
+          : `Error: ${err instanceof Error ? err.message : String(err)}`
+        setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
+      } finally {
+        const remaining = streamingRef.current
+        if (remaining) {
+          setMessages(msgs => [...msgs, { id: nextId(), role: 'agent', content: remaining }])
+        }
+        streamingRef.current = ''
+        setStreamingText('')
+        setToolRunning('')
+        abortControllerRef.current = null
+        setIsProcessing(false)
+        setStatus('')
+      }
+    } finally {
+      submittingRef.current = false
     }
   }
 
@@ -885,9 +913,10 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         (() => {
           const name = activeSubAgentRef.current
           const text = subAgentOutputs[name]
-          if (!text) return null
+          const heartbeat = subAgentHeartbeats[name]
+          if (!text && !heartbeat) return null
           // 取最后 20 行显示
-          const lines = text.split('\n')
+          const lines = (text ?? '').split('\n')
           const displayLines = lines.length > 20 ? lines.slice(-20) : lines
           return (
             <Box flexDirection="column" paddingLeft={2} paddingTop={0}>
@@ -895,6 +924,11 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
               {displayLines.map((line, i) => (
                 <Text key={i} color="gray" wrap="wrap">{line}</Text>
               ))}
+              {heartbeat ? (
+                <Text color="cyan">
+                  {SPINNER_FRAMES[spinnerFrame]} {name} still working — {Math.floor(heartbeat.elapsedMs / 1000)}s
+                </Text>
+              ) : null}
               <Text color="magenta" dimColor>── {name} (running {elapsedSec}s) ──</Text>
             </Box>
           )
@@ -1021,7 +1055,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
                   onChange={handleInputChange}
                   onSubmit={handleSubmit}
                   focus={!isProcessing || inputMode === 'question'}
-                  placeholder={isProcessing ? 'Ctrl+C to cancel…' : ''}
+                  placeholder={isProcessing ? 'Esc to cancel…' : ''}
                 />
               </Box>
             </Box>
@@ -1047,7 +1081,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
           <Text color="gray" dimColor>
           {hasSuggestions
             ? '↑↓ navigate  Tab/→ accept  Esc close  Enter execute'
-            : '↑↓ history  @file  /help  Shift+Tab auto  Ctrl+U clear  Ctrl+C ' + (isProcessing ? 'cancel' : 'exit×2')}
+            : '↑↓ history  @file  /help  Shift+Tab auto  Ctrl+U clear  Esc ' + (isProcessing ? 'cancel' : '/exit quit')}
           </Text>
           <Box>
             {autoMode ? (
