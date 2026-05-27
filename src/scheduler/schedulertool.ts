@@ -1,4 +1,4 @@
-import { Tool } from '../tools/tool.js'
+import { Tool, type ToolRenderHeader } from '../tools/tool.js'
 import { SchedulerManager, validateCron } from './schedulermanager.js'
 import { ScheduledTask, ScheduledTaskStatus, ScheduledTaskType } from './scheduledtask.js'
 
@@ -80,6 +80,12 @@ export class SchedulerTool extends Tool {
       },
       required: ['action'],
     }
+  }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    const action = String(input.action ?? '')
+    const id = String(input.id ?? '')
+    return { label: 'Schedule', args: id ? `${action} ${id}` : action }
   }
 
   async execute(args: Record<string, any>): Promise<string> {

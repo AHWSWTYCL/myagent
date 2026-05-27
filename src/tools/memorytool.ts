@@ -1,5 +1,5 @@
 import { getMemoryFiles, MemoryCategory, readCategory, writeCategory, readAllCategories } from '../memory/memory.js'
-import { Tool, type ToolPermissionResult } from './tool.js'
+import { Tool, type ToolPermissionResult, type ToolRenderHeader } from './tool.js'
 
 type MemoryAction = 'save' | 'delete' | 'list' | 'update_index'
 
@@ -34,6 +34,12 @@ export class MemoryTool extends Tool {
             },
             required: ['action', 'category'],
         }
+    }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        const action = String(input.action ?? '')
+        const arg = String(input.path ?? input.query ?? input.name ?? '')
+        return { label: 'Memory', args: arg ? `${action} ${arg}` : action }
     }
 
     /** MemoryTool 自动记录和管理记忆，是元工具而非外部操作，直接放行免权限确认。 */

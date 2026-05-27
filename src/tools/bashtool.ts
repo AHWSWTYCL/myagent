@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import { cwd } from 'process'
-import { Tool } from './tool'
+import { Tool, type ToolRenderHeader } from './tool'
 
 const TIMEOUT_MS = 10_000
 const MAX_OUTPUT_BYTES = 50_000
@@ -173,6 +173,14 @@ export class BashTool extends Tool {
             },
             required: ['command'],
         }
+    }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        return { label: 'Bash', args: Tool.truncate(String(input.command ?? ''), 120) }
+    }
+
+    renderToolResult(output: string, isError: boolean): string[] {
+        return Tool.summarize(output, isError)
     }
 
     private checkBlacklist(command: string): string | null {

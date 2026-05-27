@@ -1,4 +1,4 @@
-import { Tool } from './tool.js'
+import { Tool, type ToolRenderHeader } from './tool.js'
 
 const MAX_RESULTS = 5
 const TIMEOUT_MS = 15_000
@@ -63,6 +63,14 @@ export class WebSearchTool extends Tool {
   }
 
   get parallelSafe() { return true }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    return { label: 'WebSearch', args: Tool.truncate(String(input.query ?? ''), 80) }
+  }
+
+  renderToolResult(output: string, isError: boolean): string[] {
+    return Tool.summarize(output, isError)
+  }
 
   async checkPermission(_args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
     return { action: 'continue' }

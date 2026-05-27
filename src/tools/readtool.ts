@@ -1,5 +1,5 @@
 import fs from 'fs'
-import { Tool } from "./tool";
+import { Tool, type ToolRenderHeader } from "./tool";
 
 export class ReadTool extends Tool {
 
@@ -32,6 +32,18 @@ export class ReadTool extends Tool {
     }
 
     get parallelSafe(): boolean { return true }
+
+    get isExplorationTool(): boolean { return true }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        return { label: 'Read', args: Tool.shortPath(String(input.path ?? '')) }
+    }
+
+    renderToolResult(output: string, isError: boolean): string[] {
+        if (isError) return Tool.summarize(output, true)
+        const lineCount = output.split('\n').length
+        return [`Read ${lineCount} line${lineCount === 1 ? '' : 's'}`]
+    }
 
     async checkPermission(_args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
         return { action: 'continue' }

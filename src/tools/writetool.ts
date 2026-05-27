@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { cwd } from 'process'
-import { Tool } from "./tool";
+import { Tool, type ToolRenderHeader } from "./tool";
 
 // 系统敏感路径前缀——写这些路径直接阻断
 const SENSITIVE_PATH_PREFIXES = [
@@ -37,6 +37,17 @@ export class WriteTool extends Tool {
             },
             required: ['path', 'content'],
         }
+    }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        return { label: 'Write', args: Tool.shortPath(String(input.path ?? '')) }
+    }
+
+    renderToolResult(output: string, isError: boolean, input?: Record<string, unknown>): string[] {
+        if (isError) return Tool.summarize(output, true)
+        const content = String(input?.content ?? '')
+        const lineCount = content ? content.split('\n').length : 0
+        return [`Wrote ${lineCount} line${lineCount === 1 ? '' : 's'}`]
     }
 
     async checkPermission(args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {

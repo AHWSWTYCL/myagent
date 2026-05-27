@@ -1,4 +1,4 @@
-import { Tool } from './tool.js'
+import { Tool, type ToolRenderHeader } from './tool.js'
 import { SkillManager } from '../skills/skillmanager.js'
 
 type SkillAction = 'activate' | 'deactivate' | 'list'
@@ -35,6 +35,10 @@ export class UseSkillTool extends Tool {
       },
       required: ['action'],
     }
+  }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    return { label: 'Skill', args: String(input.skill_name ?? input.name ?? '') }
   }
 
   async execute(args: { action: SkillAction; skill_name?: string }): Promise<string> {

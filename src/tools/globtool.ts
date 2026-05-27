@@ -1,5 +1,5 @@
 import { globSync } from 'glob'
-import { Tool } from './tool'
+import { Tool, type ToolRenderHeader } from './tool'
 
 export class GlobTool extends Tool {
 
@@ -23,6 +23,20 @@ export class GlobTool extends Tool {
     }
 
     get parallelSafe(): boolean { return true }
+
+    get isExplorationTool(): boolean { return true }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        return { label: 'Glob', args: String(input.pattern ?? '') }
+    }
+
+    renderToolResult(output: string, isError: boolean): string[] {
+        if (isError) return Tool.summarize(output, true)
+        const lines = output.trim() ? output.trim().split('\n') : []
+        return lines.length === 0
+            ? ['No matches']
+            : [`Found ${lines.length} file${lines.length === 1 ? '' : 's'}`]
+    }
 
     async checkPermission(_args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
         return { action: 'continue' }

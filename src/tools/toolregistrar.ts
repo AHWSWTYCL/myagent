@@ -33,4 +33,18 @@ export class ToolRegistrar {
             input_schema: tool.input_schema
         }));
     }
+
+    /** 返回原始 Tool 实例列表（带渲染方法等） */
+    getAllToolInstances(): Tool[] {
+        return this.registry.getAllTools();
+    }
+
+    /** 构建 name → Tool 实例映射表，供 TUI 委托渲染 */
+    buildToolRenderMap(): Map<string, Tool> {
+        const map = new Map<string, Tool>()
+        for (const t of this.registry.getAllTools()) {
+            map.set(t.name, t)
+        }
+        return map
+    }
 }

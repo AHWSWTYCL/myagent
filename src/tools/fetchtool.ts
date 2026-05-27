@@ -1,4 +1,4 @@
-import { Tool } from './tool.js'
+import { Tool, type ToolRenderHeader } from './tool.js'
 
 const MAX_CONTENT_CHARS = 50_000
 const TIMEOUT_MS = 15_000
@@ -64,6 +64,15 @@ export class FetchTool extends Tool {
   }
 
   get parallelSafe() { return true }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    return { label: 'WebFetch', args: Tool.truncate(String(input.url ?? ''), 80) }
+  }
+
+  renderToolResult(output: string, isError: boolean): string[] {
+    if (isError) return Tool.summarize(output, true)
+    return [`Fetched ${output.length.toLocaleString()} chars`]
+  }
 
   async checkPermission(args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
     const url = (args.url ?? '') as string

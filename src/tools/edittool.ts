@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { structuredPatch } from 'diff'
-import { Tool } from './tool'
+import { Tool, type ToolRenderHeader } from './tool'
 
 /** 一条 diff 行，供 TUI 渲染 */
 export interface DiffLine {
@@ -39,6 +39,16 @@ export class EditTool extends Tool {
             },
             required: ['path', 'old_string', 'new_string'],
         }
+    }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        return { label: 'Edit', args: Tool.shortPath(String(input.path ?? '')) }
+    }
+
+    /** EditTool 成功时无输出，TUI 会显示 "Done" */
+    renderToolResult(_output: string, isError: boolean): string[] {
+        if (isError) return Tool.summarize(_output, true)
+        return []  // 空数组 → TUI 显示 "Done"
     }
 
     async execute(args: any): Promise<string> {

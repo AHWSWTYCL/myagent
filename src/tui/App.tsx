@@ -7,6 +7,7 @@ import type { DiffLine } from '../tools/edittool.js'
 import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
 import type { FileAttachment } from '../utils/attachments.js'
+import type { Tool } from '../tools/tool.js'
 import { parseAttachments, buildUserContent, autoPrefixAttachments } from '../utils/attachments.js'
 import { StreamingText } from './MarkdownRenderer.js'
 import { Banner } from './banner.js'
@@ -19,6 +20,7 @@ import { InputBox, Footer, buildCtx } from './InputBox.js'
 import { PendingToolRow, ToolCallView } from './ToolCallView.js'
 import { GroupedToolCallView } from './GroupedToolCallView.js'
 import { TurnSummary, EXPLORATION_TOOLS } from './TurnSummary.js'
+import { ToolRenderProvider } from './ToolRenderContext.js'
 import type { TurnToolItem } from './types.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
@@ -28,29 +30,28 @@ interface Props {
   commandParser: CommandParser
   runTurn: (input: string | any[], signal?: AbortSignal) => Promise<void>
   runBash: (cmd: string) => Promise<string>
+  toolMap: Map<string, Tool>
 }
 
 const MAX_HISTORY = 100
 const MAX_CONTEXT = 200_000
 
 /**
- * Build a render plan that preserves the original tool call order.
+ * Build a render plan with the TurnSummary placed at the END.
  *
- * Claude Code design: no separate "exploration zone" and "non-exploration zone".
- * Instead, all tools are rendered in their natural order, with exploration
- * tools collapsed into a single TurnSummary at the position of the first one.
+ * All exploration tools (read_file/list_dir/glob/grep) are collapsed into a
+ * single TurnSummary at the very end of the plan. Non-exploration tools
+ * maintain their relative order and are grouped by consecutive same-name.
  *
- * Example: if LLM calls bash → read_file → bash → grep → edit
+ * Example: bash → read_file → bash → grep → edit
  *   plan = [
- *     { type: 'tool-group', items: [bash1] },
- *     { type: 'summary' },
- *     { type: 'tool-group', items: [bash2] },     ← NOT merged with bash1
- *     { type: 'tool-group', items: [edit1] },
+ *     { type: 'tool-group', items: [bash, bash] },  ← merged!
+ *     { type: 'tool-group', items: [edit] },
+ *     { type: 'summary' },                           ← at the end
  *   ]
  *
- * Consecutive same-name non-exploration tools are still grouped for display
- * (e.g. bash, bash → Bash ×2), but tools on different sides of the TurnSummary
- * boundary are NOT merged.
+ * This ensures same-name non-exploration tools are never split by the summary
+ * boundary, and exploration research is summarized as a block after all actions.
  */
 type RenderPlanItem =
   | { type: 'summary' }
@@ -58,7 +59,7 @@ type RenderPlanItem =
 
 function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
   const plan: RenderPlanItem[] = []
-  let explorationRendered = false
+  let hasExploration = false
   let pendingGroup: TurnToolItem[] | null = null
 
   function flushGroup() {
@@ -70,12 +71,9 @@ function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
 
   for (const tool of turnTools) {
     if (EXPLORATION_TOOLS.has(tool.name)) {
-      if (!explorationRendered) {
-        flushGroup()
-        plan.push({ type: 'summary' })
-        explorationRendered = true
-      }
-      // Skip individual exploration tools — TurnSummary covers them all.
+      hasExploration = true
+      // Don't insert summary here — collect the flag and continue.
+      // Exploration tools are NOT added to any tool-group.
       continue
     }
 
@@ -89,18 +87,23 @@ function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
   }
 
   flushGroup()
+
+  // Summary goes at the very end, after all non-exploration groups.
+  if (hasExploration) {
+    plan.push({ type: 'summary' })
+  }
+
   return plan
 }
 
-export function App({ bridge, commandParser, runTurn, runBash }: Props) {
+export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props) {
   const { exit } = useApp()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streamingText, setStreamingText] = useState('')
   const [status, setStatus] = useState('')
-  // 当前用户输入轮次内的所有工具调用。
-  // 场景 B：探索工具在每个 LLM round 结束时由 turnToolReset 归档为
-  // TurnSummary 静态消息并从 turnTools 移除。底部 TurnSummary 只展示
-  // 当前 round 中尚未完成的探索工具。非探索工具跨 round 累积。
+  // 当前用户输入轮次内正在执行（pending）的工具。
+  // 每个 LLM round 结束时，turnToolReset 将已完成工具全部移入 Static，
+  // turnTools 只保留 pending 工具在动态区实时显示。
   const [turnTools, setTurnTools] = useState<TurnToolItem[]>([])
   const [usage, setUsage] = useState<UsageStats | null>(null)
   const [inputValue, setInputValue] = useState('')
@@ -147,12 +150,10 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
   // ── Edit diff 状态 ──────────────────────────────────────────────────
   const [editDiffs, setEditDiffs] = useState<Array<{ id: string; filePath: string; lines: DiffLine[]; additions: number; removals: number }>>([])
 
-  // ── 工具卡片键盘导航 ──────────────────────────────────────────────
-  // 指向 turnTools 中已完成（!isPending）工具项的索引。-1 表示无焦点。
-  // 按 Tab 在已完成工具间循环，Enter 展开/折叠输出。
-  const [focusedToolIdx, setFocusedToolIdx] = useState(-1)
-  // 被单独展开的工具 ID 集合（Ctrl+O 全局展开之外的细粒度控制）
-  const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(new Set())
+  // ── 工具键盘导航 ──────────────────────────────────────────────────
+  // 已废弃：非探索工具完成时直接从 turnTools 移除并进入 Static，
+  // 不再在动态区域中停留，因此无需 Tab 导航和 per-tool 展开状态。
+  // 所有工具展开/折叠通过 Ctrl+O 全局控制（expandAll）。
 
   // ── 附件状态 ────────────────────────────────────────────────────────
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
@@ -226,10 +227,10 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
     bridge.on('toolStart', ({ callId, name, input }: { callId: string; name: string; input: unknown }) => {
       setStatus('')
-      // Tools are about to execute — hide streaming text from the dynamic area
-      // so the display order is: user msg → tools → agent summary text.
-      // The text is preserved in streamingRef and will be archived on onTurnEnd.
-      setStreamingText('')
+      // Don't clear streamingText here — let the LLM's reasoning text stay visible
+      // alongside tool cards. The streaming text appears chronologically BEFORE
+      // tools (LLM reasons → calls tools → more reasoning), so rendering it
+      // before the dynamic tool area gives the correct reading order.
       setTurnTools(prev => [...prev, { id: callId, name, input, output: '', isError: false, isPending: true }])
     })
 
@@ -241,35 +242,35 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       setUsage(null)
     })
 
-    // 场景 B：每个 LLM round 结束时，将本轮的探索工具归档为 TurnSummary 静态消息。
-    // 多条 round = 多条 TurnSummary 出现在 Static 区域。
-    // 归档后从 turnTools 中移除，底部 TurnSummary 不再展示已归档的工具。
+    // 每个 LLM round 结束时，将本轮所有已完成工具从 turnTools 移入 messages（Static），
+    // 这样下一 round 开始时工具不会跨 round 累积。
     //
-    // 注意：不依赖 isPending 过滤——toolEnd 已在 turnToolReset 之前触发，
-    // 但 React state 更新是异步的，turnToolsRef.current 可能尚未反映 completed 状态。
-    // 而 turnToolReset 发生时，turnTools 中的所有探索工具必然已经执行完毕，
-    // 所以直接归档全部探索工具是安全的。
+    // - 探索工具（read_file/list_dir/glob/grep）：归档为 TurnSummary 摘要消息
+    // - 非探索工具（bash/edit_file 等）：toolEnd 已将它们加入 messages，此处只需从 turnTools 移除
+    //
+    // 注意：移除全部已完成工具后，turnTools 只保留 pending 工具，它们会在动态区实时显示。
     bridge.on('turnToolReset', () => {
       const currentTools = turnToolsRef.current
-      const explorationTools = currentTools.filter(t => EXPLORATION_TOOLS.has(t.name))
-      if (explorationTools.length === 0) return
+      const explorationTools = currentTools.filter(t => EXPLORATION_TOOLS.has(t.name) && !t.isPending)
 
-      const readCount = explorationTools.filter(t => t.name === 'read_file').length
-      const searchCount = explorationTools.filter(t => t.name === 'glob' || t.name === 'grep').length
-      const listCount = explorationTools.filter(t => t.name === 'list_dir').length
-      const anyError = explorationTools.some(t => t.isError)
+      // 有探索工具 → 归档为 TurnSummary
+      if (explorationTools.length > 0) {
+        const readCount = explorationTools.filter(t => t.name === 'read_file').length
+        const searchCount = explorationTools.filter(t => t.name === 'glob' || t.name === 'grep').length
+        const listCount = explorationTools.filter(t => t.name === 'list_dir').length
+        const anyError = explorationTools.some(t => t.isError)
+        const msgId = nextId()
+        setMessages(prev => [...prev, {
+          id: msgId,
+          role: 'system',
+          content: '',
+          explorationSummary: { readCount, searchCount, listCount, tools: explorationTools, anyError },
+        }])
+      }
 
-      const msgId = nextId()
-      setMessages(prev => [...prev, {
-        id: msgId,
-        role: 'system',
-        content: '',
-        explorationSummary: { readCount, searchCount, listCount, tools: explorationTools, anyError },
-      }])
-
-      // 从 turnTools 中移除所有探索工具（排除 pending 探索工具，防止 toolEnd
-      // 还没到来时新工具被误删。但理论上 turnToolReset 不在此场景发生。）
-      setTurnTools(prev => prev.filter(t => !EXPLORATION_TOOLS.has(t.name) || t.isPending))
+      // 从 turnTools 中移除所有已完成工具，只保留 pending 的。
+      // 非探索工具的消息已在 toolEnd 时加入 messages，不会丢失。
+      setTurnTools(prev => prev.filter(t => t.isPending))
     })
 
     bridge.on('compacting', ({ state, detail }: { state: 'start' | 'done' | 'micro'; detail?: string }) => {
@@ -292,28 +293,33 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
     })
 
     bridge.on('toolEnd', ({ callId, name, input, output }: { callId: string; name: string; input: unknown; output: string }) => {
-      // Update the turnTools entry: pending → completed
       const isError = /^Error:/i.test(output) || /^Permission denied/i.test(output)
-      setTurnTools(prev => prev.map(p =>
-        p.id === callId ? { ...p, isPending: false, output, isError } : p
-      ))
-      // edit_file is rendered via editDiff (full diff). Skip the generic entry to avoid duplication.
+
+      // Exploration tools (read_file/list_dir/glob/grep): keep in turnTools
+      // for turnToolReset to archive as a grouped TurnSummary.
+      if (EXPLORATION_TOOLS.has(name)) {
+        setTurnTools(prev => prev.map(p =>
+          p.id === callId ? { ...p, isPending: false, output, isError } : p
+        ))
+        // No individual message — TurnSummary handles them.
+        return
+      }
+
+      // Non-exploration tools: remove from turnTools immediately and add to
+      // Static messages. This avoids the "jump" where completed tools disappear
+      // from the dynamic area then reappear in Static at turnToolReset time.
+      setTurnTools(prev => prev.filter(p => p.id !== callId))
+
+      // Special cases rendered elsewhere (full diff / interactive prompts)
       if (name === 'edit_file') return
-      // ask_user / ask_user_choice are interactive — the prompt itself is the visible UI.
       if (name === 'ask_user' || name === 'ask_user_choice') return
-      // Exploration tools (read_file/list_dir/glob/grep) are rendered by TurnSummary
-      // from turnTools, not as individual messages. This matches Claude Code's
-      // CollapsedReadSearchContent approach — one consolidated group per turn.
-      if (EXPLORATION_TOOLS.has(name)) return
-      // 使用 callId 作为消息 id，这样 <Static> 的过滤条件 (toolIdsInGroup.has(m.id))
-      // 能正确匹配，避免工具在 <Static> 和 turnTools 区域中重复渲染。
+
       setMessages(prev => [...prev, {
         id: callId,
         role: 'tool',
         content: '',
         toolCall: { name, input, output, isError },
       }])
-      setFocusedToolIdx(-1) // Reset focus when new tools arrive
     })
 
     bridge.on('recall', (memory: string) => {
@@ -623,37 +629,6 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       return
     }
 
-    // ── 已完成工具的键盘导航 ──────────────────────────────────────────
-    // Tab/Shift+Tab: 在已完成工具间切换焦点
-    // Enter: 展开/折叠输出
-    // 探索类工具（read_file/list_dir/glob/grep）由 TurnSummary + Ctrl+O 统一控制，
-    // 不参与单独的焦点导航。
-    const nonExplorationCompleted = turnTools.filter(t => !t.isPending && !EXPLORATION_TOOLS.has(t.name))
-    const toolCount = nonExplorationCompleted.length
-    if (toolCount > 0) {
-      // Tab → 聚焦下一个工具 / 退出焦点（循环: -1→0→1→...→last→-1）
-      if (key.tab && !key.shift && !inputValue) {
-        setFocusedToolIdx(prev => prev >= toolCount - 1 ? -1 : prev + 1)
-        return
-      }
-      // Shift+Tab → 聚焦上一个工具
-      if (key.tab && key.shift && !inputValue && focusedToolIdx >= 0) {
-        setFocusedToolIdx(prev => (prev - 1 + toolCount) % toolCount)
-        return
-      }
-      // Enter → 当有焦点（且 input 为空）时展开/折叠工具输出
-      if (key.return && !inputValue && focusedToolIdx >= 0 && focusedToolIdx < toolCount) {
-        const tool = nonExplorationCompleted[focusedToolIdx]
-        setExpandedToolIds(prev => {
-          const next = new Set(prev)
-          if (next.has(tool.id)) next.delete(tool.id)
-          else next.add(tool.id)
-          return next
-        })
-        return
-      }
-    }
-
     // Ctrl+U: 清空当前输入
     if (key.ctrl && _input === 'u') {
       setInputValue('')
@@ -790,29 +765,25 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
           const output = await runBash(cmd)
           const text = output || '(empty output)'
           const isError = /^Error:/i.test(text)
-          setTurnTools(prev => prev.map(p =>
-            p.id === bashCallId ? { ...p, isPending: false, output: text, isError } : p
-          ))
+          // Remove from turnTools immediately (same as toolEnd for non-exploration tools)
+          setTurnTools(prev => prev.filter(p => p.id !== bashCallId))
           setMessages(prev => [...prev, {
             id: bashCallId,
             role: 'tool',
             content: '',
             toolCall: { name: 'bash', input: { command: cmd }, output: text, isError },
           }])
-          setFocusedToolIdx(-1)
           if (text.length > 2000) console.log(`[!] ${cmd}\n${text}`)
         } catch (err: any) {
           const text = `Error: ${err.message ?? err}`
-          setTurnTools(prev => prev.map(p =>
-            p.id === bashCallId ? { ...p, isPending: false, output: text, isError: true } : p
-          ))
+          // Remove from turnTools immediately (same as toolEnd for non-exploration tools)
+          setTurnTools(prev => prev.filter(p => p.id !== bashCallId))
           setMessages(prev => [...prev, {
             id: bashCallId,
             role: 'tool',
             content: '',
             toolCall: { name: 'bash', input: { command: cmd }, output: text, isError: true },
           }])
-          setFocusedToolIdx(-1)
         } finally {
           setIsProcessing(false)
         }
@@ -862,11 +833,9 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
       setMessages(prev => [...prev, { id: nextId(), role: 'user', content: displayText }])
       setAttachments([])
       setAttachmentErrors([])
-      // 场景 B：探索工具已在每次 turnToolReset 时逐 round 归档为 TurnSummary
-      // 静态消息。这里不再重复归档。直接清空上一轮的工具数据开始新轮次。
+      // turnToolReset 已在每个 round 结束时清空已完成工具。
+      // 这里清空 only pending tools（如果有残留），开始新轮次。
       setTurnTools([])
-      setFocusedToolIdx(-1)
-      setExpandedToolIds(new Set())
       setIsProcessing(true)
       setStatus('thinking...')
       streamingRef.current = ''
@@ -889,9 +858,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         }
         streamingRef.current = ''
         setStreamingText('')
-        // turnTools 不清空——保留非探索工具的已完成展示。
-        // 探索工具已在每轮 turnToolReset 时归档，不会出现在这里。
-        // handleSubmit 开始时才会清空 turnTools，开始新轮次。
+        // turnTools 已在 turnToolReset 中逐 round 清理，无需再处理。
         abortControllerRef.current = null
         setIsProcessing(false)
         setStatus('')
@@ -906,15 +873,17 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
 
   const ctx = buildCtx(usage, MAX_CONTEXT)
 
-  // 当 turnTools 中有工具卡片时，它们在下方区域显示。
-  // 为避免同一工具在 Static 中重复显示，过滤掉对应 toolCall 消息。
-  // 只过滤已完成（isPending=false）的工具——pending 状态的工具还没有消息可过滤。
+  // 过滤掉 id 仍在 turnTools 中的工具消息，避免与动态区重复渲染。
+  // 非探索工具在 toolEnd 时已从 turnTools 移除 -> 在 Static 正常显示。
+  // 探索工具不在 messages 中有 toolCall 条目 -> 过滤器不产生影响。
+  // 仅在工具刚启动尚未完成（pending）的短暂窗口内有过滤效果。
   const toolIdsInGroup = new Set(turnTools.filter(Boolean).map(t => t.id))
   const staticMessages = messages.filter(
     m => !(m.role === 'tool' && m.toolCall && toolIdsInGroup.has(m.id))
   )
 
   return (
+    <ToolRenderProvider toolMap={toolMap}>
     <Box flexDirection="column">
       <Static
         key={expandAll ? 'static-expanded' : 'static-collapsed'}
@@ -926,9 +895,26 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         }}
       </Static>
 
-      {/* 当前轮次的工具调用（动态区域，不在 Static 中）。
-          方案 B：按 LLM 原始调用顺序渲染，TurnSummary 嵌入到第一个探索工具的位置，
-          而非固定放在顶部。非探索工具跨 round 累积，在 handleSubmit 开始时清空。 */}
+      {/* Streaming LLM response text — rendered BEFORE dynamic tools because
+          the LLM's reasoning text appears chronologically before tool calls.
+          When tools start, streamingText stays visible; toolEnd removes
+          non-exploration tools from turnTools, so they appear directly in Static,
+          keeping the reading order: reasoning → tools → more reasoning. */}
+      {streamingText ? (
+        <Box flexDirection="column" marginBottom={1}>
+          <Box>
+            <Text color="cyan">⏺ </Text>
+            <Box flexDirection="column" flexGrow={1}>
+              <StreamingText text={streamingText} showCursor />
+            </Box>
+          </Box>
+        </Box>
+      ) : null}
+
+      {/* 动态工具区域：pending 工具（实时执行中）+ 已完成的探索工具
+          （等待 turnToolReset 归档为 TurnSummary）。
+          非探索工具完成时已从 turnTools 移除并直接进入 Static，
+          因此不会在此区域出现再从动态"跳"到静态的过渡。 */}
       {turnTools.length > 0 ? (
         <Box flexDirection="column">
           {buildRenderPlan(turnTools).map((item, idx) => {
@@ -950,10 +936,7 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
             const group = item.items
             if (group.length === 1) {
               const tool = group[0]
-              const nonExplorationCompleted = turnTools.filter(t => !t.isPending && !EXPLORATION_TOOLS.has(t.name))
-              const flatIdx = nonExplorationCompleted.indexOf(tool)
-              const isFocused = !tool.isPending && flatIdx >= 0 ? flatIdx === focusedToolIdx : false
-              const isExpanded = expandAll || expandedToolIds.has(tool.id)
+              const isExpanded = expandAll
               if (tool.isPending) {
                 return (
                   <PendingToolRow
@@ -965,12 +948,15 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
                   />
                 )
               }
+              // Completed non-exploration tools are removed from turnTools at
+              // toolEnd, so this branch is only reached for exploration tools
+              // waiting for turnToolReset. No keyboard focus navigation needed.
               return (
                 <ToolCallView
                   key={tool.id}
                   payload={{ name: tool.name, input: tool.input, output: tool.output, isError: tool.isError }}
                   expanded={isExpanded}
-                  focused={isFocused}
+                  focused={false}
                 />
               )
             }
@@ -991,24 +977,6 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
               />
             )
           })}
-          {focusedToolIdx >= 0 ? (
-            <Box>
-              <Text color="gray" dimColor>  Tab ↑↓ navigate · Enter expand/collapse</Text>
-            </Box>
-          ) : null}
-        </Box>
-      ) : null}
-
-      {/* Streaming LLM response text — rendered AFTER tools because
-          tools execute before the LLM generates its response. */}
-      {streamingText ? (
-        <Box flexDirection="column" marginBottom={1}>
-          <Box>
-            <Text color="cyan">⏺ </Text>
-            <Box flexDirection="column" flexGrow={1}>
-              <StreamingText text={streamingText} showCursor />
-            </Box>
-          </Box>
         </Box>
       ) : null}
 
@@ -1073,5 +1041,6 @@ export function App({ bridge, commandParser, runTurn, runBash }: Props) {
         </Box>
       ) : null}
     </Box>
+    </ToolRenderProvider>
   )
 }

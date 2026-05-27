@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { Tool } from './tool.js'
+import { Tool, type ToolRenderHeader } from './tool.js'
 import { SkillManager } from '../skills/skillmanager.js'
 import { SKILLS_DIR, parseFrontmatter } from '../skills/skillloader.js'
 
@@ -43,6 +43,10 @@ export class SkillWriteTool extends Tool {
       },
       required: ['action'],
     }
+  }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    return { label: 'SkillWrite', args: String(input.name ?? '') }
   }
 
   async execute(args: {

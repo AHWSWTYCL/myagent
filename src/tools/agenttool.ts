@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { Tool } from './tool.js'
+import { Tool, type ToolRenderHeader } from './tool.js'
 import { ToolRegistrar } from './toolregistrar.js'
 import { AgentRegistry } from '../agents/registry.js'
 import { runAgent } from '../agents/runner.js'
@@ -53,6 +53,17 @@ export class AgentTool extends Tool {
   }
 
   get name(): string { return 'agent' }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    const agentName = String(input.agent ?? 'sub-agent')
+    const task = String(input.task ?? '')
+    return { label: `Task(${agentName})`, args: task ? Tool.truncate(task, 100) : '' }
+  }
+
+  renderToolResult(output: string, isError: boolean): string[] {
+    // 用行数作为任务结果摘要
+    return Tool.summarize(output, isError)
+  }
 
   get description(): string {
     const lines = [

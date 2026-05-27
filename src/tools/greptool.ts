@@ -1,5 +1,5 @@
 import { spawn } from 'child_process'
-import { Tool } from './tool'
+import { Tool, type ToolRenderHeader } from './tool'
 
 const TIMEOUT_MS = 10_000
 const MAX_OUTPUT_BYTES = 50_000
@@ -29,6 +29,20 @@ export class GrepTool extends Tool {
     }
 
     get parallelSafe(): boolean { return true }
+
+    get isExplorationTool(): boolean { return true }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        return { label: 'Grep', args: String(input.pattern ?? '') }
+    }
+
+    renderToolResult(output: string, isError: boolean): string[] {
+        if (isError) return Tool.summarize(output, true)
+        const lines = output.trim() ? output.trim().split('\n') : []
+        return lines.length === 0
+            ? ['No matches']
+            : [`Found ${lines.length} match${lines.length === 1 ? '' : 'es'}`]
+    }
 
     async checkPermission(_args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
         return { action: 'continue' }

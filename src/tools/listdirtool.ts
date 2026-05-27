@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { cwd } from 'process'
-import { Tool } from './tool'
+import { Tool, type ToolRenderHeader } from './tool'
 
 export class ListDirTool extends Tool {
 
@@ -24,6 +24,19 @@ export class ListDirTool extends Tool {
     }
 
     get parallelSafe(): boolean { return true }
+
+    get isExplorationTool(): boolean { return true }
+
+    renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+        const p = String(input.path ?? '.')
+        return { label: 'List', args: Tool.shortPath(p) }
+    }
+
+    renderToolResult(output: string, isError: boolean): string[] {
+        if (isError) return Tool.summarize(output, true)
+        const lineCount = output.trim() ? output.trim().split('\n').length : 0
+        return [`${lineCount} entr${lineCount === 1 ? 'y' : 'ies'}`]
+    }
 
     async checkPermission(_args: Record<string, unknown>): Promise<import('./tool.js').ToolPermissionResult> {
         return { action: 'continue' }

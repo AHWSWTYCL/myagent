@@ -1,4 +1,4 @@
-import { Tool, type ToolPermissionResult } from './tool.js'
+import { Tool, type ToolPermissionResult, type ToolRenderHeader } from './tool.js'
 
 interface AskUserArgs {
   prompt: string
@@ -42,6 +42,10 @@ export class AskTool extends Tool {
   }
 
   get parallelSafe(): boolean { return false }
+
+  renderToolUseMessage(_input: Record<string, unknown>): ToolRenderHeader {
+    return { label: 'AskUser', args: '' }
+  }
 
   /** 用户交互工具，再走权限确认就成了循环提问，直接放行。 */
   async checkPermission(): Promise<ToolPermissionResult> {

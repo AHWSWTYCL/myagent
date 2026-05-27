@@ -1,4 +1,4 @@
-import { Tool } from './tool.js'
+import { Tool, type ToolRenderHeader } from './tool.js'
 import { SkillManager } from '../skills/skillmanager.js'
 
 /**
@@ -46,6 +46,10 @@ export class InvokeSkillTool extends Tool {
 
   get parallelSafe(): boolean {
     return true
+  }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    return { label: 'InvokeSkill', args: String(input.skill_name ?? '') }
   }
 
   async execute(args: { skill_name?: string }): Promise<string> {

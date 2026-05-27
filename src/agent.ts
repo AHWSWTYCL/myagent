@@ -305,22 +305,6 @@ export async function runTurn(
   }
 }
 
-function toolLabel(name: string, args: Record<string, unknown>): string {
-  switch (name) {
-    case 'bash':        return `$ ${args.command}`
-    case 'read_file':   return `read ${args.path}`
-    case 'write_file':  return `write ${args.path}`
-    case 'list_dir':    return `ls ${args.path}`
-    case 'web_search':  return `search "${args.query}"`
-    case 'web_fetch':   return `fetch ${args.url}`
-    case 'glob':        return `glob ${args.pattern}`
-    case 'grep':        return `grep ${args.pattern}`
-    case 'edit_file':   return `edit ${args.path}`
-    case 'agent':       return `agent  ${args.agent ?? 'sub-agent'}${args.task ? `  (${String(args.task).slice(0, 60)})` : ''}`
-    default:           return name
-  }
-}
-
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 const scheduler = new Scheduler(
   prompt => runTurn(prompt),
@@ -329,5 +313,84 @@ const scheduler = new Scheduler(
 )
 scheduler.start()
 
-// ── Render TUI ────────────────────────────────────────────────────────────────
-render(React.createElement(App, { bridge, commandParser, runTurn, runBash }))
+// ── 解析 CLI 参数，决定是 debug 模式还是 TUI ──────────────────────────────
+import { parseDebugArgs, DebugCollector, logProgress } from './debug.js'
+
+const debugOpts = parseDebugArgs()
+
+if (debugOpts) {
+  // ── Debug 模式：headless 运行，输出 JSON ──────────────────────────────
+
+  // 启用 auto mode — debug 模式无 TUI，不能做交互式授权
+  if (!bridge.autoMode) {
+    bridge.toggleAutoMode()
+    if (debugOpts.autoYes) {
+      logProgress.start('Auto mode enabled')
+    } else {
+      logProgress.start('Auto mode enabled (required by headless debug mode; use --auto-yes to suppress this notice)')
+    }
+  }
+
+  const collector = new DebugCollector(bridge)
+  let aborted = false
+
+  // Ctrl+C 优雅退出
+  const onSigint = () => { aborted = true }
+  process.on('SIGINT', onSigint)
+
+  logProgress.start(`Starting headless turn: ${debugOpts.input.slice(0, 80)}${debugOpts.input.length > 80 ? '…' : ''}`)
+  const signal = new AbortController()
+
+  // 超时自动中断
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  if (debugOpts.timeout) {
+    timeoutHandle = setTimeout(() => {
+      signal.abort()
+      logProgress.ok(`Timeout reached (${debugOpts.timeout}s), aborting...`)
+    }, debugOpts.timeout * 1000)
+  }
+
+  try {
+    await runTurn(debugOpts.input, signal.signal)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    collector.setError(msg)
+    logProgress.error(msg)
+  }
+
+  // 清理超时定时器
+  if (timeoutHandle) clearTimeout(timeoutHandle)
+
+  if (aborted) {
+    collector.setError('Interrupted by SIGINT')
+    logProgress.error('Interrupted by user')
+  }
+
+  // 从 messages 数组构建输出
+  const result = collector.buildResult(messages as Array<{ role: string; content: string | Array<unknown> }>)
+
+  const output = JSON.stringify(result, null, 2)
+
+  if (debugOpts.output) {
+    // 写文件
+    const fs = await import('fs')
+    fs.writeFileSync(debugOpts.output, output + '\n')
+    logProgress.ok(`Result written to ${debugOpts.output}`)
+  } else {
+    // 写 stdout
+    // 注意：console.log 已被 override 到 bridge.emitMessage，这里必须用
+    // process.stdout.write 或原始 console.log 才能让 JSON 到 stdout。
+    // 详见 agent.ts 顶部 console.log 的 override 逻辑。
+    console.error('─'.repeat(40))
+    process.stdout.write(output + '\n')
+  }
+
+  // 清理并退出
+  scheduler.stop()
+  await mcpManager.shutdownAll().catch(() => {})
+  process.exit(result.status === 'error' ? 1 : 0)
+} else {
+  // ── 正常 TUI 模式 ─────────────────────────────────────────────────────
+  const toolRenderMap = toolRegistrar.buildToolRenderMap()
+  render(React.createElement(App, { bridge, commandParser, runTurn, runBash, toolMap: toolRenderMap }))
+}

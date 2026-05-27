@@ -5,7 +5,7 @@
  * 以及查看任务的依赖关系图。
  */
 
-import { Tool } from '../tools/tool.js'
+import { Tool, type ToolRenderHeader } from '../tools/tool.js'
 import { TaskManager, formatTaskDetail, formatTaskLine } from './taskmanager.js'
 import { TaskStatus, TASK_STATUSES, STATUS_ICON } from './task.js'
 
@@ -70,6 +70,16 @@ export class TaskTool extends Tool {
       },
       required: ['action'],
     }
+  }
+
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    const action = String(input.action ?? '')
+    if (action === 'list') {
+      // 解析 output 中的任务数量（由 execute 写入 __TASK_JSON__）
+      return { label: 'TaskList', args: '' }
+    }
+    const id = String(input.id ?? input.title ?? '')
+    return { label: 'Task', args: id ? `${action} ${id}` : action }
   }
 
   async execute(args: Record<string, any>): Promise<string> {
