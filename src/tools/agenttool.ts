@@ -26,6 +26,9 @@ export class AgentTool extends Tool {
   private emitLineFn?: (line: string) => void
   private onSubAgentDeltaFn?: (name: string, delta: string) => void
   private onSubAgentHeartbeatFn?: (name: string, elapsedMs: number) => void
+  private onSubAgentStartFn?: (name: string, description: string, agentType: string) => void
+  private onSubAgentProgressFn?: (name: string, toolUseCount: number, tokenCount: number, lastActivity?: string) => void
+  private onSubAgentDoneFn?: (name: string, status: 'completed' | 'failed' | 'killed', error?: string) => void
   private currentSignal?: AbortSignal
 
   constructor(
@@ -39,12 +42,18 @@ export class AgentTool extends Tool {
     emitLine: (line: string) => void
     onSubAgentDelta?: (name: string, delta: string) => void
     onSubAgentHeartbeat?: (name: string, elapsedMs: number) => void
+    onSubAgentStart?: (name: string, description: string, agentType: string) => void
+    onSubAgentProgress?: (name: string, toolUseCount: number, tokenCount: number, lastActivity?: string) => void
+    onSubAgentDone?: (name: string, status: 'completed' | 'failed' | 'killed', error?: string) => void
   }) {
     this.client = opts.client
     this.executeToolFn = opts.executeTool
     this.emitLineFn = opts.emitLine
     this.onSubAgentDeltaFn = opts.onSubAgentDelta
     this.onSubAgentHeartbeatFn = opts.onSubAgentHeartbeat
+    this.onSubAgentStartFn = opts.onSubAgentStart
+    this.onSubAgentProgressFn = opts.onSubAgentProgress
+    this.onSubAgentDoneFn = opts.onSubAgentDone
   }
 
   /** 设置当前 turn 的 AbortSignal，传递给 sub-agent 内部循环以实现 Esc 取消。 */
@@ -61,7 +70,6 @@ export class AgentTool extends Tool {
   }
 
   renderToolResult(output: string, isError: boolean): string[] {
-    // 用行数作为任务结果摘要
     return Tool.summarize(output, isError)
   }
 
@@ -79,7 +87,6 @@ export class AgentTool extends Tool {
   }
 
   get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    // 取所有 agent input schema 的并集，agent / task / source 是固定字段
     const properties: Record<string, unknown> = {
       agent: {
         type: 'string',
@@ -119,8 +126,11 @@ export class AgentTool extends Tool {
       return `Error: unknown agent "${args.agent}". Available: ${known}`
     }
 
+    // Notify TUI panel that a new sub-agent started
+    this.onSubAgentStartFn?.(def.name, String(args.task ?? ''), def.agentType ?? 'general-purpose')
+
     try {
-      return await runAgent(def, args, {
+      const result = await runAgent(def, args, {
         source: args.source ?? 'main',
         toolRegistrar: this.toolRegistrar,
         executeTool: this.executeToolFn,
@@ -128,10 +138,16 @@ export class AgentTool extends Tool {
         emitLine: this.emitLineFn,
         onSubAgentDelta: this.onSubAgentDeltaFn,
         onSubAgentHeartbeat: this.onSubAgentHeartbeatFn,
+        onSubAgentStart: this.onSubAgentStartFn,
+        onSubAgentProgress: this.onSubAgentProgressFn,
         signal: this.currentSignal,
       })
+      this.onSubAgentDoneFn?.(def.name, 'completed')
+      return result
     } catch (err) {
-      return `Error running agent "${args.agent}": ${err instanceof Error ? err.message : String(err)}`
+      const msg = `Error running agent "${args.agent}": ${err instanceof Error ? err.message : String(err)}`
+      this.onSubAgentDoneFn?.(def.name, 'failed', msg)
+      return msg
     }
   }
 }

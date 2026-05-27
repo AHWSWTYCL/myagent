@@ -108,6 +108,9 @@ agentTool.setExecutionContext({
   emitLine: line => bridge.emitMessage('system', line),
   onSubAgentDelta: (name, delta) => bridge.emitSubAgentDelta(name, delta),
   onSubAgentHeartbeat: (name, elapsedMs) => bridge.emitSubAgentHeartbeat(name, elapsedMs),
+  onSubAgentStart: (name, description, agentType) => bridge.emitSubAgentStart(name, description, agentType),
+  onSubAgentProgress: (name, toolUseCount, tokenCount, lastActivity) => bridge.emitSubAgentProgress(name, toolUseCount, tokenCount, lastActivity),
+  onSubAgentDone: (name, status, error) => bridge.emitSubAgentDone(name, status, error),
 })
 
 // ── MCP Manager ───────────────────────────────────────────────────────────────

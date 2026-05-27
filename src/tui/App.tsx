@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Box, Text, Static, useInput, useApp } from 'ink'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
-import type { TuiBridge } from './bridge.js'
+import type { TuiBridge, SubAgentTask } from './bridge.js'
 import type { DiffLine } from '../tools/edittool.js'
 import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
@@ -22,6 +22,7 @@ import { GroupedToolCallView } from './GroupedToolCallView.js'
 import { TurnSummary, EXPLORATION_TOOLS } from './TurnSummary.js'
 import { ToolRenderProvider } from './ToolRenderContext.js'
 import type { TurnToolItem } from './types.js'
+import { getVisibleTasks } from './SubAgentTaskPanel.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 
@@ -140,6 +141,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
   const pendingResolveRef = useRef<((v: any) => void) | null>(null)
   const idCounter = useRef(0)
   const streamingRef = useRef('')
+  const turnVersionRef = useRef(0) // turn 版本守卫：防止 stale setImmediate 在 turnEnd 后更新 streamingText
   const historyIndexRef = useRef(-1)
   const abortControllerRef = useRef<AbortController | null>(null)
   const isProcessingRef = useRef(false)    // 同步版 isProcessing，避免闭包过期
@@ -162,6 +164,10 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
 
   // ── MCP 状态 ─────────────────────────────────────────────────────────
   const [mcpServers, setMcpServers] = useState<MCPServerInfo[]>([])
+
+  // ── 子 agent 任务面板状态 ─────────────────────────────────────────────
+  const [subAgentTasks, setSubAgentTasks] = useState<SubAgentTask[]>([])
+  const visibleTasks = getVisibleTasks(subAgentTasks)
 
   // ── 子 agent 实时输出（路由到 pending agent tool 的 liveOutput）────
 
@@ -203,19 +209,25 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
     bridge.on('status', (msg: string) => setStatus(msg))
 
     let rafPending = false
+    // turn 版本守卫：每次 turnEnd 时递增，stale 的 setImmediate 检测到版本不匹配就丢弃
     bridge.on('text', (delta: string) => {
       streamingRef.current += delta
       if (!rafPending) {
         rafPending = true
+        const versionAtSchedule = turnVersionRef.current
         setImmediate(() => {
           rafPending = false
-          setStreamingText(streamingRef.current)
+          // 丢弃 stale：setImmediate 在 turnEnd 清除 streamingRef 之后才执行
+          if (versionAtSchedule === turnVersionRef.current) {
+            setStreamingText(streamingRef.current)
+          }
         })
       }
     })
 
     bridge.on('turnEnd', (text: string) => {
       if (!text) return
+      turnVersionRef.current++
       setMessages(prev => [...prev, { id: nextId(), role: 'agent', content: text }])
       streamingRef.current = ''
       setStreamingText('')
@@ -329,6 +341,42 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
     bridge.on('mcp-status', (servers: MCPServerInfo[]) => {
       setMcpServers(servers)
     })
+
+    // ── Sub-agent task panel events ─────────────────────────────────
+    bridge.on('subAgentStart', ({ name, description, agentType, startTime }: { name: string; description: string; agentType: string; startTime: number }) => {
+      setSubAgentTasks(prev => {
+        // Don't add duplicate if already tracking a running instance with same name
+        const existing = prev.find(t => t.name === name && t.status === 'running')
+        if (existing) return prev
+        return [...prev, {
+          id: `${name}-${startTime}`,
+          name,
+          description,
+          agentType,
+          status: 'running' as const,
+          startTime,
+          toolUseCount: 0,
+          tokenCount: 0,
+        }]
+      })
+    })
+
+    bridge.on('subAgentProgress', ({ name, toolUseCount, tokenCount, lastActivity }: { name: string; toolUseCount: number; tokenCount: number; lastActivity?: string }) => {
+      setSubAgentTasks(prev => prev.map(t =>
+        t.name === name && t.status === 'running'
+          ? { ...t, toolUseCount, tokenCount, lastActivity }
+          : t
+      ))
+    })
+
+    bridge.on('subAgentDone', ({ name, status, error }: { name: string; status: 'completed' | 'failed' | 'killed'; error?: string }) => {
+      setSubAgentTasks(prev => prev.map(t =>
+        t.name === name && t.status === 'running'
+          ? { ...t, status, endTime: Date.now(), error }
+          : t
+      ))
+    })
+    // ── End sub-agent task panel events ────────────────────────────
 
     bridge.on('subAgentDelta', ({ name, delta }: { name: string; delta: string }) => {
       // Route sub-agent live output to the pending agent tool's liveOutput,
@@ -638,6 +686,9 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
       return
     }
   }, { isActive: inputMode === 'chat' && !isProcessing })
+
+  // Sub-agent panel keyboard nav has been removed — the compact single-line
+  // status in Footer is now read-only (Claude Code style).
 
   // ── 补全辅助函数 ──────────────────────────────────────────────────
 
@@ -1033,6 +1084,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
         ctxPercent={ctx.pct}
         ctxText={ctx.text}
         transientHint={transientHint}
+        subAgentTasks={visibleTasks}
       />
 
       {mcpServers.length > 0 ? (

@@ -25,6 +25,10 @@ export interface AgentRunContext {
    * 数据一来到（如 stdout/stderr）应该停止发心跳，TUI 据此自动隐藏动画。
    */
   onSubAgentHeartbeat?: (name: string, elapsedMs: number) => void
+  /** 子 agent 开始执行时回调。TUI 据此在任务面板创建一行。 */
+  onSubAgentStart?: (name: string, description: string, agentType: string) => void
+  /** 子 agent 进度更新。TUI 据此更新任务面板中的工具/Token 计数和当前活动。 */
+  onSubAgentProgress?: (name: string, toolUseCount: number, tokenCount: number, lastActivity?: string) => void
   /** 可选的 AbortSignal，用于取消正在运行的 sub-agent */
   signal?: AbortSignal
 }
@@ -39,6 +43,8 @@ export interface AgentDefinition {
   name: string
   /** 描述给主 LLM 看：什么时候用这个 agent。要写得能让 LLM 自主选择。 */
   description: string
+  /** Agent 分类标签，用于 TUI 面板中的颜色标记（如 "explore", "general-purpose"）。 */
+  agentType?: string
   /** Agent 自己的 system prompt；可以是字符串或异步求值（支持运行时拼接） */
   systemPrompt: string | ((args: Record<string, unknown>, ctx: AgentRunContext) => string | Promise<string>)
   /** 允许使用的全局工具名列表（从 toolRegistrar 取） */

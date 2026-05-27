@@ -4,6 +4,25 @@ import type { DiffLine } from '../tools/edittool.js'
 import type { ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { MCPServerInfo } from '../mcp/mcpmanager.js'
 
+/**
+ * Sub-agent task state exposed by bridge events to the TUI panel.
+ * Mirrors Claude Code's LocalAgentTaskState but streamlined.
+ */
+export interface SubAgentTask {
+  id: string
+  name: string               // agent name, e.g. "explore", "generator"
+  description: string         // task description from input
+  agentType: string           // e.g. "explore", "general-purpose"
+  status: 'running' | 'completed' | 'failed' | 'killed'
+  startTime: number
+  endTime?: number
+  toolUseCount: number
+  tokenCount: number
+  lastActivity?: string       // e.g. "Reading src/foo.ts…"
+  summary?: string            // periodic background summary
+  error?: string
+}
+
 export class TuiBridge extends EventEmitter {
   private _autoMode = false
 
@@ -97,6 +116,23 @@ export class TuiBridge extends EventEmitter {
     this.emit('mcp-status', servers)
   }
 
+  // ── Sub-agent lifecycle events ──────────────────────────────────────
+
+  /** Sub-agent started: creates a new row in the task panel. */
+  emitSubAgentStart(name: string, description: string, agentType: string) {
+    this.emit('subAgentStart', {
+      name,
+      description,
+      agentType,
+      startTime: Date.now(),
+    })
+  }
+
+  /** Sub-agent progress update: tool counts, token counts, current activity. */
+  emitSubAgentProgress(name: string, toolUseCount: number, tokenCount: number, lastActivity?: string) {
+    this.emit('subAgentProgress', { name, toolUseCount, tokenCount, lastActivity })
+  }
+
   /**
    * 子 agent 实时输出：逐字符或逐段推送，TUI 在 tool spinner 下方渲染。
    * name 是 agent 名（如 project_builder），delta 是增量文本。
@@ -114,9 +150,8 @@ export class TuiBridge extends EventEmitter {
     this.emit('subAgentHeartbeat', { name, elapsedMs })
   }
 
-  /** 子 agent 执行完毕，TUI 清理实时面板并将输出归档为静态消息。 */
-  emitSubAgentDone(name: string) {
-    this.emit('subAgentDone', { name })
+  /** 子 agent 执行完毕，TUI 从面板移除任务行。status may be 'completed'|'failed'|'killed'. */
+  emitSubAgentDone(name: string, status: 'completed' | 'failed' | 'killed', error?: string) {
+    this.emit('subAgentDone', { name, status, error })
   }
-
 }

@@ -3,6 +3,8 @@ import { Box, Text } from 'ink'
 import TextInput from 'ink-text-input'
 import type { Suggestion } from '../commands/commandregistry.js'
 import type { FileAttachment } from '../utils/attachments.js'
+import type { SubAgentTask } from './bridge.js'
+import { buildSubAgentLine } from './SubAgentTaskPanel.js'
 
 interface InputBoxProps {
   inputValue: string
@@ -137,6 +139,7 @@ interface FooterProps {
   ctxText: string | null
   transientHint: string
   modelName?: string
+  subAgentTasks?: SubAgentTask[]
 }
 
 const fmt = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
@@ -162,6 +165,7 @@ export function Footer({
   ctxText,
   transientHint,
   modelName,
+  subAgentTasks,
 }: FooterProps) {
   const left = hasSuggestions
     ? '↑↓ navigate · tab/→ accept · esc close · enter run'
@@ -169,11 +173,23 @@ export function Footer({
       ? 'esc interrupt · / commands · @ files'
       : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · ctrl+o ${expanded ? 'collapse' : 'expand'}`
 
+  // Only show sub-agent summary in Footer when >=2 parallel agents.
+  // With a single agent, the tool card header (e.g. "⏺ Task(explore)") is sufficient.
+  const subAgentLine = subAgentTasks && subAgentTasks.length >= 2
+    ? buildSubAgentLine(subAgentTasks)
+    : null
+
   return (
     <Box flexDirection="column" marginTop={0}>
       {transientHint ? (
         <Box paddingX={1}>
           <Text color="yellow" dimColor>{transientHint}</Text>
+        </Box>
+      ) : null}
+      {/* Compact sub-agent status line — Claude Code style, sits between hint and footer row */}
+      {subAgentLine ? (
+        <Box paddingX={1}>
+          <Text bold color="gray">{subAgentLine}</Text>
         </Box>
       ) : null}
       <Box justifyContent="space-between" paddingX={1}>
