@@ -99,7 +99,6 @@ const agentTool = new (await import('./tools/agenttool.js')).AgentTool(agentRegi
 toolRegistrar.registerTool(agentTool)
 
 const client = createClient()
-const baseSystemPrompt = getSystemPrompt()
 
 // 当前 runTurn 的 AbortSignal（供 AgentTool 传递给 sub-agent 内部循环）
 let currentAbortSignal: AbortSignal | undefined
@@ -202,12 +201,12 @@ commandRegistry.register(new SchedulerCommand())
 const commandParser = new CommandParser(commandRegistry)
 
 function buildSystemPrompt(memoryFragment: string): string {
-  const base = memoryFragment
-    ? `${baseSystemPrompt}\n\n## 相关记忆\n${memoryFragment}`
-    : baseSystemPrompt
-  const agentSection = agentRegistry.describeForPrompt()
-  const withAgents = agentSection ? `${base}\n\n${agentSection}` : base
-  return `${withAgents}${skillManager.buildPromptFragment()}`
+  const agentSection = agentRegistry.describeForPrompt() || undefined
+  const base = getSystemPrompt(agentSection)
+  const withMemory = memoryFragment
+    ? `${base}\n\n## 相关记忆\n${memoryFragment}`
+    : base
+  return `${withMemory}${skillManager.buildPromptFragment()}`
 }
 
 async function compactIfNeeded(): Promise<void> {
