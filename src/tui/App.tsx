@@ -23,6 +23,9 @@ import { TurnSummary, EXPLORATION_TOOLS } from './TurnSummary.js'
 import { ToolRenderProvider } from './ToolRenderContext.js'
 import type { TurnToolItem } from './types.js'
 import { getVisibleTasks } from './SubAgentTaskPanel.js'
+import { TodoPanel } from './TodoPanel.js'
+import type { TodoPlanSnapshot } from '../todos/todo.js'
+import { TODO_STATUS_ICON } from '../todos/todo.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 
@@ -170,6 +173,12 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
   const visibleTasks = getVisibleTasks(subAgentTasks)
 
   // ── 子 agent 实时输出（路由到 pending agent tool 的 liveOutput）────
+  const [todoPlan, setTodoPlan] = useState<TodoPlanSnapshot | null>(null)
+
+  // ── Todo plan 完成态跃迁跟踪（防重复发射静态消息） ────────────────
+  const todoSnapshotEmittedRef = useRef(false)
+  /** 暂存 todo snapshot 内容，待到 turnEnd 时插入（确保在所有 tool 结果之后、LLM 总结之前） */
+  const pendingTodoSnapshotRef = useRef<string | null>(null)
 
   // turnToolsRef：同步最新 turnTools，供 useEffect 中的事件回调访问
   const turnToolsRef = useRef(turnTools)
@@ -228,7 +237,13 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
     bridge.on('turnEnd', (text: string) => {
       if (!text) return
       turnVersionRef.current++
-      setMessages(prev => [...prev, { id: nextId(), role: 'agent', content: text }])
+      // 在 agent 消息前插入暂存的 todo snapshot（确保在所有 tool 结果之后、LLM 总结之前）
+      const entries: ChatMessage[] = [{ id: nextId(), role: 'agent', content: text }]
+      if (pendingTodoSnapshotRef.current) {
+        entries.unshift({ id: nextId(), role: 'system', content: pendingTodoSnapshotRef.current })
+        pendingTodoSnapshotRef.current = null
+      }
+      setMessages(prev => [...prev, ...entries])
       streamingRef.current = ''
       setStreamingText('')
     })
@@ -399,6 +414,37 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
 
     bridge.on('autoModeChange', (enabled: boolean) => {
       setAutoMode(enabled)
+    })
+
+    bridge.on('todoPlanUpdate', (snapshot: TodoPlanSnapshot | null) => {
+      setTodoPlan(snapshot)
+
+      // 检测完成态跃迁：从 incomplete → complete
+      // 不直接 setMessages，而是暂存到 ref 中，待到 turnEnd 时再插入。
+      // 这样能保证 snapshot 出现在所有 tool 结果之后、LLM 总结之前。
+      if (snapshot && snapshot.isComplete) {
+        if (!todoSnapshotEmittedRef.current) {
+          todoSnapshotEmittedRef.current = true
+          const lines: string[] = []
+          lines.push(`📋 ${snapshot.description}  (${snapshot.progress})`)
+          for (const task of snapshot.tasks) {
+            const icon = TODO_STATUS_ICON[task.status]
+            lines.push(`  ${icon} ${task.description}${task.error ? ` — ${task.error}` : ''}`)
+          }
+          if (snapshot.allDone) {
+            lines.push('✅ All tasks completed.')
+          } else if (snapshot.hasFailure) {
+            lines.push('⚠ Some tasks failed.')
+          }
+          pendingTodoSnapshotRef.current = lines.join('\n')
+        }
+      } else if (snapshot && !snapshot.isComplete) {
+        // 重置标记：新 plan 又有了未完成的任务
+        todoSnapshotEmittedRef.current = false
+      } else {
+        // snapshot === null → plan cleared，重置标记
+        todoSnapshotEmittedRef.current = false
+      }
     })
 
     bridge.on('permission', ({ prompt, resolve }: PermissionEvent) => {
@@ -1048,6 +1094,9 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
           <Text color="blue" dimColor>✦ microcompact done</Text>
         </Box>
       ) : null}
+
+      {/* Todo List — fixed above InputBox, not scrolling with messages */}
+      <TodoPanel plan={todoPlan} />
 
       {/* Mode-specific prompts */}
       {inputMode === 'permission' ? (

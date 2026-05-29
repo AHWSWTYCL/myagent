@@ -3,6 +3,7 @@ import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { DiffLine } from '../tools/edittool.js'
 import type { ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { MCPServerInfo } from '../mcp/mcpmanager.js'
+import type { TodoPlanSnapshot } from '../todos/todo.js'
 
 /**
  * Sub-agent task state exposed by bridge events to the TUI panel.
@@ -153,5 +154,12 @@ export class TuiBridge extends EventEmitter {
   /** 子 agent 执行完毕，TUI 从面板移除任务行。status may be 'completed'|'failed'|'killed'. */
   emitSubAgentDone(name: string, status: 'completed' | 'failed' | 'killed', error?: string) {
     this.emit('subAgentDone', { name, status, error })
+  }
+
+  // ── Todo Plan 事件 ──────────────────────────────────────────────────
+
+  /** Todo plan 创建、任务状态变更时发出。snapshot 为 null 表示 plan 已清空。 */
+  emitTodoPlanUpdate(snapshot: TodoPlanSnapshot | null) {
+    this.emit('todoPlanUpdate', snapshot)
   }
 }

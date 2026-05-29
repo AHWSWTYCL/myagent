@@ -57,6 +57,7 @@ import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
 import { MCPManager } from './mcp/mcpmanager.js'
 import { handleMCPCommand } from './commands/mcpcommand.js'
+import { todoManager } from './todos/todomanager.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -82,6 +83,8 @@ toolRegistrar.registerTool(new (await import('./tools/greptool.js')).GrepTool())
 toolRegistrar.registerTool(new (await import('./tools/edittool.js')).EditTool())
 toolRegistrar.registerTool(new (await import('./tools/choicetool.js')).ChoiceTool(qs => bridge.askChoice(qs)))
 toolRegistrar.registerTool(new (await import('./tools/asktool.js')).AskTool(prompt => bridge.askQuestion(prompt)))
+toolRegistrar.registerTool(new (await import('./tools/todoPlannerTool.js')).TodoPlannerTool())
+toolRegistrar.registerTool(new (await import('./tools/todoUpdateTool.js')).TodoUpdateTool())
 
 // ── Init agent registry & unified agent tool ─────────────────────────────────
 const { AgentRegistry } = await import('./agents/registry.js')
@@ -129,6 +132,11 @@ hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
 
 bridge.on('autoModeChange', (enabled: boolean) => {
   permissionHook.setAutoMode(enabled, autoPermissionAgent)
+})
+
+// ── Todo Manager → Bridge ─────────────────────────────────────────────────
+todoManager.on('update', (snapshot) => {
+  bridge.emitTodoPlanUpdate(snapshot)
 })
 
 // ── ! 命令：执行 bash / !mcp 并推入 messages (Claude Code 模式) ───
