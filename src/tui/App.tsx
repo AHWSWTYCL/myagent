@@ -35,6 +35,9 @@ interface Props {
   runTurn: (input: string | any[], signal?: AbortSignal) => Promise<void>
   runBash: (cmd: string) => Promise<string>
   toolMap: Map<string, Tool>
+  enqueueUserMessage: (msg: string) => void
+  getQueueLength: () => number
+  dequeueMessage: () => string | undefined
 }
 
 const MAX_HISTORY = 100
@@ -100,7 +103,7 @@ function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
   return plan
 }
 
-export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props) {
+export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueUserMessage, getQueueLength, dequeueMessage }: Props) {
   const { exit } = useApp()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streamingText, setStreamingText] = useState('')
@@ -836,8 +839,8 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
       return
     }
 
-    // 用 ref 检查避免闭包过期；若正在处理中或已有提交在执行，静默丢弃
-    if (isProcessingRef.current || submittingRef.current) return
+    // 防止 handleSubmit 并发（仅防重复点击 Enter）
+    if (submittingRef.current) return
 
     submittingRef.current = true
     setInputValue('')
@@ -847,6 +850,9 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
     try {
       // ! 命令：走 agent 层的 BashTool（和 LLM 调用的同个工具），不走 LLM
       if (trimmed.startsWith('!')) {
+        // ! 命令处理中不允许执行
+        if (isProcessingRef.current) return
+
         const cmd = trimmed.slice(1).trim()
         if (!cmd) {
           setMessages(prev => [...prev, { id: nextId(), role: 'system', content: '! 后面需要跟要执行的命令' }])
@@ -888,6 +894,8 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
       }
 
       if (commandParser.isCommand(trimmed)) {
+        // / 命令处理中不允许执行
+        if (isProcessingRef.current) return
         await commandParser.dispatch(trimmed)
         return
       }
@@ -930,10 +938,22 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
       setMessages(prev => [...prev, { id: nextId(), role: 'user', content: displayText }])
       setAttachments([])
       setAttachmentErrors([])
-      // turnToolReset 已在每个 round 结束时清空已完成工具。
-      // 这里清空 only pending tools（如果有残留），开始新轮次。
-      setTurnTools([])
+
+      // ── 消息队列：自然语言 prompt 入队 ──────────────────────────────
+      // 用户输入 prompt → 入队 → 处理 loop 从队列消费
+      // InputBox 在处理中保持可输入，用户可继续输入后续 prompt
+      enqueueUserMessage(typeof userContent === 'string' ? userContent : JSON.stringify(userContent))
+    } finally {
+      submittingRef.current = false
+    }
+
+    // ── 从队列启动处理（submittingRef 已释放，但仍可被 isProcessing 防护） ──
+    if (!isProcessingRef.current && getQueueLength() > 0) {
+      // 同步更新 ref，防止后续并发 handleSubmit 误判
+      isProcessingRef.current = true
       setIsProcessing(true)
+
+      setTurnTools([])
       setStatus('thinking...')
       streamingRef.current = ''
       setStreamingText('')
@@ -942,12 +962,16 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
       abortControllerRef.current = ac
 
       try {
-        await runTurn(userContent, ac.signal)
+        while (getQueueLength() > 0 && !ac.signal.aborted) {
+          const nextMsg = dequeueMessage()
+          if (!nextMsg) break
+          await runTurn(nextMsg, ac.signal)
+        }
       } catch (err: unknown) {
-        const msg = ac.signal.aborted
-          ? 'Cancelled.'
-          : `Error: ${err instanceof Error ? err.message + '\n' + (err.stack || '').split('\n').slice(0, 5).join('\n') : String(err)}`
-        setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
+        if (!ac.signal.aborted) {
+          const msg = `Error: ${err instanceof Error ? err.message + '\n' + (err.stack || '').split('\n').slice(0, 5).join('\n') : String(err)}`
+          setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
+        }
       } finally {
         const remaining = streamingRef.current
         if (remaining) {
@@ -955,14 +979,13 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap }: Props)
         }
         streamingRef.current = ''
         setStreamingText('')
-        // turnTools 已在 turnToolReset 中逐 round 清理，无需再处理。
         abortControllerRef.current = null
+        isProcessingRef.current = false
         setIsProcessing(false)
         setStatus('')
       }
-    } finally {
-      submittingRef.current = false
     }
+    // 已在处理中 → 队列中的消息会被 runAgentLoopStream 的 drainQueue 自动消费
   }
 
   // ── 消息渲染 ────────────────────────────────────────────────────────

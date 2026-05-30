@@ -47,6 +47,35 @@ const READONLY_PREFIXES = [
     'find ', 'wc ', 'sort ', 'uniq ', 'od ', 'xxd ', 'hexdump',
 ]
 
+// 安全写命令前缀——不会造成系统级破坏，放行不弹确认。
+// 这些命令会影响当前项目目录，但不属于危险操作，auto 模式下不应反复询问。
+const SAFE_WRITE_PREFIXES = [
+    // 文件/目录操作
+    'mkdir ', 'mkdir -p', 'cp ', 'mv ', 'touch ',
+    'rm ', 'rmdir ', 'rm -rf',  // rm -rf / 已被黑名单拦截
+    'chmod ', 'chown ',
+    // 包管理
+    'npm install', 'npm i ', 'npm run', 'npm update', 'npm uninstall',
+    'pnpm install', 'pnpm i ', 'pnpm run', 'pnpm update', 'pnpm uninstall',
+    'yarn add', 'yarn remove', 'yarn install', 'yarn run',
+    'bun install', 'bun add', 'bun run',
+    'npx ',
+    'pip install', 'pip uninstall',
+    'cargo build', 'cargo run', 'cargo test', 'cargo check', 'cargo add',
+    'go build', 'go run', 'go test', 'go mod',
+    // git 写操作
+    'git add', 'git commit', 'git push', 'git pull', 'git merge',
+    'git checkout', 'git switch', 'git reset', 'git revert',
+    'git stash', 'git tag', 'git fetch',
+    'git init', 'git clone',
+    // 构建工具
+    'make', 'cmake', 'cmake --build',
+    'tsc', 'tsc --', 'esbuild', 'vite build', 'webpack',
+    'node ', 'deno ', 'python ', 'python3 ',
+    // 重定向/追加（明确的写文件）
+    'cat >', 'cat >>',
+]
+
 function isReadonlyCommand(command: string): boolean {
     const trimmed = command.trim()
     // Reject anything with shell composition. `ls && rm -rf x` or `cat a | sh`
@@ -57,6 +86,20 @@ function isReadonlyCommand(command: string): boolean {
     // Output redirection writes to disk — not read-only.
     if (/(^|[^<])>/.test(trimmed)) return false
     for (const prefix of READONLY_PREFIXES) {
+        if (trimmed === prefix || trimmed.startsWith(prefix + ' ')) {
+            return true
+        }
+    }
+    return false
+}
+
+/** 判断是否为安全写命令（不会造成系统级破坏，auto 模式下直接放行）。 */
+function isSafeWriteCommand(command: string): boolean {
+    const trimmed = command.trim()
+    // 管道/组合/反引号 → 无法简单判断安全，交给 defer
+    if (/[;&|`]/.test(trimmed)) return false
+    if (/\$\(/.test(trimmed)) return false
+    for (const prefix of SAFE_WRITE_PREFIXES) {
         if (trimmed === prefix || trimmed.startsWith(prefix + ' ')) {
             return true
         }
@@ -229,7 +272,12 @@ export class BashTool extends Tool {
             return { action: 'block', reason: blocked }
         }
 
-        // 其他写操作 → 交给上层决定
+        // 安全写命令 → 放行（如 npm install, mkdir, git add 等）
+        if (isSafeWriteCommand(command)) {
+            return { action: 'continue' }
+        }
+
+        // 其他不确定的操作 → 交给上层决定
         return { action: 'defer' }
     }
 

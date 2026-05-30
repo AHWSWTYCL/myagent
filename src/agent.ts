@@ -48,6 +48,7 @@ import { runAgentLoopStream, UsageAccum } from './utils/runagent.js'
 import { compactMessages, microcompactMessages, estimateTokens, MICRO_COMPACT_TOKEN_THRESHOLD, COMPACT_TOKEN_THRESHOLD } from './utils/compact.js'
 import { ToolRegistrar } from './tools/toolregistrar.js'
 import { validateInput, validateOutput } from './tools/validator.js'
+import { MessageQueue } from './messagequeue.js'
 import { HookManager } from './hooks/hook.js'
 import { LoggerHook } from './hooks/loggerhook.js'
 import { PermissionHook } from './hooks/permissionhook.js'
@@ -220,6 +221,20 @@ async function executeTool(name: string, input: unknown, skipHooks = false): Pro
   }
 }
 
+// ── Message Queue ────────────────────────────────────────────────────────────
+// 用户自然语言 prompt 入队，由 runAgentLoopStream 在工具执行后 / end_turn 前 drain。
+// ! 和 / 命令不入队，直接执行。
+const messageQueue = new MessageQueue()
+export function enqueueUserMessage(msg: string): void {
+  messageQueue.enqueue(msg)
+}
+export function getQueueLength(): number {
+  return messageQueue.length
+}
+export function drainQueue(): string | undefined {
+  return messageQueue.dequeue()
+}
+
 // ── Agent state ───────────────────────────────────────────────────────────────
 const MAX_TURNS = 1000
 const messages: Anthropic.MessageParam[] = []
@@ -338,6 +353,7 @@ export async function runTurn(
       executeTool,
       parallelSafeTools: toolRegistrar.getParallelSafeNames(),
       signal,
+      drainQueue: () => messageQueue.dequeue(),
       onText: delta => bridge.emitText(delta),
       onTurnEnd: async (text, msgs) => {
         fullAssistantText += text + '\n'
@@ -469,5 +485,5 @@ if (debugOpts) {
 } else {
   // ── 正常 TUI 模式 ─────────────────────────────────────────────────────
   const toolRenderMap = toolRegistrar.buildToolRenderMap()
-  render(React.createElement(App, { bridge, commandParser, runTurn, runBash, toolMap: toolRenderMap }))
+  render(React.createElement(App, { bridge, commandParser, runTurn, runBash, toolMap: toolRenderMap, enqueueUserMessage, getQueueLength, dequeueMessage: drainQueue }))
 }

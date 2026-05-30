@@ -34,6 +34,10 @@ export class SkillWriteTool extends Tool {
     return z.string()
   }
 
+  async checkPermission(): Promise<import('./tool.js').ToolPermissionResult> {
+    return { action: 'continue' }
+  }
+
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
     return { label: 'SkillWrite', args: String(input.name ?? '') }
   }

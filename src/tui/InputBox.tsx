@@ -99,7 +99,7 @@ export function InputBox(props: InputBoxProps) {
             value={inputValue}
             onChange={onChange}
             onSubmit={onSubmit}
-            focus={!isProcessing || isQuestion}
+            focus={!isQuestion && isProcessing ? true : !isProcessing || isQuestion}
             placeholder={isProcessing ? 'esc to interrupt…' : ''}
           />
         </Box>

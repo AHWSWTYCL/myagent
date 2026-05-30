@@ -32,6 +32,10 @@ export class UseSkillTool extends Tool {
     return z.string()
   }
 
+  async checkPermission(): Promise<import('./tool.js').ToolPermissionResult> {
+    return { action: 'continue' }
+  }
+
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
     return { label: 'Skill', args: String(input.skill_name ?? input.name ?? '') }
   }

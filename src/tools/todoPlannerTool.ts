@@ -46,6 +46,10 @@ export class TodoPlannerTool extends Tool {
     return false
   }
 
+  async checkPermission(): Promise<import('./tool.js').ToolPermissionResult> {
+    return { action: 'continue' }
+  }
+
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
     const desc = (input as TodoPlanArgs).description ?? ''
     return {

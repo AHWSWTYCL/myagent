@@ -133,6 +133,10 @@ export class AgentTool extends Tool {
     }
   }
 
+  async checkPermission(): Promise<import('./tool.js').ToolPermissionResult> {
+    return { action: 'continue' }
+  }
+
   async execute(args: AgentToolInput): Promise<string> {
     if (!this.client || !this.executeToolFn || !this.emitLineFn) {
       return 'Error: AgentTool is not initialized; setExecutionContext was never called.'

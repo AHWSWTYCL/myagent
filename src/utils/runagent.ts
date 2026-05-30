@@ -27,6 +27,15 @@ export interface RunAgentOptions {
    * TurnSummary static messages (Scenario B).
    */
   onTurnToolReset?: () => void
+  /**
+   * 消息队列 drain 回调：每轮工具执行之后调用，返回下一条用户消息（无消息则返回 undefined）。
+   * 返回的消息会追加到 messages 数组，让下一轮 LLM 调用看到新输入。
+   *
+   * 两个调用点：
+   *   (1) 工具执行完成 + onTurnEnd 之后，下一轮 LLM 之前
+   *   (2) end_turn/stop 之前（如有排队消息则不 break 而 continue）
+   */
+  drainQueue?: () => string | undefined
 }
 
 async function resolveSystem(
@@ -120,7 +129,7 @@ export async function runAgentLoopStream(
   const {
     client, model, system, tools, messages, maxTurns = 20,
     executeTool, onText, onTurnEnd, onToolStart, onToolEnd, onUsage, signal, parallelSafeTools,
-    onTurnToolReset,
+    onTurnToolReset, drainQueue,
   } = opts
 
   // input / cacheRead / cacheWrite are PER-REQUEST snapshots (the API already counts
@@ -208,6 +217,16 @@ export async function runAgentLoopStream(
         continue
       }
       maxTokensRecoveryCount = 0
+
+      // DRAIN POINT 2: end_turn/stop 前 — 如有排队消息则不 break 而 continue
+      if (drainQueue) {
+        const nextMsg = drainQueue()
+        if (nextMsg) {
+          messages.push({ role: 'user', content: nextMsg })
+          continue
+        }
+      }
+
       if (response.stop_reason !== 'end_turn') {
         console.log(`[queryLoop] exit at turn ${turn}: stop_reason=${response.stop_reason}`)
       }
@@ -224,6 +243,15 @@ export async function runAgentLoopStream(
     // Fire onTurnEnd AFTER tools execute so the TUI shows tools before the
     // assistant's summary text (Claude Code display order: tools first, text last).
     if (turnText) await onTurnEnd?.(turnText, messages)
+
+    // DRAIN POINT 1: 工具执行完成后，从队列获取下一条用户消息。
+    // 新消息推入 messages 后，下一轮 LLM 调用会自动看到它。
+    if (drainQueue) {
+      const nextMsg = drainQueue()
+      if (nextMsg) {
+        messages.push({ role: 'user', content: nextMsg })
+      }
+    }
 
     if (turn === maxTurns - 1) {
       console.log(`[queryLoop] exit: hit maxTurns=${maxTurns} (model still wanted to call tools)`)

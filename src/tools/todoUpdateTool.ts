@@ -45,6 +45,10 @@ export class TodoUpdateTool extends Tool {
     return false
   }
 
+  async checkPermission(): Promise<import('./tool.js').ToolPermissionResult> {
+    return { action: 'continue' }
+  }
+
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
     const args = input as TodoUpdateArgs
     const current = todoManager.getCurrentPlan()

@@ -46,6 +46,10 @@ export class InvokeSkillTool extends Tool {
     return true
   }
 
+  async checkPermission(): Promise<import('./tool.js').ToolPermissionResult> {
+    return { action: 'continue' }
+  }
+
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
     return { label: 'InvokeSkill', args: String(input.skill_name ?? '') }
   }
