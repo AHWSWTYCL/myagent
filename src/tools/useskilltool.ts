@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { SkillManager } from '../skills/skillmanager.js'
 
@@ -19,22 +20,16 @@ export class UseSkillTool extends Tool {
     return '激活或停用一个 skill。skill 激活后会影响 LLM 的后续行为和回答风格。使用 list 查看所有可用 skill 及其当前状态。'
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['activate', 'deactivate', 'list'],
-          description: 'activate: 激活指定 skill；deactivate: 停用指定 skill；list: 列出所有 skill 及激活状态',
-        },
-        skill_name: {
-          type: 'string',
-          description: 'activate 或 deactivate 时必填，指定 skill 的名称',
-        },
-      },
-      required: ['action'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      action: z.enum(['activate', 'deactivate', 'list'])
+        .describe('activate: 激活指定 skill；deactivate: 停用指定 skill；list: 列出所有 skill 及激活状态'),
+      skill_name: z.string().optional().describe('activate 或 deactivate 时必填，指定 skill 的名称'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

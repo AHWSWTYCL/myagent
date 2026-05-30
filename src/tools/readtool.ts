@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from "./tool";
 
 export class ReadTool extends Tool {
@@ -11,14 +12,14 @@ export class ReadTool extends Tool {
         return 'Read a file from the filesystem and return its contents';
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object' as const,
-            properties: {
-                path: { type: 'string', description: 'Absolute or relative file path' },
-            },
-            required: ['path'],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            path: z.string().describe('Absolute or relative file path'),
+        })
+    }
+
+    get outputSchemaZod() {
+        return z.string()
     }
 
     get output_schema(): object {

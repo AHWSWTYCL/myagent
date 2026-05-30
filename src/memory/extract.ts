@@ -116,47 +116,82 @@ export async function extractMemoryFromTurn(
   }
 }
 
-/** 把抽取出的记忆追加到对应分类，去重（精确匹配 + 模糊匹配）。返回新增条数。 */
-export function appendMemories(items: ExtractedMemory[]): number {
+/** 把抽取出的记忆追加到对应分类，去重（精确匹配 + 模糊匹配）。返回新增条数。
+ *  Per-category mutex serializes append + consolidate so concurrent extracts
+ *  (fire-and-forget from runTurn / hooks) can't lost-update each other. */
+const categoryLocks: Map<MemoryCategory, Promise<unknown>> = new Map()
+
+function withLock<T>(category: MemoryCategory, fn: () => Promise<T>): Promise<T> {
+  const previous = categoryLocks.get(category) ?? Promise.resolve()
+  const next = previous.then(fn, fn)  // run regardless of prior outcome
+  // Track the latest promise; clear if it's still the tail when it settles
+  // so the map doesn't accumulate stale entries.
+  categoryLocks.set(category, next)
+  next.finally(() => {
+    if (categoryLocks.get(category) === next) categoryLocks.delete(category)
+  })
+  return next
+}
+
+export async function appendMemories(items: ExtractedMemory[]): Promise<number> {
   let added = 0
+  // Group by category so each lock is held once per call (not per item).
+  const grouped = new Map<MemoryCategory, ExtractedMemory[]>()
   for (const item of items) {
-    const category = item.category
-    const existing = readCategory(category)
-    const lines = existing
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.startsWith('- '))
+    const list = grouped.get(item.category) ?? []
+    list.push(item)
+    grouped.set(item.category, list)
+  }
 
-    const newEntry = `- ${item.content}`
+  for (const [category, group] of grouped) {
+    added += await withLock(category, async () => {
+      let localAdded = 0
+      const existing = readCategory(category)
+      const lines = existing
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l.startsWith('- '))
 
-    // 第一道防御：精确匹配
-    if (lines.includes(newEntry)) continue
+      for (const item of group) {
+        const newEntry = `- ${item.content}`
 
-    // 第二道防御：模糊匹配（归一化后相同或包含）
-    const isDuplicate = lines.some(existingLine => isSimilar(existingLine, newEntry))
-    if (isDuplicate) continue
+        // 第一道防御：精确匹配
+        if (lines.includes(newEntry)) continue
 
-    lines.push(newEntry)
-    writeCategory(category, lines.join('\n') + '\n')
-    added++
+        // 第二道防御：模糊匹配（归一化后相同或包含）
+        const isDuplicate = lines.some(existingLine => isSimilar(existingLine, newEntry))
+        if (isDuplicate) continue
 
-    // 定期压缩：当条目超过上限时，异步触发 LLM 合并
-    if (lines.length > MAX_ENTRIES_PER_CATEGORY) {
-      consolidateCategory(category).catch(err =>
-        console.error(`[extract] consolidate ${category} failed:`, err),
-      )
-    }
+        lines.push(newEntry)
+        localAdded++
+      }
+
+      if (localAdded > 0) {
+        writeCategory(category, lines.join('\n') + '\n')
+      }
+
+      // 定期压缩：当条目超过上限时，异步触发 LLM 合并
+      if (lines.length > MAX_ENTRIES_PER_CATEGORY) {
+        consolidateCategory(category).catch(err =>
+          console.error(`[extract] consolidate ${category} failed:`, err),
+        )
+      }
+      return localAdded
+    })
   }
   return added
 }
 
 /** 对某个分类做 LLM 批量合并：将语义相似的记忆合并为一条，保留最完整表述。 */
 async function consolidateCategory(category: MemoryCategory): Promise<void> {
+  // The LLM call itself is unlocked (long-running). Re-read & re-write under
+  // the lock so a concurrent appendMemories doesn't get clobbered.
   const raw = readCategory(category)
   const entries = raw.split('\n').filter(l => l.trim().startsWith('- '))
   if (entries.length <= MAX_ENTRIES_PER_CATEGORY) return
 
   const client = createClient()
+  let cleaned: string | null = null
   try {
     const response = await client.messages.create({
       model: EXTRACT_MODEL,
@@ -179,19 +214,37 @@ async function consolidateCategory(category: MemoryCategory): Promise<void> {
     const result = textBlock?.text.trim()
     if (!result) return
 
-    // 只保留符合 "- content" 格式的行
-    const cleaned = result
+    cleaned = result
       .split('\n')
       .map(l => l.trim())
       .filter(l => l.startsWith('- '))
       .join('\n')
-
-    if (cleaned && cleaned.split('\n').length < entries.length) {
-      writeCategory(category, cleaned + '\n')
-      console.log(`[extract] consolidated ${category}: ${entries.length} → ${cleaned.split('\n').length} entries`)
-    }
   } catch (err) {
     console.error(`[extract] consolidate ${category} error:`, err)
-    // 压缩失败不影响已有记忆，只是暂时多些重复条目
+    return
   }
+
+  if (!cleaned) return
+
+  // Lock + re-read: file may have grown while the LLM call was in flight.
+  // Merge: drop entries the LLM dropped, but preserve any new entries appended
+  // during the wait by reapplying them on top.
+  await withLock(category, async () => {
+    const beforeLines = entries
+    const afterLines = cleaned!.split('\n').filter(l => l.trim().startsWith('- '))
+    if (afterLines.length >= beforeLines.length) return  // nothing actually merged
+
+    const currentRaw = readCategory(category)
+    const currentLines = currentRaw.split('\n').filter(l => l.trim().startsWith('- '))
+    // Entries appended after consolidation started: anything in current that
+    // wasn't in `beforeLines`.
+    const beforeSet = new Set(beforeLines)
+    const newSinceStart = currentLines.filter(l => !beforeSet.has(l))
+
+    const finalLines = [...afterLines, ...newSinceStart]
+    if (finalLines.length < currentLines.length) {
+      writeCategory(category, finalLines.join('\n') + '\n')
+      console.log(`[extract] consolidated ${category}: ${currentLines.length} → ${finalLines.length} entries`)
+    }
+  })
 }

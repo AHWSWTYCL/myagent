@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { SkillManager } from '../skills/skillmanager.js'
 import { SKILLS_DIR, parseFrontmatter } from '../skills/skillloader.js'
@@ -19,30 +20,18 @@ export class SkillWriteTool extends Tool {
     return '管理 skill 文件（~/.myagent/skills/）。write: 写入或覆盖一个 skill；list: 列出所有 skill 的名称、描述和完整 prompt；delete: 删除一个自定义 skill。仅用于 Self-Improving Agent 复盘阶段。'
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['write', 'list', 'delete'],
-          description: 'write: 创建或覆盖 skill 文件；list: 列出所有 skill（含完整内容）；delete: 删除指定 skill',
-        },
-        name: {
-          type: 'string',
-          description: 'skill 名称（只允许字母、数字、连字符）。write 和 delete 时必填。',
-        },
-        description: {
-          type: 'string',
-          description: 'skill 的一句话描述。write 时必填。',
-        },
-        prompt: {
-          type: 'string',
-          description: 'skill 的完整 prompt 内容（frontmatter 后的正文）。write 时必填。',
-        },
-      },
-      required: ['action'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      action: z.enum(['write', 'list', 'delete'])
+        .describe('write: 创建或覆盖 skill 文件；list: 列出所有 skill（含完整内容）；delete: 删除指定 skill'),
+      name: z.string().optional().describe('skill 名称（只允许字母、数字、连字符）。write 和 delete 时必填。'),
+      description: z.string().optional().describe('skill 的一句话描述。write 时必填。'),
+      prompt: z.string().optional().describe('skill 的完整 prompt 内容（frontmatter 后的正文）。write 时必填。'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

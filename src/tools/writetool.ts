@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { cwd } from 'process'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from "./tool";
 
 // 系统敏感路径前缀——写这些路径直接阻断
@@ -28,15 +29,15 @@ export class WriteTool extends Tool {
         return 'Useful for when you need to write a file. Input should be a file path and content.';
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object',
-            properties: {
-                path: { type: 'string', description: 'Absolute or relative file path' },
-                content: { type: 'string', description: 'Content to write' },
-            },
-            required: ['path', 'content'],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            path: z.string().describe('Absolute or relative file path'),
+            content: z.string().describe('Content to write'),
+        })
+    }
+
+    get outputSchemaZod() {
+        return z.string()
     }
 
     renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

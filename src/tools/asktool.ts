@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolPermissionResult, type ToolRenderHeader } from './tool.js'
 
 interface AskUserArgs {
@@ -28,17 +29,14 @@ export class AskTool extends Tool {
     ].join(' ')
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object' as const,
-      properties: {
-        prompt: {
-          type: 'string',
-          description: 'The question text shown to the user. Be specific and self-contained.',
-        },
-      },
-      required: ['prompt'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      prompt: z.string().describe('The question text shown to the user. Be specific and self-contained.'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get parallelSafe(): boolean { return false }

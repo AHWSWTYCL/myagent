@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 
 const MAX_RESULTS = 5
@@ -52,14 +53,14 @@ export class WebSearchTool extends Tool {
     return 'Search the web via Bing and return the top results with titles, URLs, and snippets.'
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'The search query' },
-      },
-      required: ['query'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      query: z.string().describe('The search query'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get parallelSafe() { return true }

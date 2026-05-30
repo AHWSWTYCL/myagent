@@ -1,4 +1,5 @@
 import { globSync } from 'glob'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool'
 
 export class GlobTool extends Tool {
@@ -11,15 +12,15 @@ export class GlobTool extends Tool {
         return 'Find files matching a glob pattern. Returns a list of matching file paths.'
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object',
-            properties: {
-                pattern: { type: 'string', description: 'Glob pattern, e.g. "src/**/*.ts"' },
-                cwd: { type: 'string', description: 'Directory to search from (default: current working directory)' },
-            },
-            required: ['pattern'],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            pattern: z.string().describe('Glob pattern, e.g. "src/**/*.ts"'),
+            cwd: z.string().optional().describe('Directory to search from (default: current working directory)'),
+        })
+    }
+
+    get outputSchemaZod() {
+        return z.string()
     }
 
     get parallelSafe(): boolean { return true }

@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { todoManager } from '../todos/todomanager.js'
 import type { TodoItemStatus } from '../todos/todo.js'
@@ -28,26 +29,16 @@ export class TodoUpdateTool extends Tool {
     ].join(' ')
   }
 
-  get input_schema() {
-    return {
-      type: 'object' as const,
-      properties: {
-        taskIndex: {
-          type: 'number',
-          description: 'Zero-based index of the task to update (first task = 0)',
-        },
-        status: {
-          type: 'string',
-          enum: ['pending', 'in_progress', 'done', 'failed'] as TodoItemStatus[],
-          description: 'New status for the task',
-        },
-        error: {
-          type: 'string',
-          description: 'Error message (required when status=failed)',
-        },
-      },
-      required: ['taskIndex', 'status'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      taskIndex: z.number().int().nonnegative().describe('Zero-based index of the task to update (first task = 0)'),
+      status: z.enum(['pending', 'in_progress', 'done', 'failed']).describe('New status for the task'),
+      error: z.string().optional().describe('Error message (required when status=failed)'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get parallelSafe(): boolean {

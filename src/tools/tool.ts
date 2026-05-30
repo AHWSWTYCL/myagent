@@ -4,6 +4,8 @@
  * - block: 工具自身认为该操作是危险的，直接阻断
  * - defer: 工具无法判断，交由上层（auto/manual）决定
  */
+import { z } from 'zod'
+
 export type ToolPermissionResult =
   | { action: 'continue' }
   | { action: 'block'; reason: string }
@@ -19,22 +21,55 @@ export interface ToolRenderHeader {
   args: string
 }
 
+/** Shape Anthropic's API expects for tool input_schema. */
+type AnthropicInputSchema = { type: 'object'; properties: object; required: string[] }
+
 export class Tool {
 
   get name(): string {
     return 'tool';
   }
-  
+
   get description(): string {
     return 'A tool for executing a specific task';
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {},
-      required: [],
-    };
+  /**
+   * Zod schema for the tool's input. Subclasses define this and the JSON
+   * Schema (input_schema) is derived automatically. Returning null means
+   * "no validation" — used by MCP-wrapped tools whose schema comes from
+   * the remote server and can't be expressed cleanly in zod.
+   */
+  get inputSchemaZod(): z.ZodTypeAny | null {
+    return null
+  }
+
+  /**
+   * Zod schema for the tool's output. Defaults to z.string() because every
+   * Tool.execute() returns a string today; tools that return structured
+   * data (e.g. EditTool returns JSON.stringify of {summary, diff}) should
+   * override with a stricter schema.
+   */
+  get outputSchemaZod(): z.ZodTypeAny | null {
+    return null
+  }
+
+  /**
+   * JSON Schema for the Anthropic API. Derived from inputSchemaZod via
+   * zod 4's built-in z.toJSONSchema; subclasses may still override directly
+   * for backwards compatibility or to expose schema features zod can't represent.
+   */
+  get input_schema(): AnthropicInputSchema {
+    const zodSchema = this.inputSchemaZod
+    if (zodSchema) {
+      const json = z.toJSONSchema(zodSchema) as Record<string, unknown>
+      return {
+        type: 'object',
+        properties: (json.properties as object) ?? {},
+        required: (json.required as string[]) ?? [],
+      }
+    }
+    return { type: 'object', properties: {}, required: [] }
   }
 
   get output_schema(): object {

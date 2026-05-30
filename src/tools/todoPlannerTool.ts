@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { todoManager } from '../todos/todomanager.js'
 
@@ -28,28 +29,17 @@ export class TodoPlannerTool extends Tool {
     ].join(' ')
   }
 
-  get input_schema() {
-    return {
-      type: 'object' as const,
-      properties: {
-        description: {
-          type: 'string',
-          description: 'Overall description of the task plan (e.g. "Implement user login")',
-        },
-        tasks: {
-          type: 'array',
-          description: 'List of sub-tasks to complete',
-          items: {
-            type: 'object' as const,
-            properties: {
-              description: { type: 'string', description: 'Description of this sub-task' },
-            },
-            required: ['description'],
-          },
-        },
-      },
-      required: ['description', 'tasks'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      description: z.string().describe('Overall description of the task plan (e.g. "Implement user login")'),
+      tasks: z.array(z.object({
+        description: z.string().describe('Description of this sub-task'),
+      })).describe('List of sub-tasks to complete'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get parallelSafe(): boolean {

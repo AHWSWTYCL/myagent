@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { ToolRegistrar } from './toolregistrar.js'
 import { AgentRegistry } from '../agents/registry.js'
@@ -84,6 +85,22 @@ export class AgentTool extends Tool {
       lines.push(`- **${a.name}** — ${a.description.replace(/\s+/g, ' ').trim()}`)
     }
     return lines.join('\n')
+  }
+
+  get inputSchemaZod() {
+    const names = this.registry.list().map(a => a.name)
+    // Names is built at runtime; if no agents registered yet, fall back to z.string()
+    // so validation isn't impossible. enum() requires non-empty.
+    const agentName = names.length > 0 ? z.enum(names as [string, ...string[]]) : z.string()
+    return z.object({
+      agent: agentName,
+      task: z.string().optional(),
+      source: z.string().optional(),
+    }).passthrough()  // sub-agent-specific fields are validated by the agent itself
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get input_schema(): { type: 'object'; properties: object; required: string[] } {

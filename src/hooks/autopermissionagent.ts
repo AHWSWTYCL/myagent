@@ -33,14 +33,17 @@ export class AutoPermissionAgent {
       // Extract JSON even if the model wraps it in markdown
       const match = text.match(/\{[\s\S]*\}/)
       if (!match) {
-        return 'yes'
+        // Couldn't parse a decision — fail closed and let the human decide.
+        return 'no'
       }
 
       const parsed = JSON.parse(match[0]) as { decision: string; reason?: string }
       return parsed.decision === 'allow' ? 'yes' : 'no'
     } catch {
-      // On any error, fall back to allowing (don't block the agent)
-      return 'yes'
+      // Network / API failure — fail CLOSED. The security layer must not silently
+      // allow unverified actions; caller (PermissionHook) falls back to asking
+      // the user interactively.
+      return 'no'
     }
   }
 }

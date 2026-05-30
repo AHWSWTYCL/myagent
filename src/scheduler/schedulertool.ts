@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from '../tools/tool.js'
 import { SchedulerManager, validateCron } from './schedulermanager.js'
 import { ScheduledTask, ScheduledTaskStatus, ScheduledTaskType } from './scheduledtask.js'
@@ -33,53 +34,25 @@ export class SchedulerTool extends Tool {
     )
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['create', 'list', 'cancel', 'get'],
-          description: 'create: 创建 | list: 列出 | cancel: 取消 | get: 查看详情',
-        },
-        type: {
-          type: 'string',
-          enum: ['once', 'cron'],
-          description: 'once: 单次任务 | cron: 循环任务（create 时必填）',
-        },
-        prompt: {
-          type: 'string',
-          description: '到时间后要执行的 prompt（create 时必填）',
-        },
-        run_at: {
-          type: 'string',
-          description: 'ISO 8601 时间戳，once 任务的执行时间（type=once 时必填）',
-        },
-        cron: {
-          type: 'string',
-          description: 'cron 表达式，5字段格式 "分 时 日 月 周"（type=cron 时必填）',
-        },
-        auto_delete: {
-          type: 'boolean',
-          description: 'once 任务完成后是否自动删除记录（默认 true）',
-        },
-        id: {
-          type: 'string',
-          description: '任务 ID（cancel/get 时必填）',
-        },
-        filter_status: {
-          type: 'string',
-          enum: ['pending', 'running', 'done', 'failed', 'cancelled'],
-          description: 'list 时按状态过滤',
-        },
-        filter_type: {
-          type: 'string',
-          enum: ['once', 'cron'],
-          description: 'list 时按类型过滤',
-        },
-      },
-      required: ['action'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      action: z.enum(['create', 'list', 'cancel', 'get'])
+        .describe('create: 创建 | list: 列出 | cancel: 取消 | get: 查看详情'),
+      type: z.enum(['once', 'cron']).optional()
+        .describe('once: 单次任务 | cron: 循环任务（create 时必填）'),
+      prompt: z.string().optional().describe('到时间后要执行的 prompt（create 时必填）'),
+      run_at: z.string().optional().describe('ISO 8601 时间戳，once 任务的执行时间（type=once 时必填）'),
+      cron: z.string().optional().describe('cron 表达式，5字段格式 "分 时 日 月 周"（type=cron 时必填）'),
+      auto_delete: z.boolean().optional().describe('once 任务完成后是否自动删除记录（默认 true）'),
+      id: z.string().optional().describe('任务 ID（cancel/get 时必填）'),
+      filter_status: z.enum(['pending', 'running', 'done', 'failed', 'cancelled']).optional()
+        .describe('list 时按状态过滤'),
+      filter_type: z.enum(['once', 'cron']).optional().describe('list 时按类型过滤'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

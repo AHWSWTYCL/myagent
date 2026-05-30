@@ -5,11 +5,16 @@ export interface RunAgentOptions {
   client: Anthropic
   model: string
   /**
-   * System prompt. Either a static string, or a function that's re-evaluated at the start
-   * of every inner loop iteration (so memory recall / dynamic context can run per-turn,
-   * matching Claude Code's queryLoop semantics).
+   * System prompt. Three forms accepted:
+   *   1. static string — wrapped as a single TextBlockParam with ephemeral cache_control
+   *   2. () => string — same as above, re-evaluated each turn
+   *   3. () => TextBlockParam[] — caller decides cache_control per segment.
+   *      Use this to split the system prompt into stable (cached) + dynamic (uncached) parts
+   *      so prompt cache stays warm even when only the dynamic part changes.
    */
-  system: string | (() => string | Promise<string>)
+  system:
+    | string
+    | (() => string | Anthropic.TextBlockParam[] | Promise<string | Anthropic.TextBlockParam[]>)
   tools: Anthropic.Tool[]
   messages: Anthropic.MessageParam[]
   maxTurns?: number
@@ -24,8 +29,15 @@ export interface RunAgentOptions {
   onTurnToolReset?: () => void
 }
 
-async function resolveSystem(system: RunAgentOptions['system']): Promise<string> {
-  return typeof system === 'function' ? await system() : system
+async function resolveSystem(
+  system: RunAgentOptions['system'],
+): Promise<Anthropic.TextBlockParam[]> {
+  const value = typeof system === 'function' ? await system() : system
+  if (typeof value === 'string') {
+    // Default: cache the whole thing (caller didn't bother to split).
+    return [{ type: 'text', text: value, cache_control: { type: 'ephemeral' } }]
+  }
+  return value
 }
 
 export interface UsageAccum {
@@ -111,6 +123,10 @@ export async function runAgentLoopStream(
     onTurnToolReset,
   } = opts
 
+  // input / cacheRead / cacheWrite are PER-REQUEST snapshots (the API already counts
+  // the full conversation each turn — accumulating across turns would inflate the
+  // count and prematurely trip the compact threshold). outputTokens stays accumulated
+  // because each turn produces fresh tokens.
   const cumUsage: UsageAccum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
   const MAX_TOKENS_RECOVERY_LIMIT = 3
   let maxTokensRecoveryCount = 0
@@ -121,13 +137,7 @@ export async function runAgentLoopStream(
       break
     }
 
-    const resolvedSystem = await resolveSystem(system)
-    // Cache the system prompt — it's largely stable across the inner loop
-    // (skills + agent list + memory), so paying 25% more once to read at 10%
-    // on every subsequent turn is a clear win.
-    const systemParam: Anthropic.TextBlockParam[] = [
-      { type: 'text', text: resolvedSystem, cache_control: { type: 'ephemeral' } },
-    ]
+    const systemParam = await resolveSystem(system)
     const stream = await withRetry(() => client.messages.stream({
       model,
       max_tokens: 8192,
@@ -147,12 +157,13 @@ export async function runAgentLoopStream(
           turnText += event.delta.text
           onText?.(event.delta.text)
         }
-        // Accumulate usage from message_start (input) and message_delta (output)
+        // input/cache numbers represent the full prompt the API saw THIS turn —
+        // overwrite, don't accumulate. Output tokens are net-new and accumulate.
         if (event.type === 'message_start') {
           const u = event.message.usage
-          cumUsage.inputTokens += u.input_tokens ?? 0
-          cumUsage.cacheReadTokens += u.cache_read_input_tokens ?? 0
-          cumUsage.cacheWriteTokens += u.cache_creation_input_tokens ?? 0
+          cumUsage.inputTokens = u.input_tokens ?? 0
+          cumUsage.cacheReadTokens = u.cache_read_input_tokens ?? 0
+          cumUsage.cacheWriteTokens = u.cache_creation_input_tokens ?? 0
         }
         if (event.type === 'message_delta') {
           cumUsage.outputTokens += event.usage.output_tokens

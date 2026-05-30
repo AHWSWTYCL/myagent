@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { cwd } from 'process'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool'
 
 export class ListDirTool extends Tool {
@@ -13,14 +14,14 @@ export class ListDirTool extends Tool {
         return 'List the contents of a directory. Shows a file tree with names, types, and sizes.'
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object',
-            properties: {
-                path: { type: 'string', description: 'Absolute or relative directory path. Defaults to current working directory if omitted.' },
-            },
-            required: [],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            path: z.string().optional().describe('Absolute or relative directory path. Defaults to current working directory if omitted.'),
+        })
+    }
+
+    get outputSchemaZod() {
+        return z.string()
     }
 
     get parallelSafe(): boolean { return true }

@@ -14,9 +14,9 @@ export class MemoryExtractHook implements Hook {
   async onTurnEnd(ctx: TurnEndContext): Promise<void> {
     if (!ctx.userInput) return
     extractMemoryFromTurn(ctx.userInput, ctx.assistantText)
-      .then(items => {
+      .then(async items => {
         if (items.length === 0) return
-        const added = appendMemories(items)
+        const added = await appendMemories(items)
         if (added > 0) {
           this.bridge.emitMessage('system', `[memory] +${added} new memor${added === 1 ? 'y' : 'ies'}`)
         }

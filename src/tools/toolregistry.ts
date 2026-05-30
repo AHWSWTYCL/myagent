@@ -7,6 +7,11 @@ export class ToolRegistry {
         this.tools.set(tool.name, tool);
     }
 
+    /** Remove a tool by name. Returns true if it existed. */
+    removeTool(name: string): boolean {
+        return this.tools.delete(name);
+    }
+
     getTool(name: string): Tool | undefined {
         return this.tools.get(name);
     }

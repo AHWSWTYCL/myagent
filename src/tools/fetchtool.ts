@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 
 const MAX_CONTENT_CHARS = 50_000
@@ -53,14 +54,14 @@ export class FetchTool extends Tool {
     return 'Fetch the content of a URL and return it as plain text. HTML is automatically stripped to readable text.'
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {
-        url: { type: 'string', description: 'The URL to fetch' },
-      },
-      required: ['url'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      url: z.string().url().describe('The URL to fetch'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get parallelSafe() { return true }

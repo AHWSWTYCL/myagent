@@ -1,4 +1,5 @@
 import { getMemoryFiles, MemoryCategory, readCategory, writeCategory, readAllCategories } from '../memory/memory.js'
+import { z } from 'zod'
 import { Tool, type ToolPermissionResult, type ToolRenderHeader } from './tool.js'
 
 type MemoryAction = 'save' | 'delete' | 'list' | 'update_index'
@@ -13,27 +14,19 @@ export class MemoryTool extends Tool {
         return '管理自动记忆系统。支持分类存储：profile(用户画像)、project(项目信息)、feedback(用户反馈)、reference(外部引用)、index(索引)。LLM 可根据对话内容自主判断何时记录什么信息。'
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object',
-            properties: {
-                action: {
-                    type: 'string',
-                    enum: ['save', 'delete', 'list', 'update_index'],
-                    description: 'save: 追加一条记忆到指定分类；delete: 从指定分类中删除匹配的记忆；list: 列出指定分类的所有记忆；update_index: 从各分类内容自动重新生成 INDEX.md',
-                },
-                category: {
-                    type: 'string',
-                    enum: ['profile', 'project', 'feedback', 'reference', 'index'],
-                    description: '记忆分类：profile(用户画像/偏好)、project(项目信息/决策)、feedback(用户反馈/评价)、reference(外部引用/链接)、index(索引)',
-                },
-                content: {
-                    type: 'string',
-                    description: 'save 时填写要记录的内容（一条简洁的记忆）；delete 时填写要匹配的关键词',
-                },
-            },
-            required: ['action', 'category'],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            action: z.enum(['save', 'delete', 'list', 'update_index'])
+                .describe('save: 追加一条记忆到指定分类；delete: 从指定分类中删除匹配的记忆；list: 列出指定分类的所有记忆；update_index: 从各分类内容自动重新生成 INDEX.md'),
+            category: z.enum(['profile', 'project', 'feedback', 'reference', 'index'])
+                .describe('记忆分类：profile(用户画像/偏好)、project(项目信息/决策)、feedback(用户反馈/评价)、reference(外部引用/链接)、index(索引)'),
+            content: z.string().optional()
+                .describe('save 时填写要记录的内容（一条简洁的记忆）；delete 时填写要匹配的关键词'),
+        })
+    }
+
+    get outputSchemaZod() {
+        return z.string()
     }
 
     renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

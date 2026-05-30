@@ -344,10 +344,9 @@ export class MCPManager {
     this.mcpTools = this.mcpTools.filter(t => !toRemove.includes(t.name))
     for (const name of toRemove) {
       this.registeredNames.delete(name)
+      // Drop from the main registry so subsequent runAgentLoopStream calls
+      // don't expose a tool that has no live MCP connection backing it.
+      this.registrar?.removeTool(name)
     }
-
-    // 注意：ToolRegistry 没有 removeTool 方法
-    // 目前的做法是：在 agent 重启时重新注册所有工具
-    // 运行时 disconnect 后，工具名从 registeredNames 移除，防止后续冲突
   }
 }

@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolPermissionResult, type ToolRenderHeader } from './tool.js'
 import type { ChoiceQuestion, ChoiceResult } from '../tui/types.js'
 
@@ -27,38 +28,22 @@ export class ChoiceTool extends Tool {
     ].join(' ')
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object' as const,
-      properties: {
-        questions: {
-          type: 'array',
-          description: 'List of questions to ask. Keep ids short and unique.',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', description: 'Stable identifier used as the key in the returned answers map.' },
-              prompt: { type: 'string', description: 'The question text shown to the user.' },
-              options: {
-                type: 'array',
-                description: '2-6 mutually exclusive choices.',
-                items: {
-                  type: 'object',
-                  properties: {
-                    value: { type: 'string', description: 'Machine-readable value returned when this option is chosen.' },
-                    label: { type: 'string', description: 'Human-readable label shown in the TUI.' },
-                  },
-                  required: ['value', 'label'],
-                },
-              },
-              allowOther: { type: 'boolean', description: 'If true, an "Other…" option is appended for custom input.' },
-            },
-            required: ['id', 'prompt', 'options'],
-          },
-        },
-      },
-      required: ['questions'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      questions: z.array(z.object({
+        id: z.string().describe('Stable identifier used as the key in the returned answers map.'),
+        prompt: z.string().describe('The question text shown to the user.'),
+        options: z.array(z.object({
+          value: z.string().describe('Machine-readable value returned when this option is chosen.'),
+          label: z.string().describe('Human-readable label shown in the TUI.'),
+        })).min(2).max(6).describe('2-6 mutually exclusive choices.'),
+        allowOther: z.boolean().optional().describe('If true, an "Other…" option is appended for custom input.'),
+      })).min(1).describe('List of questions to ask. Keep ids short and unique.'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get parallelSafe(): boolean { return false }

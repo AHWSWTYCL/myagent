@@ -1,9 +1,18 @@
 import { spawn } from 'child_process'
 import { cwd } from 'process'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool'
 
-const TIMEOUT_MS = 10_000
-const MAX_OUTPUT_BYTES = 50_000
+// Defaults can be overridden via env to support long-running builds/tests.
+function readPositiveInt(envName: string, fallback: number): number {
+  const raw = process.env[envName]
+  if (!raw) return fallback
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+const TIMEOUT_MS = readPositiveInt('MYAGENT_BASH_TIMEOUT_MS', 10_000)
+const MAX_OUTPUT_BYTES = readPositiveInt('MYAGENT_BASH_MAX_OUTPUT_BYTES', 50_000)
 const KILL_GRACE_MS = 2_000  // SIGTERM 后 2 秒再 SIGKILL
 
 // 每条规则：pattern 用于匹配命令，reason 用于错误提示
@@ -40,6 +49,13 @@ const READONLY_PREFIXES = [
 
 function isReadonlyCommand(command: string): boolean {
     const trimmed = command.trim()
+    // Reject anything with shell composition. `ls && rm -rf x` or `cat a | sh`
+    // would otherwise match the prefix list and bypass the prompt. Backticks
+    // and $(...) are also rejected since they execute arbitrary subcommands.
+    if (/[;&|`]/.test(trimmed)) return false
+    if (/\$\(/.test(trimmed)) return false
+    // Output redirection writes to disk — not read-only.
+    if (/(^|[^<])>/.test(trimmed)) return false
     for (const prefix of READONLY_PREFIXES) {
         if (trimmed === prefix || trimmed.startsWith(prefix + ' ')) {
             return true
@@ -162,17 +178,23 @@ export class BashTool extends Tool {
     }
 
     get description(): string {
-        return 'Execute a bash command in the current working directory and return its output. Avoid long-running or interactive commands.'
+        const timeoutSec = Math.round(TIMEOUT_MS / 1000)
+        const outputKB = Math.round(MAX_OUTPUT_BYTES / 1024)
+        return [
+            'Execute a bash command in the current working directory and return its output.',
+            `Hard limits: ${timeoutSec}s wall-clock timeout (process group killed on overrun); stdout truncated past ${outputKB} KB (truncation is reported in the output suffix).`,
+            'Avoid interactive commands (no stdin available). For long-running builds or test suites, raise MYAGENT_BASH_TIMEOUT_MS in the environment instead of running them here.',
+        ].join(' ')
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object',
-            properties: {
-                command: { type: 'string', description: 'The bash command to execute' },
-            },
-            required: ['command'],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            command: z.string().describe('The bash command to execute'),
+        })
+    }
+
+    get outputSchemaZod() {
+        return z.string()
     }
 
     renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

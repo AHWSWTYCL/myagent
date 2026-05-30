@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { structuredPatch } from 'diff'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool'
 
 /** 一条 diff 行，供 TUI 渲染 */
@@ -29,16 +30,19 @@ export class EditTool extends Tool {
         return 'Replace an exact string in a file with new content. The old_string must match exactly (including whitespace and indentation). Fails if old_string is not found or is ambiguous (appears more than once).'
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object',
-            properties: {
-                path: { type: 'string', description: 'Absolute or relative file path' },
-                old_string: { type: 'string', description: 'Exact string to find and replace' },
-                new_string: { type: 'string', description: 'Replacement string' },
-            },
-            required: ['path', 'old_string', 'new_string'],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            path: z.string().describe('Absolute or relative file path'),
+            old_string: z.string().describe('Exact string to find and replace'),
+            new_string: z.string().describe('Replacement string'),
+        })
+    }
+
+    /** EditTool returns JSON-encoded {summary, diff} on success or a plain
+     *  "Error: ..." string on failure. We only enforce string-ness here;
+     *  callers that depend on the JSON shape parse it themselves. */
+    get outputSchemaZod() {
+        return z.string()
     }
 
     renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

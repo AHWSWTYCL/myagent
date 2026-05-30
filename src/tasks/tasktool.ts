@@ -5,6 +5,7 @@
  * 以及查看任务的依赖关系图。
  */
 
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from '../tools/tool.js'
 import { TaskManager, formatTaskDetail, formatTaskLine } from './taskmanager.js'
 import { TaskStatus, TASK_STATUSES, STATUS_ICON } from './task.js'
@@ -26,50 +27,25 @@ export class TaskTool extends Tool {
     )
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['create', 'get', 'list', 'update', 'delete', 'graph'],
-          description:
-            'create: 创建任务 | get: 查看任务详情 | list: 列出任务 | update: 更新任务 | delete: 删除任务 | graph: 查看依赖图',
-        },
-        id: {
-          type: 'string',
-          description: '任务 ID（get/update/delete/graph 时必填）',
-        },
-        title: {
-          type: 'string',
-          description: '任务标题（create 时必填）',
-        },
-        description: {
-          type: 'string',
-          description: '任务详细描述',
-        },
-        status: {
-          type: 'string',
-          enum: ['todo', 'in_progress', 'done', 'blocked', 'cancelled'],
-          description: '任务状态（update 时可选）',
-        },
-        subagent_id: {
-          type: 'string',
-          description: '执行此任务的 sub-agent ID（update 时可选）',
-        },
-        depends_on: {
-          type: 'array',
-          items: { type: 'string' },
-          description: '前置依赖的任务 ID 列表，如 ["task-abc1", "task-abc2"]',
-        },
-        filter_status: {
-          type: 'string',
-          enum: ['todo', 'in_progress', 'done', 'blocked', 'cancelled'],
-          description: 'list 时按状态过滤',
-        },
-      },
-      required: ['action'],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      action: z.enum(['create', 'get', 'list', 'update', 'delete', 'graph'])
+        .describe('create: 创建任务 | get: 查看任务详情 | list: 列出任务 | update: 更新任务 | delete: 删除任务 | graph: 查看依赖图'),
+      id: z.string().optional().describe('任务 ID（get/update/delete/graph 时必填）'),
+      title: z.string().optional().describe('任务标题（create 时必填）'),
+      description: z.string().optional().describe('任务详细描述'),
+      status: z.enum(['todo', 'in_progress', 'done', 'blocked', 'cancelled']).optional()
+        .describe('任务状态（update 时可选）'),
+      subagent_id: z.string().optional().describe('执行此任务的 sub-agent ID（update 时可选）'),
+      depends_on: z.array(z.string()).optional()
+        .describe('前置依赖的任务 ID 列表，如 ["task-abc1", "task-abc2"]'),
+      filter_status: z.enum(['todo', 'in_progress', 'done', 'blocked', 'cancelled']).optional()
+        .describe('list 时按状态过滤'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {

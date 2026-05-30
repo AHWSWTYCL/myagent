@@ -3,11 +3,21 @@ import { App } from './tui/App.js'
 import React from 'react'
 import { render } from 'ink'
 
-// Override console.log before any other module code runs (static imports are
+// Override console.log/error before any other module code runs (static imports are
 // hoisted but their *function bodies* only run when called, so this is safe).
+// Originals are kept so debug (headless) mode can restore them — its progress
+// logging legitimately needs stderr.
 const bridge = new TuiBridge()
+const originalConsoleLog = console.log.bind(console)
+const originalConsoleError = console.error.bind(console)
 console.log = (...args: unknown[]) => {
   bridge.emitMessage('system', args.map(String).join(' '))
+}
+console.error = (...args: unknown[]) => {
+  bridge.emitMessage('system', args.map(arg => {
+    if (arg instanceof Error) return `${arg.name}: ${arg.message}`
+    return String(arg)
+  }).join(' '))
 }
 
 // ── 全局错误处理器：防止 unhandledRejection / uncaughtException 静默退出 ──
@@ -16,13 +26,14 @@ console.log = (...args: unknown[]) => {
 process.on('unhandledRejection', (reason: unknown) => {
   const msg = reason instanceof Error ? `${reason.name}: ${reason.message}\n${reason.stack}` : String(reason)
   bridge.emitMessage('system', `❌ Unhandled Rejection:\n${msg}`)
-  console.error('[myagent] Unhandled Rejection:', reason)
+  // Also write to ORIGINAL stderr so headless / piped runs surface the failure.
+  originalConsoleError('[myagent] Unhandled Rejection:', reason)
 })
 
 process.on('uncaughtException', (err: Error) => {
   const msg = `${err.name}: ${err.message}\n${err.stack?.split('\n').slice(0, 6).join('\n')}`
   bridge.emitMessage('system', `❌ Uncaught Exception:\n${msg}`)
-  console.error('[myagent] Uncaught Exception:', err)
+  originalConsoleError('[myagent] Uncaught Exception:', err)
   // uncaughtException 后进程状态不可靠，延迟退出让用户看到错误
   setTimeout(() => process.exit(1), 2000)
 })
@@ -36,6 +47,7 @@ import { recallRelevantMemory } from './memory/recall.js'
 import { runAgentLoopStream, UsageAccum } from './utils/runagent.js'
 import { compactMessages, microcompactMessages, estimateTokens, MICRO_COMPACT_TOKEN_THRESHOLD, COMPACT_TOKEN_THRESHOLD } from './utils/compact.js'
 import { ToolRegistrar } from './tools/toolregistrar.js'
+import { validateInput, validateOutput } from './tools/validator.js'
 import { HookManager } from './hooks/hook.js'
 import { LoggerHook } from './hooks/loggerhook.js'
 import { PermissionHook } from './hooks/permissionhook.js'
@@ -142,14 +154,22 @@ todoManager.on('update', (snapshot) => {
 // 复用 toolRegistry 中的 BashTool（和 LLM 调用的同个工具），而非另起 execSync。
 // 结果以 XML 标签格式推入 messages 供后续 LLM 回合引用，本身不触发 LLM query。
 // !mcp 命令被拦截路由到 MCP 命令处理器。
+//
+// Escape `<` so user input or tool output can't smuggle a fake closing tag
+// (e.g. `</bash-input>...` injecting follow-up instructions). `<` → `&lt;`
+// keeps the text human-readable to the LLM while preventing tag confusion.
+function escapeForTag(text: string): string {
+  return text.replace(/</g, '&lt;')
+}
+
 export async function runBash(cmd: string): Promise<string> {
   // !mcp 命令拦截
   if (cmd.trim().toLowerCase().startsWith('mcp')) {
     const args = cmd.trim().slice(3).trim()
     const result = await handleMCPCommand(args, mcpManager)
     messages.push(
-      { role: 'user', content: `<mcp-cmd>${args}</mcp-cmd>` },
-      { role: 'user', content: `<mcp-result>\n${result}\n</mcp-result>` },
+      { role: 'user', content: `<mcp-cmd>${escapeForTag(args)}</mcp-cmd>` },
+      { role: 'user', content: `<mcp-result>\n${escapeForTag(result)}\n</mcp-result>` },
     )
     return result
   }
@@ -159,8 +179,8 @@ export async function runBash(cmd: string): Promise<string> {
   // 跳过权限检查：用户主动输入 ! 命令即已授权
   const result = await tool.execute({ command: cmd })
   messages.push(
-    { role: 'user', content: `<bash-input>${cmd}</bash-input>` },
-    { role: 'user', content: `<bash-stdout>${result}</bash-stdout>` },
+    { role: 'user', content: `<bash-input>${escapeForTag(cmd)}</bash-input>` },
+    { role: 'user', content: `<bash-stdout>${escapeForTag(result)}</bash-stdout>` },
   )
   return result
 }
@@ -168,11 +188,29 @@ export async function runBash(cmd: string): Promise<string> {
 async function executeTool(name: string, input: unknown, skipHooks = false): Promise<string> {
   const args = input as Record<string, string>
   try {
+    const tool = toolRegistrar.getTool(name)
+    if (!tool) return 'Unknown tool'
+
+    // Validate the LLM-supplied input against the tool's zod schema before
+    // dispatch. Returning a structured error lets the model see what went wrong
+    // and self-correct instead of crashing inside the tool.
+    const inputCheck = validateInput(tool, input)
+    if (!inputCheck.ok) return `Error: ${inputCheck.error}`
+
     if (!skipHooks) {
       const pre = await hookManager.runOnToolCall({ toolName: name, toolInput: input })
       if (pre.action === 'block') return `Permission denied: ${pre.reason}`
     }
-    const result = await (toolRegistrar.getTool(name)?.execute(args, currentAbortSignal) ?? Promise.resolve('Unknown tool'))
+    const result = await tool.execute(args, currentAbortSignal)
+
+    // Output validation: catches contract drift in our own tools (LLM gets the
+    // wrong-shape data, downstream parsers blow up). Don't block the response —
+    // the LLM can still try to use it — but log loudly so dev sees the regression.
+    const outputCheck = validateOutput(tool, result)
+    if (!outputCheck.ok) {
+      console.error(`[validator] ${outputCheck.error}`)
+    }
+
     if (!skipHooks) {
       await hookManager.runOnToolResult({ toolName: name, toolInput: input, toolResult: result })
     }
@@ -187,6 +225,9 @@ const MAX_TURNS = 1000
 const messages: Anthropic.MessageParam[] = []
 let agentRunning = false
 let lastUsage: UsageAccum | null = null
+// Tail of the run-turn queue: each runTurn awaits this and then assigns its own
+// release promise as the new tail, giving FIFO serialization without polling.
+let currentTurnTail: Promise<void> = Promise.resolve()
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 const commandRegistry = new CommandRegistry()
@@ -200,13 +241,30 @@ commandRegistry.register(new TokenStatsCommand(() => lastUsage, () => messages))
 commandRegistry.register(new SchedulerCommand())
 const commandParser = new CommandParser(commandRegistry)
 
-function buildSystemPrompt(memoryFragment: string): string {
+/**
+ * Build the system prompt as TWO segments so prompt cache stays warm:
+ *   - stable: base prompt + tools section + agent registry description
+ *     (only changes when code/agents change)
+ *   - dynamic: recalled memory + active skills (changes per user input / skill toggle)
+ * Only the stable segment carries cache_control. The dynamic segment is appended
+ * uncached so flipping memory/skills doesn't invalidate the cache.
+ */
+function buildSystemSegments(memoryFragment: string): Anthropic.TextBlockParam[] {
   const agentSection = agentRegistry.describeForPrompt() || undefined
-  const base = getSystemPrompt(agentSection)
-  const withMemory = memoryFragment
-    ? `${base}\n\n## 相关记忆\n${memoryFragment}`
-    : base
-  return `${withMemory}${skillManager.buildPromptFragment()}`
+  const stableText = getSystemPrompt(agentSection)
+
+  const dynamicParts: string[] = []
+  if (memoryFragment) dynamicParts.push(`## 相关记忆\n${memoryFragment}`)
+  const skillFragment = skillManager.buildPromptFragment()
+  if (skillFragment) dynamicParts.push(skillFragment.trimStart())
+
+  const segments: Anthropic.TextBlockParam[] = [
+    { type: 'text', text: stableText, cache_control: { type: 'ephemeral' } },
+  ]
+  if (dynamicParts.length > 0) {
+    segments.push({ type: 'text', text: dynamicParts.join('\n\n') })
+  }
+  return segments
 }
 
 async function compactIfNeeded(): Promise<void> {
@@ -244,10 +302,13 @@ export async function runTurn(
   input: string | Array<ContentBlockParam>,
   signal?: AbortSignal,
 ): Promise<void> {
-  // Serialize turns — wait if another turn is already running (e.g. a scheduled task)
-  while (agentRunning) {
-    await new Promise(r => setTimeout(r, 200))
-  }
+  // Serialize turns by awaiting the tail of the queue, then making *this* call's
+  // body the new tail. Replaces a 200ms polling loop on `agentRunning`.
+  const previous = currentTurnTail
+  let releaseTail: () => void = () => {}
+  currentTurnTail = new Promise<void>(resolve => { releaseTail = resolve })
+  await previous
+
   agentRunning = true
   currentAbortSignal = signal
   agentTool.setSignal(signal)
@@ -262,7 +323,7 @@ export async function runTurn(
     if (relevantMemory) bridge.emitRecall(relevantMemory)
     bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
 
-    const buildSystem = (): string => buildSystemPrompt(relevantMemory)
+    const buildSystem = (): Anthropic.TextBlockParam[] => buildSystemSegments(relevantMemory)
 
     // Accumulate text across inner turns for memory extraction (one pass per user input, not per inner turn)
     let fullAssistantText = ''
@@ -299,9 +360,9 @@ export async function runTurn(
     // Extract memories once per user input (not per inner turn)
     if (fullAssistantText.trim()) {
       extractMemoryFromTurn(recallText, fullAssistantText)
-        .then(items => {
+        .then(async items => {
           if (items.length === 0) return
-          const added = appendMemories(items)
+          const added = await appendMemories(items)
           if (added > 0) {
             bridge.emitMessage('system', `[memory] +${added} new memor${added === 1 ? 'y' : 'ies'}`)
           }
@@ -312,6 +373,7 @@ export async function runTurn(
     await compactIfNeeded()
   } finally {
     agentRunning = false
+    releaseTail()
   }
 }
 
@@ -330,6 +392,11 @@ const debugOpts = parseDebugArgs()
 
 if (debugOpts) {
   // ── Debug 模式：headless 运行，输出 JSON ──────────────────────────────
+
+  // Restore originals: headless mode prints progress to stderr / JSON to stdout,
+  // it has no TUI to bridge into.
+  console.log = originalConsoleLog
+  console.error = originalConsoleError
 
   // 启用 auto mode — debug 模式无 TUI，不能做交互式授权
   if (!bridge.autoMode) {

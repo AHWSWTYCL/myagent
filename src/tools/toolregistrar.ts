@@ -13,6 +13,11 @@ export class ToolRegistrar {
         this.registry.registerTool(tool);
     }
 
+    /** Remove a tool by name. Returns true if it existed. */
+    removeTool(name: string): boolean {
+        return this.registry.removeTool(name);
+    }
+
     getTool(name: string): Tool | undefined {
         return this.registry.getTool(name);
     }

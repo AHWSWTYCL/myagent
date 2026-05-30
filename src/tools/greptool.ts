@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool'
 
 const TIMEOUT_MS = 10_000
@@ -14,18 +15,18 @@ export class GrepTool extends Tool {
         return 'Search for a pattern in files using grep. Returns matching lines with file names and line numbers.'
     }
 
-    get input_schema(): { type: 'object'; properties: object; required: string[] } {
-        return {
-            type: 'object',
-            properties: {
-                pattern: { type: 'string', description: 'Regular expression or literal string to search for' },
-                path: { type: 'string', description: 'File or directory to search in (default: current working directory)' },
-                recursive: { type: 'boolean', description: 'Search recursively in directories (default: true)' },
-                case_insensitive: { type: 'boolean', description: 'Case-insensitive search (default: false)' },
-                include: { type: 'string', description: 'Glob pattern to filter files, e.g. "*.ts"' },
-            },
-            required: ['pattern'],
-        }
+    get inputSchemaZod() {
+        return z.object({
+            pattern: z.string().describe('Regular expression or literal string to search for'),
+            path: z.string().optional().describe('File or directory to search in (default: current working directory)'),
+            recursive: z.boolean().optional().describe('Search recursively in directories (default: true)'),
+            case_insensitive: z.boolean().optional().describe('Case-insensitive search (default: false)'),
+            include: z.string().optional().describe('Glob pattern to filter files, e.g. "*.ts"'),
+        })
+    }
+
+    get outputSchemaZod() {
+        return z.string()
     }
 
     get parallelSafe(): boolean { return true }

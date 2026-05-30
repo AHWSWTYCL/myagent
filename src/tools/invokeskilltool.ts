@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { SkillManager } from '../skills/skillmanager.js'
 
@@ -31,17 +32,14 @@ export class InvokeSkillTool extends Tool {
     return `调用一个已注册的专业技能来获得领域知识和行为指导。可用的技能：${listing}。当用户的任务涉及以上领域时，先调用对应技能获取指导后再回答。调用时不传 skill_name 可查看技能列表。`
   }
 
-  get input_schema(): { type: 'object'; properties: object; required: string[] } {
-    return {
-      type: 'object',
-      properties: {
-        skill_name: {
-          type: 'string',
-          description: '要调用的技能名称。不传或为空时返回所有可用技能列表。',
-        },
-      },
-      required: [],
-    }
+  get inputSchemaZod() {
+    return z.object({
+      skill_name: z.string().optional().describe('要调用的技能名称。不传或为空时返回所有可用技能列表。'),
+    })
+  }
+
+  get outputSchemaZod() {
+    return z.string()
   }
 
   get parallelSafe(): boolean {
