@@ -34,10 +34,13 @@ describe('validator', () => {
     expect(validateInput(tool, { command: 'ls' }).ok).toBe(true)
   })
 
-  it('edit tool requires path/old_string/new_string', () => {
+  it('edit tool requires file_path/old_string/new_string', () => {
     const tool = new EditTool()
+    expect(validateInput(tool, { file_path: 'a' }).ok).toBe(false)
+    expect(validateInput(tool, { file_path: 'a', old_string: 'x', new_string: 'y' }).ok).toBe(true)
+    // 也支持旧的 path 参数名（向后兼容）
     expect(validateInput(tool, { path: 'a' }).ok).toBe(false)
-    expect(validateInput(tool, { path: 'a', old_string: 'x', new_string: 'y' }).ok).toBe(true)
+    expect(validateInput(tool, { path: 'a', old_string: 'x', new_string: 'y' }).ok).toBe(false) // Zod schema 不识别的字段
   })
 
   it('input_schema is derived from zod and has required fields', () => {

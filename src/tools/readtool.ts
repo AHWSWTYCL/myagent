@@ -1,6 +1,8 @@
 import fs from 'fs'
+import path from 'path'
 import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from "./tool";
+import { fileStateCache } from '../utils/fileStateCache.js';
 
 export class ReadTool extends Tool {
 
@@ -51,12 +53,18 @@ export class ReadTool extends Tool {
     }
 
     async execute(args: any): Promise<string> {
-        const path = args.path;
+        const filePath = args.path;
         try {
-            const content = fs.readFileSync(path, 'utf-8');
+            const resolvedPath = path.resolve(filePath)
+            const content = fs.readFileSync(resolvedPath, 'utf-8');
+            // 记录读取状态：供 EditTool 的读前检查和文件过时检查
+            fileStateCache.set(resolvedPath, {
+                content,
+                timestamp: fs.statSync(resolvedPath).mtimeMs,
+            })
             return content;
         } catch (err) {
-            return `Error reading file at ${path}: ${err}`;
+            return `Error reading file at ${filePath}: ${err}`;
         }
     }
 }    
