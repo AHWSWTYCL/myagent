@@ -71,6 +71,7 @@ import { Scheduler } from './scheduler/scheduler.js'
 import { MCPManager } from './mcp/mcpmanager.js'
 import { handleMCPCommand } from './commands/mcpcommand.js'
 import { todoManager } from './todos/todomanager.js'
+import { attachmentQueue } from './attachment/queue.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -133,6 +134,9 @@ const mcpManager = new MCPManager()
 mcpManager.setRegistrar(toolRegistrar)
 mcpManager.onStatusChange((infos) => bridge.emitMcpStatus(infos))
 await mcpManager.startAll()
+
+// ── 启动完成，清理初始化阶段的 Attachment 噪声 ──────────────────────────
+attachmentQueue.clear()
 
 // ── Hooks ─────────────────────────────────────────────────────────────────────
 const hookManager = new HookManager()
@@ -354,6 +358,7 @@ export async function runTurn(
       parallelSafeTools: toolRegistrar.getParallelSafeNames(),
       signal,
       drainQueue: () => messageQueue.dequeue(),
+      drainAttachments: () => attachmentQueue.formatDrain(),
       onText: delta => bridge.emitText(delta),
       onTurnEnd: async (text, msgs) => {
         fullAssistantText += text + '\n'

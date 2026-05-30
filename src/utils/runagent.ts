@@ -36,6 +36,14 @@ export interface RunAgentOptions {
    *   (2) end_turn/stop 之前（如有排队消息则不 break 而 continue）
    */
   drainQueue?: () => string | undefined
+  /**
+   * Attachment 队列 drain 回调：每轮工具执行之后调用。
+   * 将系统状态变更（任务/技能/Agent 等）格式化为文本注入 LLM 上下文。
+   * 返回非空字符串时会以 [System State Changes] 格式推入 messages[]。
+   *
+   * 调用点：与 drainQueue 相同
+   */
+  drainAttachments?: () => string
 }
 
 async function resolveSystem(
@@ -129,7 +137,7 @@ export async function runAgentLoopStream(
   const {
     client, model, system, tools, messages, maxTurns = 20,
     executeTool, onText, onTurnEnd, onToolStart, onToolEnd, onUsage, signal, parallelSafeTools,
-    onTurnToolReset, drainQueue,
+    onTurnToolReset, drainQueue, drainAttachments,
   } = opts
 
   // input / cacheRead / cacheWrite are PER-REQUEST snapshots (the API already counts
@@ -226,6 +234,14 @@ export async function runAgentLoopStream(
           continue
         }
       }
+      // DRAIN POINT 2b: Attachment 队列 — 确保结束前也注入
+      if (drainAttachments) {
+        const attText = drainAttachments()
+        if (attText) {
+          messages.push({ role: 'user', content: attText })
+          continue
+        }
+      }
 
       if (response.stop_reason !== 'end_turn') {
         console.log(`[queryLoop] exit at turn ${turn}: stop_reason=${response.stop_reason}`)
@@ -250,6 +266,13 @@ export async function runAgentLoopStream(
       const nextMsg = drainQueue()
       if (nextMsg) {
         messages.push({ role: 'user', content: nextMsg })
+      }
+    }
+    // DRAIN POINT 1b: Attachment 队列 — 系统状态变更自动注入 LLM 上下文
+    if (drainAttachments) {
+      const attText = drainAttachments()
+      if (attText) {
+        messages.push({ role: 'user', content: attText })
       }
     }
 

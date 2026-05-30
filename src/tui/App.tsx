@@ -851,11 +851,15 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
       // ! 命令：走 agent 层的 BashTool（和 LLM 调用的同个工具），不走 LLM
       if (trimmed.startsWith('!')) {
         // ! 命令处理中不允许执行
-        if (isProcessingRef.current) return
+        if (isProcessingRef.current) {
+          submittingRef.current = false
+          return
+        }
 
         const cmd = trimmed.slice(1).trim()
         if (!cmd) {
           setMessages(prev => [...prev, { id: nextId(), role: 'system', content: '! 后面需要跟要执行的命令' }])
+          submittingRef.current = false
           return
         }
         addToHistory(trimmed)
@@ -889,14 +893,19 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
           }])
         } finally {
           setIsProcessing(false)
+          submittingRef.current = false
         }
         return
       }
 
       if (commandParser.isCommand(trimmed)) {
         // / 命令处理中不允许执行
-        if (isProcessingRef.current) return
+        if (isProcessingRef.current) {
+          submittingRef.current = false
+          return
+        }
         await commandParser.dispatch(trimmed)
+        submittingRef.current = false
         return
       }
 

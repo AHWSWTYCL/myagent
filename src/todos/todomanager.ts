@@ -1,5 +1,11 @@
 import { EventEmitter } from 'events'
 import type { TodoItem, TodoItemStatus, TodoPlanSnapshot } from './todo.js'
+import { attachmentQueue } from '../attachment/queue.js'
+import {
+  TaskStatusAttachment,
+  TaskPlanCreatedAttachment,
+  TaskPlanClearedAttachment,
+} from '../attachment/task.js'
 
 interface PlanState {
   planId: string
@@ -39,6 +45,7 @@ export class TodoManager extends EventEmitter {
     this.current = plan
     const snapshot = this.toSnapshot(plan)
     this.emit('update', snapshot)
+    attachmentQueue.enqueue(new TaskPlanCreatedAttachment(description, taskDescriptions.length))
     return snapshot
   }
 
@@ -49,6 +56,8 @@ export class TodoManager extends EventEmitter {
     this.current.tasks[index] = { ...this.current.tasks[index], status, error }
     const snapshot = this.toSnapshot(this.current)
     this.emit('update', snapshot)
+    const desc = this.current.tasks[index].description
+    attachmentQueue.enqueue(new TaskStatusAttachment(snapshot.planId, index, desc, status, error))
     return snapshot
   }
 
@@ -60,8 +69,10 @@ export class TodoManager extends EventEmitter {
 
   /** 清空当前 plan（发出 null）。 */
   clear(): void {
+    const planId = this.current?.planId
     this.current = null
     this.emit('update', null)
+    if (planId) attachmentQueue.enqueue(new TaskPlanClearedAttachment(planId))
   }
 
   // ── private ──────────────────────────────────────────────────

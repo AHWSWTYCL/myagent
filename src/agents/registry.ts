@@ -1,4 +1,6 @@
 import { AgentDefinition } from './definition.js'
+import { attachmentQueue } from '../attachment/queue.js'
+import { AgentAttachment } from '../attachment/agent.js'
 
 export class AgentRegistry {
   private agents = new Map<string, AgentDefinition>()
@@ -8,6 +10,7 @@ export class AgentRegistry {
       console.error(`[agents] duplicate agent name "${def.name}", overwriting`)
     }
     this.agents.set(def.name, def)
+    attachmentQueue.enqueue(new AgentAttachment(def.name, def.description))
   }
 
   registerAll(defs: AgentDefinition[]): void {

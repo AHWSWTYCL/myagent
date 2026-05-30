@@ -1,5 +1,7 @@
 import { Skill } from './skill.js'
 import { loadSkillsFromDisk } from './skillloader.js'
+import { attachmentQueue } from '../attachment/queue.js'
+import { SkillAttachment } from '../attachment/skill.js'
 
 export class SkillManager {
   private skills: Map<string, Skill> = new Map()
@@ -41,6 +43,7 @@ export class SkillManager {
       return `错误：skill "${name}" 不存在。可用的 skill：${[...this.skills.keys()].join(', ') || '（无）'}`
     }
     this.activeSkills.add(name)
+    attachmentQueue.enqueue(new SkillAttachment(name, 'activated'))
     return `已激活 skill：${name}。${this.skills.get(name)!.description}`
   }
 
@@ -49,6 +52,7 @@ export class SkillManager {
       return `skill "${name}" 当前未激活。`
     }
     this.activeSkills.delete(name)
+    attachmentQueue.enqueue(new SkillAttachment(name, 'deactivated'))
     return `已停用 skill：${name}。`
   }
 
