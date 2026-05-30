@@ -5,3 +5,5 @@ dist/
 .claude/
 .myagent/
 playground/
+bugs/
+requirements/
