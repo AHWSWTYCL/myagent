@@ -41,10 +41,14 @@ const BLACKLIST: { pattern: RegExp; reason: string }[] = [
 const READONLY_PREFIXES = [
     'ls', 'cat', 'head', 'tail', 'less', 'more', 'echo',
     'pwd', 'which', 'type', 'where',
+    'du ', 'df ', 'stat ', 'file ',
+    'env', 'printenv',
     'git status', 'git log', 'git diff', 'git show', 'git branch', 'git stash list',
+    'git stash show', 'git diff --staged', 'git diff --cached',
     'git config', 'git remote', 'git ls-files', 'git ls-tree',
     'npm ls', 'npm list', 'pnpm ls', 'pnpm list', 'yarn why',
     'find ', 'wc ', 'sort ', 'uniq ', 'od ', 'xxd ', 'hexdump',
+    'rg ', 'ag ', 'ack ',
 ]
 
 // 安全写命令前缀——不会造成系统级破坏，放行不弹确认。
@@ -54,26 +58,46 @@ const SAFE_WRITE_PREFIXES = [
     'mkdir ', 'mkdir -p', 'cp ', 'mv ', 'touch ',
     'rm ', 'rmdir ', 'rm -rf',  // rm -rf / 已被黑名单拦截
     'chmod ', 'chown ',
+    'ln -s', 'ln ',
+    'unzip ', 'unxz ', 'unlzma ', 'gunzip ', 'bunzip2 ', 'tar ',
     // 包管理
     'npm install', 'npm i ', 'npm run', 'npm update', 'npm uninstall',
+    'npm create', 'npm publish', 'npm version',
     'pnpm install', 'pnpm i ', 'pnpm run', 'pnpm update', 'pnpm uninstall',
+    'pnpm create', 'pnpm publish',
     'yarn add', 'yarn remove', 'yarn install', 'yarn run',
-    'bun install', 'bun add', 'bun run',
+    'yarn create', 'yarn publish',
+    'bun install', 'bun add', 'bun run', 'bun create',
     'npx ',
-    'pip install', 'pip uninstall',
+    'pip install', 'pip uninstall', 'pip3 install', 'pip3 uninstall',
+    'pipenv install', 'pipenv run',
+    'poetry add', 'poetry install', 'poetry run',
+    'uv pip install', 'uv add', 'uv run', 'uv build',
     'cargo build', 'cargo run', 'cargo test', 'cargo check', 'cargo add',
-    'go build', 'go run', 'go test', 'go mod',
+    'cargo install', 'cargo publish', 'cargo update',
+    'go build', 'go run', 'go test', 'go mod', 'go install', 'go get',
+    'rustup',
+    'make', 'cmake', 'cmake --build', 'cmake --install',
     // git 写操作
     'git add', 'git commit', 'git push', 'git pull', 'git merge',
     'git checkout', 'git switch', 'git reset', 'git revert',
-    'git stash', 'git tag', 'git fetch',
-    'git init', 'git clone',
+    'git stash', 'git tag', 'git fetch', 'git rm', 'git rebase',
+    'git cherry-pick', 'git submodule',
+    'git init', 'git clone', 'git clean',
     // 构建工具
-    'make', 'cmake', 'cmake --build',
-    'tsc', 'tsc --', 'esbuild', 'vite build', 'webpack',
+    'tsc', 'tsc --', 'esbuild', 'vite build', 'webpack', 'rollup',
     'node ', 'deno ', 'python ', 'python3 ',
+    // docker（用于本地开发）
+    'docker build', 'docker compose', 'docker-compose',
+    'docker run --rm', 'docker pull',
+    // 下载文件
+    'curl -o', 'curl -O', 'curl --output', 'wget ',
+    // macOS 包管理
+    'brew install', 'brew uninstall', 'brew upgrade', 'brew update',
+    'brew link', 'brew unlink', 'brew services',
     // 重定向/追加（明确的写文件）
     'cat >', 'cat >>',
+    'echo >', 'echo >>',
 ]
 
 function isReadonlyCommand(command: string): boolean {

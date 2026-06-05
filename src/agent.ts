@@ -148,7 +148,10 @@ let currentTurnTail: Promise<void> = Promise.resolve()
 const transcriptRecorder = new TranscriptRecorder()
 
 // 检查 --continue / -c 标志，从上一个 session 恢复会话
-const shouldContinue = process.argv.includes('--continue') || process.argv.includes('-c')
+// 注意：npm run agent -c 会被 npm 自身拦截（-c 是 npm 的配置标志），
+// 不会传到 agent.ts。请使用 npm run agent -- -c 或 npm run continue。
+// 环境变量 MYAGENT_CONTINUE=1 可作为备选（适用于 docker/CI 等场景）。
+const shouldContinue = process.argv.includes('--continue') || process.argv.includes('-c') || process.env.MYAGENT_CONTINUE === '1'
 let continuedFromSession: string | undefined
 if (shouldContinue) {
   const checkpoint = loadLatestCheckpoint()
@@ -165,19 +168,54 @@ if (shouldContinue) {
 
 /**
  * 将 Anthropic.MessageParam[] 转换为 TUI 可显示的 ChatMessage[]。
- * 只提取文本内容（跳过 tool_use / tool_result 块），生成稳定的 id。
+ *
+ * 设计意图：
+ *   - 保留用户消息（role='user'）中有文本内容的（真正用户输入）
+ *   - 保留 AI 回复（role='assistant'）中有推理文本的（跳过纯 tool_use 的回复）
+ *   - 跳过 tool_result 消息（Anthropic API 中 role='user'，但内容是工具输出，无用户输入文本）
+ *   - 首条插入一句摘要，让用户知道这是历史恢复
  */
 function convertMessagesForTui(msgs: Anthropic.MessageParam[]): ChatMessage[] {
   const result: ChatMessage[] = []
   let seq = 0
+
   for (const msg of msgs) {
-    seq++
-    const role = msg.role === 'assistant' ? 'agent' as const : 'user' as const
+    // 跳过 tool_result 消息（role='user' 但内容是工具输出）
+    if (msg.role === 'user') {
+      const content = msg.content
+      if (Array.isArray(content)) {
+        // tool_result 消息没有 text block
+        const hasTextBlock = content.some(c => c.type === 'text')
+        if (!hasTextBlock) continue
+      } else if (typeof content === 'string' && !content.trim()) {
+        continue
+      }
+    }
+
+    // 跳过 assistant 消息中纯 tool_use 的（无文本块）
+    if (msg.role === 'assistant') {
+      const content = msg.content
+      if (Array.isArray(content)) {
+        const hasTextBlock = content.some(c => c.type === 'text')
+        if (!hasTextBlock) continue
+      } else if (typeof content === 'string' && !content.trim()) {
+        continue
+      }
+    }
+
     const text = extractTextFromContent(msg.content)
     if (text.trim()) {
-      result.push({ id: `hist-${seq}`, role, content: text })
+      seq++
+      const role = msg.role === 'assistant' ? 'agent' as const : 'user' as const
+      result.push({ id: `hist-${seq}`, role, content: text.trim() })
     }
   }
+
+  if (result.length > 0) {
+    const summary = `── 已恢复上次会话 (${result.length} 轮对话) ──`
+    result.unshift({ id: 'hist-summary', role: 'system', content: summary })
+  }
+
   return result
 }
 
@@ -192,14 +230,28 @@ function extractTextFromContent(content: string | Anthropic.ContentBlockParam[])
 
 transcriptRecorder.initSession(continuedFromSession)
 
+// ── -c 恢复后立即保存初始 checkpoint ──────────────────────────────
+// 防止用户在不发消息的情况下退出，导致新会话没有 checkpoint，
+// 下次 -c 会跳过新会话、又加载旧会话的 checkpoint。
+if (shouldContinue && messages.length > 0) {
+  transcriptRecorder.recordCheckpoint(messages)
+}
+
 // ── 启动完成，清理初始化阶段的 Attachment 噪声 ──────────────────────────
 attachmentQueue.clear()
 
 // ── 进程退出时关闭 transcript session ─────────────────────────────
+// 同时监听 beforeExit、SIGINT、SIGTERM 三个退出路径：
+//   - beforeExit   → Node.js 事件循环自然退出时触发
+//   - SIGINT       → Ctrl+C 终端中断（Ink 走这个路径）
+//   - SIGTERM      → kill 命令或进程管理器终止
+// 三方汇合确保 .closed 标记一定写入，下次 -c 才能恢复。
 function cleanupTranscript(): void {
   try { transcriptRecorder.closeSession() } catch { /* ignore */ }
 }
 process.on('beforeExit', cleanupTranscript)
+process.on('SIGINT', () => { cleanupTranscript(); process.exit(0) })
+process.on('SIGTERM', () => { cleanupTranscript(); process.exit(0) })
 
 // AgentTool 需要 client / executeTool / emitLine / transcriptRecorder —— 这些此时才有，在这里注入
 import type { BackgroundAgentResult } from './tools/agenttool.js'
@@ -230,6 +282,8 @@ const autoPermissionAgent = new AutoPermissionAgent(client)
 hookManager.register(permissionHook)
 hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
 
+// 初始时立即同步 auto mode 状态（默认开启），无需等待 toggle 事件
+permissionHook.setAutoMode(bridge.autoMode, autoPermissionAgent)
 bridge.on('autoModeChange', (enabled: boolean) => {
   permissionHook.setAutoMode(enabled, autoPermissionAgent)
 })

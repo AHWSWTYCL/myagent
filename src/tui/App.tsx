@@ -129,7 +129,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const [promptText, setPromptText] = useState('')
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
-  const [autoMode, setAutoMode] = useState(false)
+  const [autoMode, setAutoMode] = useState(bridge.autoMode)
   // Ctrl+O toggles full output for every tool message in the chat.
   const [expandAll, setExpandAll] = useState(false)
   const [compactingState, setCompactingState] = useState<'idle' | 'running' | 'micro'>('idle')

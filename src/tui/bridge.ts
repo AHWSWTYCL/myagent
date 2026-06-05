@@ -25,7 +25,7 @@ export interface SubAgentTask {
 }
 
 export class TuiBridge extends EventEmitter {
-  private _autoMode = false
+  private _autoMode = true
   private _backgroundCount = 0
 
   /**

@@ -53,11 +53,60 @@ function matchesRule(rule: PermissionRule, toolName: string, subject: string): b
   }
 }
 
+// ── 智能缓存 key 生成 ──────────────────────────────────────────────────────────
+// 同类操作共享同一个缓存 key，避免反复授权。
+// 例如：bash:npm install → 匹配 npm install express / npm install -D typescript
+//       write:src/       → 匹配 src/foo.ts / src/components/bar.tsx
+const CACHE_TTL_MS = 30 * 60 * 1000  // 30 分钟过期
+
+function buildCacheKey(toolName: string, args: Record<string, string>): string {
+  switch (toolName) {
+    case 'bash': {
+      const cmd = (args.command ?? '').trim()
+      // 取前两个词作为缓存 key（如 "npm install", "git clone", "cargo build"）
+      const words = cmd.split(/\s+/)
+      if (words.length >= 2) return `bash:${words[0]} ${words[1]}`
+      if (words.length === 1) return `bash:${words[0]}`
+      return `bash:`
+    }
+    case 'write_file': {
+      const p = (args.path ?? '').trim()
+      // 取目录前缀（上一级目录）作为缓存 key
+      const dir = p.includes('/') ? p.replace(/\/[^/]*$/, '/') : './'
+      return `write:${dir}`
+    }
+    case 'web_fetch': {
+      const url = (args.url ?? '').trim()
+      try {
+        const hostname = new URL(url).hostname
+        return `fetch:${hostname}`
+      } catch {
+        return `fetch:${url.slice(0, 30)}`
+      }
+    }
+    // 其他工具用精确匹配
+    default: {
+      const subject = extractSubject(toolName, args)
+      return `${toolName}:${subject ?? ''}`
+    }
+  }
+}
+
+// 清理过期的缓存条目
+function cleanExpiredCache(cache: Map<string, number>): void {
+  const now = Date.now()
+  for (const [key, expiry] of cache) {
+    if (now >= expiry) cache.delete(key)
+  }
+}
+
 // ── PermissionHook ────────────────────────────────────────────────────────────
 export class PermissionHook implements Hook {
   name = 'PermissionHook'
 
-  private sessionAllowed: Set<string> = new Set()
+  // Map<key, expiryTimestamp>
+  private sessionAllowed: Map<string, number> = new Map()
+  private lastCleanup = 0
   private autoMode = false
   private autoAgent: AutoPermissionAgent | null = null
   private config: PermissionsConfig
@@ -83,9 +132,14 @@ export class PermissionHook implements Hook {
   async onToolCall(ctx: HookContext): Promise<HookResult> {
     const args = ctx.toolInput as Record<string, string>
     const subject = extractSubject(ctx.toolName, args)
-    const key = ctx.toolName === 'bash'
-      ? `bash:${args.command}`
-      : `${ctx.toolName}:${subject}`
+    const key = buildCacheKey(ctx.toolName, args)
+
+    // 定期清理过期缓存
+    const now = Date.now()
+    if (now - this.lastCleanup > 60_000) {
+      cleanExpiredCache(this.sessionAllowed)
+      this.lastCleanup = now
+    }
 
     // ── 1. 黑名单检查（最高优先级，硬性拒绝）────────────────────────────────
     if (subject !== null) {
@@ -106,8 +160,9 @@ export class PermissionHook implements Hook {
       }
     }
 
-    // ── 3. session 缓存命中，直接放行 ────────────────────────────────────────
-    if (this.sessionAllowed.has(key)) {
+    // ── 3. session 缓存命中（检查过期时间），直接放行 ────────────────────────
+    const expiry = this.sessionAllowed.get(key)
+    if (expiry !== undefined && now < expiry) {
       return { action: 'continue' }
     }
 
@@ -136,20 +191,15 @@ export class PermissionHook implements Hook {
         : `${ctx.toolName}: ${JSON.stringify(args)}`
 
     // ── 5. auto mode：交给 AI agent 决策 ─────────────────────────────────────
+    // 注意：auto mode 下 haiku 说了算，拒绝时直接 block，不回退问用户。
+    // 用户如果不想让 AI 决策，可以关闭 auto mode（Shift+Tab 切换）。
     if (this.autoMode && this.autoAgent) {
       const answer = await this.autoAgent.decide(prompt)
       if (answer === 'no') {
-        // 拒绝时让用户确认
-        const userAnswer = await this.askPermission(`[Auto mode denied] ${prompt}`)
-        if (userAnswer === 'session') {
-          this.sessionAllowed.add(key)
-          return { action: 'continue' }
-        }
-        if (userAnswer === 'yes') return { action: 'continue' }
-        return { action: 'block', reason: 'User denied permission' }
+        return { action: 'block', reason: 'Auto mode denied' }
       }
-      // 授权成功 → 静默放行
-      this.sessionAllowed.add(key)
+      // 授权成功 → 静默放行（缓存 30 分钟，同类操作不再问）
+      this.sessionAllowed.set(key, now + CACHE_TTL_MS)
       return { action: 'continue' }
     }
 
@@ -159,13 +209,14 @@ export class PermissionHook implements Hook {
       return { action: 'continue' }
     }
     if (answer === 'session') {
-      this.sessionAllowed.add(key)
+      // 用户选择 "本次会话允许" → 缓存 30 分钟
+      this.sessionAllowed.set(key, now + CACHE_TTL_MS)
       return { action: 'continue' }
     }
     return { action: 'block', reason: 'User denied permission' }
   }
 
   get sessionAllowedKeys(): string[] {
-    return Array.from(this.sessionAllowed)
+    return Array.from(this.sessionAllowed.keys())
   }
 }

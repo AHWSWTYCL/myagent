@@ -42,6 +42,8 @@ import type { UsageAccum } from './runagent.js'
 const SESSIONS_ROOT = path.join(process.cwd(), '.myagent', 'sessions')
 /** Tool output 超过此阈值（5KB）转存 artifact 文件，不 inline 进 NDJSON */
 const ARTIFACT_SIZE_THRESHOLD = 5 * 1024
+/** 默认保留最近 N 天的 session 文件（可通过 MYAGENT_SESSION_DAYS 环境变量覆盖） */
+const DEFAULT_SESSION_DAYS = 7
 
 // ── Agent context stack ─────────────────────────────────────────────
 
@@ -180,6 +182,9 @@ export class TranscriptRecorder {
    * @param continuedFrom 如果本次 session 是恢复旧 session，传原 sessionId
    */
   initSession(continuedFrom?: string): void {
+    // 启动新 session 前，先清理过期的旧 session
+    cleanOldSessions()
+
     this.startTime = Date.now()
     this.sessionId = this.generateSessionId()
     this.sessionDir = this.buildSessionDir()
@@ -207,6 +212,7 @@ export class TranscriptRecorder {
   /**
    * 关闭 session：
    *   写入 session_end 事件。
+   *   写入 .closed 标记文件供 -c 恢复时识别。
    *   所有事件已同步落盘，可直接读取产物。
    */
   closeSession(): void {
@@ -220,6 +226,26 @@ export class TranscriptRecorder {
         totalEvents: this.eventCount,
       },
     })
+
+    // 写入 .closed 标记文件，标识 session 正常关闭
+    // 仅含 .closed 标记的 session 会被 -c 识别为可恢复
+    this.writeClosedMarker()
+  }
+
+  /**
+   * 写入 .closed 标记文件（JSON），包含 sessionId 和关闭时间戳。
+   * 文件路径：{sessionDir}/.closed
+   */
+  private writeClosedMarker(): void {
+    if (!this.sessionDir) return
+    const markerPath = path.join(this.sessionDir, '.closed')
+    const marker = {
+      sessionId: this.sessionId,
+      closedAt: new Date().toISOString(),
+      duration: Date.now() - this.startTime,
+      totalEvents: this.eventCount,
+    }
+    fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2) + '\n', 'utf-8')
   }
 
   // ── Agent context stack ───────────────────────────────────────────
@@ -444,6 +470,70 @@ export class TranscriptRecorder {
   }
 }
 
+// ── Session cleanup ────────────────────────────────────────────────────
+
+/**
+ * 清理超过指定天数的旧 session 目录。
+ *
+ * 设计意图：
+ *   每次启动新 session 时自动触发，避免 session 文件无限积累。
+ *   只删除含 .closed 标记（正常关闭）的 session，忽略正在运行或崩溃的 session。
+ *   按 .closed 文件的修改时间（mtime）判断关停时间。
+ *
+ * 行为：
+ *   - 保留最近 N 天内的 session（默认 7 天，可被 MYAGENT_SESSION_DAYS 覆盖）
+ *   - 超出保留期的 session 整个目录递归删除（含 checkpoint，不可恢复）
+ *   - 日期目录下所有 session 被清空后，自动删除空目录
+ *   - 清理失败静默忽略，不影响主流程
+ *
+ * 与 cleanOldResults (backgroundStorage.ts) 保持一致的 error-silent 风格。
+ */
+export function cleanOldSessions(daysToKeep?: number): void {
+  try {
+    if (!fs.existsSync(SESSIONS_ROOT)) return
+
+    const keepDays = daysToKeep ?? getEnvSessionDays()
+    const now = Date.now()
+    const maxAge = keepDays * 24 * 60 * 60 * 1000
+
+    for (const dateDir of fs.readdirSync(SESSIONS_ROOT)) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateDir)) continue
+
+      const datePath = path.join(SESSIONS_ROOT, dateDir)
+      const sessionDirs = fs.readdirSync(datePath).filter(d => d.startsWith('session-'))
+
+      for (const sessionDir of sessionDirs) {
+        const sessionPath = path.join(datePath, sessionDir)
+        const closedPath = path.join(sessionPath, '.closed')
+
+        // 只清理含 .closed 标记的 session（正常关闭的）
+        if (!fs.existsSync(closedPath)) continue
+
+        const closedStat = fs.statSync(closedPath)
+        if (now - closedStat.mtimeMs > maxAge) {
+          fs.rmSync(sessionPath, { recursive: true, force: true })
+        }
+      }
+
+      // 日期目录下已无 session，清理空目录
+      const remaining = fs.readdirSync(datePath).filter(d => d.startsWith('session-'))
+      if (remaining.length === 0) {
+        fs.rmdirSync(datePath)
+      }
+    }
+  } catch {
+    // 清理失败不影响主流程
+  }
+}
+
+/** 读取 MYAGENT_SESSION_DAYS 环境变量，非法值回退到默认值 */
+function getEnvSessionDays(): number {
+  const val = process.env.MYAGENT_SESSION_DAYS
+  if (!val) return DEFAULT_SESSION_DAYS
+  const n = parseInt(val, 10)
+  return Number.isFinite(n) && n >= 1 ? n : DEFAULT_SESSION_DAYS
+}
+
 // ── Session recovery ────────────────────────────────────────────────────
 
 export interface CheckpointSnapshot {
@@ -455,7 +545,46 @@ export interface CheckpointSnapshot {
 }
 
 /**
+ * 从指定 session 目录中加载最新的 checkpoint，返回摘要和 messages。
+ * 如果目录中没有合法 checkpoint，返回 null。
+ */
+function loadCheckpointFromSession(sessionPath: string, sessionDir: string): CheckpointSnapshot | null {
+  try {
+    const files = fs.readdirSync(sessionPath)
+      .filter(f => f.startsWith('checkpoint-') && f.endsWith('.json'))
+      .sort()
+    if (files.length === 0) return null
+
+    const latestCp = files[files.length - 1]
+    const cpPath = path.join(sessionPath, latestCp)
+    const raw = fs.readFileSync(cpPath, 'utf-8')
+    const cp = JSON.parse(raw)
+
+    if (!cp.messages || !Array.isArray(cp.messages) || cp.messages.length === 0) {
+      return null // 空的 checkpoint 跳过
+    }
+
+    return {
+      sessionId: sessionDir,
+      sessionDir: sessionPath,
+      seq: cp.seq ?? 0,
+      messages: cp.messages as Anthropic.MessageParam[],
+      timestamp: cp.timestamp ?? '',
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
  * 扫描 .myagent/sessions/，找最新 session 的最新 checkpoint，返回 messages 和元信息。
+ *
+ * 恢复优先级：
+ *   1. 优先找正常关闭（含 .closed 标记）的 session 中 mtime 最新的
+ *   2. 回退：如果没有正常关闭的 session（如崩溃、SIGKILL），
+ *      则从所有 session 中选含 checkpoint 且 mtime 最新的
+ *
+ * 按日期目录 → mtime 排序，最新的优先。
  * 如果没有可恢复的 session，返回 null。
  */
 export function loadLatestCheckpoint(): CheckpointSnapshot | null {
@@ -469,41 +598,61 @@ export function loadLatestCheckpoint(): CheckpointSnapshot | null {
       .reverse()
     if (dateDirs.length === 0) return null
 
-    for (const dateDir of dateDirs) {
-      const datePath = path.join(SESSIONS_ROOT, dateDir)
-      const sessionDirs = fs.readdirSync(datePath)
-        .filter(d => d.startsWith('session-'))
-        .sort()
-        .reverse() // 最新 session 优先
+    // ── 第一轮：只找含 .closed 的 session（正常关闭的优先） ──
+    const primaryResult = tryFindCheckpointInSessions(dateDirs, true)
+    if (primaryResult) return primaryResult
 
-      for (const sessionDir of sessionDirs) {
-        const sessionPath = path.join(datePath, sessionDir)
-        const files = fs.readdirSync(sessionPath)
-          .filter(f => f.startsWith('checkpoint-') && f.endsWith('.json'))
-          .sort() // checkpoint-1.json, checkpoint-2.json ...
-
-        if (files.length === 0) continue
-
-        const latestCp = files[files.length - 1]
-        const cpPath = path.join(sessionPath, latestCp)
-        const raw = fs.readFileSync(cpPath, 'utf-8')
-        const cp = JSON.parse(raw)
-
-        if (!cp.messages || !Array.isArray(cp.messages) || cp.messages.length === 0) {
-          continue // 空的 checkpoint 跳过
-        }
-
-        return {
-          sessionId: sessionDir,
-          sessionDir: sessionPath,
-          seq: cp.seq ?? 0,
-          messages: cp.messages as Anthropic.MessageParam[],
-          timestamp: cp.timestamp ?? '',
-        }
-      }
-    }
-    return null
+    // ── 第二轮（回退）：没有正常关闭的 session，放宽条件 ──
+    // 场景：旧 session 因未定义 .closed 写入口（SIGKILL / 进程崩溃），
+    // 但 checkpoint 文件存在且内容有效，仍可恢复。
+    return tryFindCheckpointInSessions(dateDirs, false)
   } catch {
     return null
   }
+}
+
+/**
+ * 遍历日期目录，按 requireClosed 决定是否只考虑含 .closed 标记的 session，
+ * 从最新的 session 中加载 checkpoint。
+ */
+function tryFindCheckpointInSessions(dateDirs: string[], requireClosed: boolean): CheckpointSnapshot | null {
+  for (const dateDir of dateDirs) {
+    const datePath = path.join(SESSIONS_ROOT, dateDir)
+    const sessionDirs = fs.readdirSync(datePath)
+      .filter(d => d.startsWith('session-'))
+
+    // 收集候选 session，按 mtime 排序
+    type Candidate = { sessionDir: string; sessionPath: string; mtime: number }
+    const candidates: Candidate[] = []
+
+    for (const sessionDir of sessionDirs) {
+      const sessionPath = path.join(datePath, sessionDir)
+
+      // requireClosed 模式下跳过没有 .closed 的 session
+      if (requireClosed) {
+        const closedPath = path.join(sessionPath, '.closed')
+        if (!fs.existsSync(closedPath)) continue
+      }
+
+      // 必须有 checkpoint 文件才考虑
+      const checkpoints = fs.readdirSync(sessionPath)
+        .filter(f => f.startsWith('checkpoint-') && f.endsWith('.json'))
+      if (checkpoints.length === 0) continue
+
+      // 用 session 目录自身的 mtime 做排序（.closed 模式下用 .closed 的 mtime）
+      const stat = requireClosed
+        ? fs.statSync(path.join(sessionPath, '.closed'))
+        : fs.statSync(sessionPath)
+      candidates.push({ sessionDir, sessionPath, mtime: stat.mtimeMs })
+    }
+
+    // 按 mtime 倒序（最新的优先）
+    candidates.sort((a, b) => b.mtime - a.mtime)
+
+    for (const { sessionDir, sessionPath } of candidates) {
+      const result = loadCheckpointFromSession(sessionPath, sessionDir)
+      if (result) return result
+    }
+  }
+  return null
 }
