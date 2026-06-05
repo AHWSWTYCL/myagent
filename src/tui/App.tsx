@@ -26,6 +26,7 @@ import { getVisibleTasks } from './SubAgentTaskPanel.js'
 import { TodoPanel } from './TodoPanel.js'
 import type { TodoPlanSnapshot } from '../todos/todo.js'
 import { TODO_STATUS_ICON } from '../todos/todo.js'
+import { ttsService } from '../voice/tts.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 
@@ -493,14 +494,22 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     return () => { bridge.removeAllListeners() }
   }, [bridge])
 
-  // Esc: cancels current request (only when processing)
+  // Esc: cancels current request + stops any ongoing TTS playback
   // 注意：permission/choice 模式中 Esc 已有自己的处理（拒绝/取消），
   // 但它们和本 handler 不冲突 —— 双方都会触发，行为叠加合理。
   useInput((_input, key) => {
     if (!key.escape) return
+    ttsService.stop()
     if (isProcessingRef.current) {
       abortControllerRef.current?.abort()
     }
+  })
+
+  // Ctrl+E: stop TTS playback only (does NOT abort agent REPL)
+  useInput((input, key) => {
+    if (!key.ctrl || input !== 'e') return
+    ttsService.stop()
+    showHint('TTS stopped.')
   })
 
   // Shift+Tab: toggle auto permission mode

@@ -154,6 +154,30 @@ tsx src/agent.ts --debug "列出当前目录的文件" --output result.json --ti
 | `/retro` | 执行回顾反思 |
 | `/token` | 查看当前会话 Token 用量 |
 | `/schedule` | 管理定时任务 |
+| `/voice` | 语音播报 LLM 消息（仅 macOS） |
+
+---
+
+## 语音
+
+### 语音播报（TTS）
+
+LLM 回复完成时朗读消息内容，仅 macOS（依赖系统 `say` 命令，无需额外安装）。
+
+| 子命令 | 说明 |
+|--------|------|
+| `/voice on` | 开启播报 |
+| `/voice off` | 关闭播报 |
+| `/voice stop` | 立即打断当前播报（按 Esc 也会打断） |
+| `/voice voice <name>` | 切换音色，例如 `/voice voice Tingting` |
+| `/voice rate <wpm>` | 调整语速（每分钟单词数，50-500） |
+| `/voice say <text>` | 立即朗读一段文本（用于试听） |
+
+终端运行 `say -v '?'` 可查看全部可用音色。中文推荐 `Tingting`。
+
+### 语音输入（STT）
+
+直接使用 macOS 系统听写：在 `系统设置 → 键盘 → 听写` 里启用并设置触发键（默认 Fn 双击）。在输入框中按下触发键即可口述输入文字。
 
 ---
 

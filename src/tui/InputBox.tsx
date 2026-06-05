@@ -172,7 +172,7 @@ export function Footer({
   const left = hasSuggestions
     ? '↑↓ navigate · tab/→ accept · esc close · enter run'
     : isProcessing
-      ? 'esc interrupt · ctrl+b background · / commands · @ files'
+      ? 'esc interrupt · ctrl+e stop tts · ctrl+b background · / commands · @ files'
       : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · ctrl+o ${expanded ? 'collapse' : 'expand'}`
 
   // Only show sub-agent summary in Footer when >=2 parallel agents.

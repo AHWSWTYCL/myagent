@@ -68,6 +68,8 @@ import { RetrospectiveCommand } from './commands/retrospectivecommand.js'
 import { TokenStatsCommand } from './commands/tokenstatscommand.js'
 import { SchedulerTool } from './scheduler/schedulertool.js'
 import { BgCommand } from './commands/bgcommand.js'
+import { VoiceCommand } from './commands/voicecommand.js'
+import { ttsService } from './voice/tts.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
 import { MCPManager } from './mcp/mcpmanager.js'
@@ -388,6 +390,7 @@ commandRegistry.register(new RetrospectiveCommand(client, () => messages, skillM
 commandRegistry.register(new TokenStatsCommand(() => lastUsage, () => messages))
 commandRegistry.register(new BgCommand())
 commandRegistry.register(new SchedulerCommand())
+commandRegistry.register(new VoiceCommand())
 const commandParser = new CommandParser(commandRegistry)
 
 /**
@@ -539,10 +542,14 @@ export async function runTurn(
       onLLMRequest: (model, turn, msgs) => {
         transcriptRecorder.recordLLMRequest(model, turn, msgs)
       },
-      onText: delta => bridge.emitText(delta),
+      onText: delta => {
+        bridge.emitText(delta)
+        ttsService.feed(delta)
+      },
       onTurnEnd: async (text, msgs) => {
         fullAssistantText += text + '\n'
         bridge.emitTurnEnd(text)
+        ttsService.flush()
         // Transcript: record LLM response + checkpoint
         if (lastUsage && text) {
           transcriptRecorder.recordLLMResponseEnd(text, lastUsage, lastStopReason)
