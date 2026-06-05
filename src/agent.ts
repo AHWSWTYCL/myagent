@@ -38,6 +38,7 @@ process.on('uncaughtException', (err: Error) => {
   setTimeout(() => process.exit(1), 2000)
 })
 
+import path from 'path'
 import Anthropic from '@anthropic-ai/sdk'
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/messages/messages.js'
 import { createClient } from './client.js'
@@ -66,12 +67,19 @@ import { TaskCommand } from './tasks/taskcommand.js'
 import { RetrospectiveCommand } from './commands/retrospectivecommand.js'
 import { TokenStatsCommand } from './commands/tokenstatscommand.js'
 import { SchedulerTool } from './scheduler/schedulertool.js'
+import { BgCommand } from './commands/bgcommand.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
 import { MCPManager } from './mcp/mcpmanager.js'
 import { handleMCPCommand } from './commands/mcpcommand.js'
 import { todoManager } from './todos/todomanager.js'
 import { attachmentQueue } from './attachment/queue.js'
+import {
+  saveBackgroundResult,
+  buildBgNotification,
+  cleanOldResults,
+} from './utils/backgroundStorage.js'
+import { bgManager } from './utils/backgroundManager.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -134,6 +142,9 @@ const mcpManager = new MCPManager()
 mcpManager.setRegistrar(toolRegistrar)
 mcpManager.onStatusChange((infos) => bridge.emitMcpStatus(infos))
 await mcpManager.startAll()
+
+// 清理超过 24 小时的过期后台结果文件
+cleanOldResults()
 
 // ── 启动完成，清理初始化阶段的 Attachment 噪声 ──────────────────────────
 attachmentQueue.clear()
@@ -257,6 +268,7 @@ commandRegistry.register(new TaskCommand())
 commandRegistry.register(new RetrospectiveCommand(client, () => messages, skillManager, bridge))
 // TokenStatsCommand 需要访问 lastUsage 和 messages，传 getter 函数
 commandRegistry.register(new TokenStatsCommand(() => lastUsage, () => messages))
+commandRegistry.register(new BgCommand())
 commandRegistry.register(new SchedulerCommand())
 const commandParser = new CommandParser(commandRegistry)
 
@@ -315,6 +327,44 @@ function extractRecallText(content: string | Array<ContentBlockParam | Anthropic
     .filter((b): b is Anthropic.TextBlockParam => b.type === 'text')
     .map(b => b.text)
     .join('\n')
+}
+
+// ── Background helpers ────────────────────────────────────────────────────────
+
+/**
+ * 从 fork 的消息历史中提取后台任务描述。
+ * 取第一条 user message 的文本内容（前 100 字符）。
+ */
+function extractBgDescription(forkedMessages: Anthropic.MessageParam[]): string {
+  for (const msg of forkedMessages) {
+    if (msg.role !== 'user') continue
+    const content = msg.content
+    if (typeof content === 'string') {
+      const trimmed = content.trim()
+      return trimmed.length > 100 ? trimmed.slice(0, 97) + '…' : trimmed
+    }
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type === 'text' && block.text.trim()) {
+          const text = block.text.trim()
+          return text.length > 100 ? text.slice(0, 97) + '…' : text
+        }
+      }
+    }
+  }
+  return 'background task'
+}
+
+/**
+ * 从后台结论文本中提取一行摘要。
+ * - 如果结论为空 → 使用 description
+ * - 如果结论有内容 → 取第一段的第一行（前 200 字符）
+ */
+function summarizeConclusion(conclusion: string, fallback: string): string {
+  if (!conclusion.trim()) return fallback
+  const firstLine = conclusion.split('\n')[0]?.trim() ?? ''
+  if (!firstLine) return fallback
+  return firstLine.length > 200 ? firstLine.slice(0, 197) + '…' : firstLine
 }
 
 export async function runTurn(
@@ -383,6 +433,8 @@ export async function runTurn(
     // ── Background handoff ─────────────────────────────────────────────────
     if (loopResult.backgrounded && loopResult.fork) {
       const { messages: forkedMessages, usage: forkedUsage } = loopResult.fork
+      const taskDescription = extractBgDescription(forkedMessages)
+      const { id: taskId, abortController } = bgManager.start(taskDescription)
       bridge.emitBackgroundStart()
       // Fork a background loop that runs independently (no await).
       // Background uses the same executeTool (hooks still fire — permission prompts work).
@@ -398,8 +450,9 @@ export async function runTurn(
         maxTurns: MAX_TURNS,
         executeTool,
         parallelSafeTools: toolRegistrar.getParallelSafeNames(),
+        signal: abortController.signal,           // 支持 /bg kill
         // No drain — background doesn't consume foreground message queue
-        // No signal/backgroundSignal — background runs independently
+        // No backgroundSignal — background runs independently (Ctrl+B won't re-fork)
         onText: () => {}, // no-op: no streaming text for background
         onTurnEnd: (text) => { if (text) backgroundConclusion = text }, // capture final conclusion
         onToolStart: () => {},
@@ -408,14 +461,29 @@ export async function runTurn(
         onUsage: () => {}, // accumulate silently (optional)
       }).then(() => {
         bridge.emitBackgroundEnd()
-        const conclusion = backgroundConclusion
-          ? `\n── 结论 ──\n${backgroundConclusion}`
-          : ''
-        bridge.emitMessage('system', `[BG] Agent background task completed${conclusion}`)
+        const taskInfo = bgManager.get(taskId)
+        // 已被用户手动 kill 的，不推送 completion 通知
+        if (taskInfo?.status === 'killed') return
+        // 1. 全量结论写文件
+        const outputPath = saveBackgroundResult(taskId, taskDescription, backgroundConclusion)
+        // 2. 构造摘要（取结论的前 200 字符作为摘要行）
+        const summary = summarizeConclusion(backgroundConclusion, taskDescription)
+        bgManager.complete(taskId, outputPath, summary)
+        // 3. 轻量 XML 通知推入 messages（LLM 可见）
+        const relativePath = path.relative(process.cwd(), outputPath)
+        const notification = buildBgNotification(taskId, 'completed', summary, relativePath)
+        messages.push({ role: 'user', content: notification })
+        // 4. TUI 只显示一行简短提示
+        bridge.emitMessage('system', `[BG] √ ${taskDescription} → ${relativePath}`)
       }).catch((err: unknown) => {
         bridge.emitBackgroundEnd()
         const msg = err instanceof Error ? err.message : String(err)
-        bridge.emitMessage('system', `[BG] Agent background task failed: ${msg}`)
+        // 失败时也写入文件（含错误信息）
+        const outputPath = saveBackgroundResult(taskId, taskDescription, `Error: ${msg}`)
+        bgManager.fail(taskId, msg, outputPath)
+        const notification = buildBgNotification(taskId, 'failed', taskDescription, `.myagent/background/${taskId}.md`, msg)
+        messages.push({ role: 'user', content: notification })
+        bridge.emitMessage('system', `[BG] ✗ ${taskDescription}: ${msg}`)
       })
 
       return { backgrounded: true }
