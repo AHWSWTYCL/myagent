@@ -44,7 +44,7 @@ import { createClient } from './client.js'
 import { getSystemPrompt } from './prompt/prompt.js'
 import { readCategory } from './memory/memory.js'
 import { recallRelevantMemory } from './memory/recall.js'
-import { runAgentLoopStream, UsageAccum } from './utils/runagent.js'
+import { runAgentLoopStream, UsageAccum, type RunAgentLoopResult } from './utils/runagent.js'
 import { compactMessages, microcompactMessages, estimateTokens, MICRO_COMPACT_TOKEN_THRESHOLD, COMPACT_TOKEN_THRESHOLD } from './utils/compact.js'
 import { ToolRegistrar } from './tools/toolregistrar.js'
 import { validateInput, validateOutput } from './tools/validator.js'
@@ -320,7 +320,8 @@ function extractRecallText(content: string | Array<ContentBlockParam | Anthropic
 export async function runTurn(
   input: string | Array<ContentBlockParam>,
   signal?: AbortSignal,
-): Promise<void> {
+  backgroundSignal?: AbortSignal,
+): Promise<{ backgrounded?: boolean } | void> {
   // Serialize turns by awaiting the tail of the queue, then making *this* call's
   // body the new tail. Replaces a 200ms polling loop on `agentRunning`.
   const previous = currentTurnTail
@@ -347,7 +348,7 @@ export async function runTurn(
     // Accumulate text across inner turns for memory extraction (one pass per user input, not per inner turn)
     let fullAssistantText = ''
 
-    await runAgentLoopStream({
+    const loopResult = await runAgentLoopStream({
       client,
       model: 'claude-sonnet-4-6',
       system: buildSystem,
@@ -357,6 +358,7 @@ export async function runTurn(
       executeTool,
       parallelSafeTools: toolRegistrar.getParallelSafeNames(),
       signal,
+      backgroundSignal,
       drainQueue: () => messageQueue.dequeue(),
       drainAttachments: () => attachmentQueue.formatDrain(),
       onText: delta => bridge.emitText(delta),
@@ -378,6 +380,48 @@ export async function runTurn(
       },
     })
 
+    // ── Background handoff ─────────────────────────────────────────────────
+    if (loopResult.backgrounded && loopResult.fork) {
+      const { messages: forkedMessages, usage: forkedUsage } = loopResult.fork
+      bridge.emitBackgroundStart()
+      // Fork a background loop that runs independently (no await).
+      // Background uses the same executeTool (hooks still fire — permission prompts work).
+      // UI callbacks are no-ops: outputs don't render in the main TUI area.
+      // Capture the final turn's conclusion text for the completion message.
+      let backgroundConclusion = ''
+      runAgentLoopStream({
+        client,
+        model: 'claude-sonnet-4-6',
+        system: buildSystem,
+        tools: toolRegistrar.getAllTools(),
+        messages: forkedMessages,
+        maxTurns: MAX_TURNS,
+        executeTool,
+        parallelSafeTools: toolRegistrar.getParallelSafeNames(),
+        // No drain — background doesn't consume foreground message queue
+        // No signal/backgroundSignal — background runs independently
+        onText: () => {}, // no-op: no streaming text for background
+        onTurnEnd: (text) => { if (text) backgroundConclusion = text }, // capture final conclusion
+        onToolStart: () => {},
+        onToolEnd: () => {},
+        onTurnToolReset: () => {},
+        onUsage: () => {}, // accumulate silently (optional)
+      }).then(() => {
+        bridge.emitBackgroundEnd()
+        const conclusion = backgroundConclusion
+          ? `\n── 结论 ──\n${backgroundConclusion}`
+          : ''
+        bridge.emitMessage('system', `[BG] Agent background task completed${conclusion}`)
+      }).catch((err: unknown) => {
+        bridge.emitBackgroundEnd()
+        const msg = err instanceof Error ? err.message : String(err)
+        bridge.emitMessage('system', `[BG] Agent background task failed: ${msg}`)
+      })
+
+      return { backgrounded: true }
+    }
+
+    // ── Normal path (not backgrounded) ─────────────────────────────────────
     // Extract memories once per user input (not per inner turn)
     if (fullAssistantText.trim()) {
       extractMemoryFromTurn(recallText, fullAssistantText)

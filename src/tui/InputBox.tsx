@@ -140,6 +140,7 @@ interface FooterProps {
   transientHint: string
   modelName?: string
   subAgentTasks?: SubAgentTask[]
+  backgroundCount?: number
 }
 
 const fmt = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
@@ -166,11 +167,12 @@ export function Footer({
   transientHint,
   modelName,
   subAgentTasks,
+  backgroundCount = 0,
 }: FooterProps) {
   const left = hasSuggestions
     ? '↑↓ navigate · tab/→ accept · esc close · enter run'
     : isProcessing
-      ? 'esc interrupt · / commands · @ files'
+      ? 'esc interrupt · ctrl+b background · / commands · @ files'
       : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · ctrl+o ${expanded ? 'collapse' : 'expand'}`
 
   // Only show sub-agent summary in Footer when >=2 parallel agents.
@@ -195,6 +197,12 @@ export function Footer({
       <Box justifyContent="space-between" paddingX={1}>
         <Text color="gray" dimColor>{left}</Text>
         <Box>
+          {backgroundCount > 0 ? (
+            <>
+              <Text color="yellow" bold>{`[bg:${backgroundCount}]`}</Text>
+              <Text color="gray" dimColor>  ·  </Text>
+            </>
+          ) : null}
           {autoMode ? (
             <>
               <Text color="green" bold>AUTO</Text>

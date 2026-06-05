@@ -44,6 +44,12 @@ export interface RunAgentOptions {
    * 调用点：与 drainQueue 相同
    */
   drainAttachments?: () => string
+  /**
+   * 后台信号：当此 signal 触发时（aborted），当前 loop 执行 handoff：
+   * fork messages、收尾、返回 backgrounded=true。
+   * 与 signal（中断信号）互相独立，可同时存在。
+   */
+  backgroundSignal?: AbortSignal
 }
 
 async function resolveSystem(
@@ -124,6 +130,19 @@ async function executeToolsWithParallelism(
   return results
 }
 
+/** 后台 handoff 的 fork 状态 */
+export interface BackgroundFork {
+  messages: Anthropic.MessageParam[]
+  usage: UsageAccum
+}
+
+/** runAgentLoopStream 的返回结果 */
+export interface RunAgentLoopResult {
+  messages: Anthropic.MessageParam[]
+  backgrounded: boolean
+  fork?: BackgroundFork
+}
+
 export async function runAgentLoopStream(
   opts: RunAgentOptions & {
     onText?: (delta: string) => void
@@ -133,11 +152,11 @@ export async function runAgentLoopStream(
     onUsage?: (usage: UsageAccum) => void
     signal?: AbortSignal
   },
-): Promise<Anthropic.MessageParam[]> {
+): Promise<RunAgentLoopResult> {
   const {
     client, model, system, tools, messages, maxTurns = 20,
     executeTool, onText, onTurnEnd, onToolStart, onToolEnd, onUsage, signal, parallelSafeTools,
-    onTurnToolReset, drainQueue, drainAttachments,
+    onTurnToolReset, drainQueue, drainAttachments, backgroundSignal,
   } = opts
 
   // input / cacheRead / cacheWrite are PER-REQUEST snapshots (the API already counts
@@ -148,11 +167,33 @@ export async function runAgentLoopStream(
   const MAX_TOKENS_RECOVERY_LIMIT = 3
   let maxTokensRecoveryCount = 0
 
+  /**
+   * 检查后台信号是否触发。如果是，fork 当前状态、执行收尾、返回 handoff 结果。
+   * 返回 null 表示无后台信号，继续正常执行。
+   */
+  function doBackgroundHandoff(currentTurnText: string): RunAgentLoopResult | null {
+    if (!backgroundSignal?.aborted) return null
+    const forkedMessages = messages.slice()
+    const forkedUsage: UsageAccum = { ...cumUsage }
+    // Fire onTurnEnd once (partial turn text) so the TUI archives whatever was streamed
+    // Note: we call onTurnToolReset here so the last round's tools get archived
+    if (currentTurnText) {
+      // 异步但 fire-and-forget — 我们不 await 因为正在退出
+      onTurnEnd?.(currentTurnText, messages)?.catch(() => {})
+    }
+    onTurnToolReset?.()
+    console.log(`[queryLoop] background handoff at turn (forked ${forkedMessages.length} messages)`)
+    return { messages, backgrounded: true, fork: { messages: forkedMessages, usage: forkedUsage } }
+  }
+
   for (let turn = 0; turn < maxTurns; turn++) {
     if (signal?.aborted) {
       console.log(`[queryLoop] exit: aborted before turn ${turn}`)
       break
     }
+    // Check background signal at start of each turn
+    const bgHandoff = doBackgroundHandoff('')
+    if (bgHandoff) return bgHandoff
 
     const systemParam = await resolveSystem(system)
     const stream = await withRetry(() => client.messages.stream({
@@ -198,6 +239,11 @@ export async function runAgentLoopStream(
       console.log(`[queryLoop] exit: aborted during stream at turn ${turn}`)
       break
     }
+    // Background check after streaming
+    {
+      const bg = doBackgroundHandoff(turnText)
+      if (bg) return bg
+    }
 
     let response: Anthropic.Message
     try {
@@ -213,6 +259,11 @@ export async function runAgentLoopStream(
       // observe a consistent snapshot. Awaited so per-turn side effects (memory
       // extract scheduling, retrospective counting) run before the next iteration.
       if (turnText) await onTurnEnd?.(turnText, messages)
+      // Background check before stopping (non-tool_use turn)
+      {
+        const bg = doBackgroundHandoff('')
+        if (bg) return bg
+      }
       if (response.stop_reason === 'max_tokens') {
         if (maxTokensRecoveryCount >= MAX_TOKENS_RECOVERY_LIMIT) {
           console.log(`[queryLoop] exit at turn ${turn}: max_tokens recovery limit reached`)
@@ -260,6 +311,12 @@ export async function runAgentLoopStream(
     // assistant's summary text (Claude Code display order: tools first, text last).
     if (turnText) await onTurnEnd?.(turnText, messages)
 
+    // Background check after tool execution
+    {
+      const bg = doBackgroundHandoff('')
+      if (bg) return bg
+    }
+
     // DRAIN POINT 1: 工具执行完成后，从队列获取下一条用户消息。
     // 新消息推入 messages 后，下一轮 LLM 调用会自动看到它。
     if (drainQueue) {
@@ -288,5 +345,5 @@ export async function runAgentLoopStream(
   // 只在底部动态区显示，不会进入聊天历史。
   onTurnToolReset?.()
 
-  return messages
+  return { messages, backgrounded: false }
 }

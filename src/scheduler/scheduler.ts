@@ -10,7 +10,7 @@ export class Scheduler {
   private initialTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
-    private readonly runTurn: (prompt: string) => Promise<void>,
+    private readonly runTurn: (prompt: string) => Promise<void | { backgrounded?: boolean }>,
     private readonly isRunning: () => boolean,
     private readonly bridge: TuiBridge,
   ) {}

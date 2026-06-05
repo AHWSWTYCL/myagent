@@ -26,15 +26,32 @@ export interface SubAgentTask {
 
 export class TuiBridge extends EventEmitter {
   private _autoMode = false
+  private _backgroundCount = 0
 
   get autoMode() {
     return this._autoMode
+  }
+
+  get backgroundCount() {
+    return this._backgroundCount
   }
 
   toggleAutoMode() {
     this._autoMode = !this._autoMode
     this.emit('autoModeChange', this._autoMode)
     return this._autoMode
+  }
+
+  /** 后台任务启动时调用，更新计数。 */
+  emitBackgroundStart() {
+    this._backgroundCount++
+    this.emit('backgroundCount', this._backgroundCount)
+  }
+
+  /** 后台任务完成/失败时调用，更新计数。 */
+  emitBackgroundEnd() {
+    this._backgroundCount = Math.max(0, this._backgroundCount - 1)
+    this.emit('backgroundCount', this._backgroundCount)
   }
 
   askPermission(prompt: string): Promise<PermissionAnswer> {

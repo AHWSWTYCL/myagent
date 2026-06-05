@@ -32,7 +32,7 @@ type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 interface Props {
   bridge: TuiBridge
   commandParser: CommandParser
-  runTurn: (input: string | any[], signal?: AbortSignal) => Promise<void>
+  runTurn: (input: string | any[], signal?: AbortSignal, backgroundSignal?: AbortSignal) => Promise<{ backgrounded?: boolean } | void>
   runBash: (cmd: string) => Promise<string>
   toolMap: Map<string, Tool>
   enqueueUserMessage: (msg: string) => void
@@ -150,6 +150,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const turnVersionRef = useRef(0) // turn 版本守卫：防止 stale setImmediate 在 turnEnd 后更新 streamingText
   const historyIndexRef = useRef(-1)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const bgControllerRef = useRef<AbortController | null>(null) // Ctrl+B → background handoff
   const isProcessingRef = useRef(false)    // 同步版 isProcessing，避免闭包过期
   const submittingRef = useRef(false)      // 防止 handleSubmit 并发
 
@@ -174,6 +175,9 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   // ── 子 agent 任务面板状态 ─────────────────────────────────────────────
   const [subAgentTasks, setSubAgentTasks] = useState<SubAgentTask[]>([])
   const visibleTasks = getVisibleTasks(subAgentTasks)
+
+  // ── 后台任务计数（用于 Footer [bg:N] 指示器） ───────────────────────
+  const [backgroundCount, setBackgroundCount] = useState(0)
 
   // ── 子 agent 实时输出（路由到 pending agent tool 的 liveOutput）────
   const [todoPlan, setTodoPlan] = useState<TodoPlanSnapshot | null>(null)
@@ -419,6 +423,10 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
       setAutoMode(enabled)
     })
 
+    bridge.on('backgroundCount', (count: number) => {
+      setBackgroundCount(count)
+    })
+
     bridge.on('todoPlanUpdate', (snapshot: TodoPlanSnapshot | null) => {
       setTodoPlan(snapshot)
 
@@ -504,6 +512,17 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
       showHint(next ? 'Tool outputs expanded — Ctrl+O to collapse.' : 'Tool outputs collapsed.')
       return next
     })
+  })
+
+  // Ctrl+B: background the current running task (forks the agent loop).
+  useInput((input, key) => {
+    if (!key.ctrl || input !== 'b') return
+    if (!isProcessingRef.current) {
+      showHint('No running task to background.')
+      return
+    }
+    bgControllerRef.current?.abort()
+    showHint('Task moved to background — Ctrl+O to see tool details.')
   })
 
   // Permission mode: ↑/↓ navigate, Enter confirm, Esc = no
@@ -969,12 +988,19 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
       const ac = new AbortController()
       abortControllerRef.current = ac
+      const bgAc = new AbortController()
+      bgControllerRef.current = bgAc
 
       try {
         while (getQueueLength() > 0 && !ac.signal.aborted) {
           const nextMsg = dequeueMessage()
           if (!nextMsg) break
-          await runTurn(nextMsg, ac.signal)
+          const result = await runTurn(nextMsg, ac.signal, bgAc.signal)
+          // If the turn was backgrounded, stop processing the queue. The
+          // background loop is running independently with its forked context.
+          if (result && (result as any).backgrounded) {
+            break
+          }
         }
       } catch (err: unknown) {
         if (!ac.signal.aborted) {
@@ -982,6 +1008,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
           setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
         }
       } finally {
+        bgControllerRef.current = null
         const remaining = streamingRef.current
         if (remaining) {
           setMessages(msgs => [...msgs, { id: nextId(), role: 'agent', content: remaining }])
@@ -1166,6 +1193,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
         ctxText={ctx.text}
         transientHint={transientHint}
         subAgentTasks={visibleTasks}
+        backgroundCount={backgroundCount}
       />
 
       {mcpServers.length > 0 ? (
