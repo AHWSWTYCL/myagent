@@ -50,7 +50,7 @@ export class TodoUpdateTool extends Tool {
   }
 
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
-    const args = input as TodoUpdateArgs
+    const args = input as unknown as TodoUpdateArgs
     const current = todoManager.getCurrentPlan()
     const taskDesc = current?.tasks[args.taskIndex]?.description ?? `task #${args.taskIndex}`
     return {

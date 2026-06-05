@@ -204,13 +204,13 @@ export async function runAgentLoopStream(
 
     const systemParam = await resolveSystem(system)
     onLLMRequest?.(model, turn, messages)
-    const stream = await withRetry(() => client.messages.stream({
+    const stream = client.messages.stream({
       model,
       max_tokens: 8192,
       tools,
       messages,
       system: systemParam,
-    }))
+    })
 
     signal?.addEventListener('abort', () => stream.abort(), { once: true })
 

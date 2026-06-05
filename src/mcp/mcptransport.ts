@@ -9,17 +9,14 @@ import { spawn, ChildProcess } from 'child_process'
 
 // ── 传输接口 ──────────────────────────────────────────────────────────────────
 
-export interface MCPTransportEvents {
-  onMessage: (data: string) => void
-  onError: (err: Error) => void
-  onClose: () => void
-}
-
 export interface MCPTransport {
   connect(): Promise<void>
   disconnect(): Promise<void>
   send(message: string): Promise<void>
   isConnected(): boolean
+  onMessage(cb: (data: string) => void): void
+  onError(cb: (err: Error) => void): void
+  onClose(cb: () => void): void
 }
 
 // ── stdio 传输 ─────────────────────────────────────────────────────────────────
@@ -119,9 +116,8 @@ export class StdioTransport implements MCPTransport {
         resolve()
       })
 
-      // 如果 'spawn' 事件不支持，fallback 到下一个 tick
-      if (child.spawnfd !== undefined || child.pid !== undefined) {
-        // Node.js 中 spawn 成功后 pid 立即可用
+      // 如果 'spawn' 事件不支持（旧版 Node.js），fallback 到下一个 tick
+      if (child.pid !== undefined) {
         setImmediate(() => {
           if (!this._connected && child.exitCode === null && child.killed === false) {
             this._connected = true

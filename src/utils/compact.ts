@@ -161,7 +161,7 @@ export async function compactMessages(
     .join('\n\n')
 
   const response = await withRetry(() => client.messages.create({
-    model: 'claude-haiku-4-5',  // Summarization is cheap — Haiku is plenty.
+    model,  // 使用调用方传入的模型（统一由 modelConfig 管理）
     max_tokens: 4096,
     system: COMPACT_SYSTEM,
     messages: [{ role: 'user', content: `请压缩以下对话历史：\n\n${historyText}` }],

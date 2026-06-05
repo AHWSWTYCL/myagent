@@ -1,4 +1,4 @@
-import { TranscriptRecorder, loadLatestCheckpoint } from './utils/transcript.ts'
+import { TranscriptRecorder, loadLatestCheckpoint } from './utils/transcript.js'
 import fs from 'fs'
 import path from 'path'
 

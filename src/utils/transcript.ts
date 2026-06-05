@@ -272,7 +272,7 @@ export class TranscriptRecorder {
 
   // ── Event recorders ───────────────────────────────────────────────
 
-  recordUserInput(input: string | Array<Anthropic.TextBlockParam>): void {
+  recordUserInput(input: string | Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam | Anthropic.ToolUseBlockParam | Anthropic.ToolResultBlockParam>): void {
     const text = typeof input === 'string'
       ? input
       : input.filter(b => b.type === 'text').map(b => b.text).join('\n')

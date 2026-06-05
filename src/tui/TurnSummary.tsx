@@ -82,7 +82,7 @@ function useMinDisplayTime(value: string | undefined): string | undefined {
 
   // Track the previous value to detect changes
   const prevRef = useRef(value)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (value === prevRef.current) return

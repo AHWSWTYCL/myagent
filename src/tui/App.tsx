@@ -940,6 +940,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
           submittingRef.current = false
           return
         }
+        addToHistory(trimmed)
         await commandParser.dispatch(trimmed)
         submittingRef.current = false
         return

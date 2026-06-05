@@ -10,6 +10,8 @@ export interface AgentRunContext {
   /** 共享的 tool 执行入口（已带 hooks / 权限） */
   executeTool: (name: string, input: unknown) => Promise<string>
   client: Anthropic
+  /** Advisor agent 专用的 Claude 原生 client（非 DeepSeek 兼容端点）。agent runner 中对 advisor 自动切换。 */
+  advisorClient?: Anthropic
   emitLine: (line: string) => void
   /**
    * 子 agent 实时增量输出的回调。
@@ -49,7 +51,8 @@ export interface AgentDefinition {
   systemPrompt: string | ((args: Record<string, unknown>, ctx: AgentRunContext) => string | Promise<string>)
   /** 允许使用的全局工具名列表（从 toolRegistrar 取） */
   tools: string[]
-  model?: string
+  /** 使用的模型名。支持静态字符串或动态函数（如 advisor 运行时切换模型） */
+  model?: string | (() => string)
   maxTurns?: number
   /** 默认 schema：{ task: string }。Agent 需要更复杂入参时可以覆盖 */
   inputSchema?: AgentInputSchema

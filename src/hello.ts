@@ -6,7 +6,7 @@ async function main() {
   console.log('[myagent] Sending test message to Claude...\n')
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: 'deepseek-v4-pro',
     max_tokens: 1024,
     messages: [
       {

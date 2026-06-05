@@ -9,6 +9,7 @@ import { analystAgent } from './analyst.js'
 import { bugIntakeAgent } from './bug_intake.js'
 import { debugExpertAgent } from './debug_expert.js'
 import { projectBuilderAgent } from './project_builder.js'
+import { advisorAgent } from './advisor.js'
 
 export const builtinAgents: AgentDefinition[] = [
   analystAgent,
@@ -21,4 +22,5 @@ export const builtinAgents: AgentDefinition[] = [
   verifierAgent,
   coordinatorAgent,
   generalPurposeAgent,
+  advisorAgent,
 ]

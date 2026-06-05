@@ -18,7 +18,7 @@ interface MarkdownAgentFrontmatter {
  *   name: explore
  *   description: ...
  *   tools: [read_file, list_dir, bash]
- *   model: claude-sonnet-4-6
+ *   model: deepseek-v4-pro
  *   maxTurns: 10
  *   ---
  *   <system prompt 正文>

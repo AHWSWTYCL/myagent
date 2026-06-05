@@ -26,7 +26,7 @@ export interface BackgroundAgentResult {
 }
 
 /** sub-agent 同步执行超时时间（毫秒），超时后自动转入后台 */
-const AGENT_TIMEOUT_MS = 30_000
+const AGENT_TIMEOUT_MS = 300_000
 
 /**
  * 唯一的 agent 调度入口。
@@ -44,6 +44,7 @@ const AGENT_TIMEOUT_MS = 30_000
  */
 export class AgentTool extends Tool {
   private client?: Anthropic
+  private advisorClient?: Anthropic
   private executeToolFn?: (name: string, input: unknown) => Promise<string>
   private emitLineFn?: (line: string) => void
   private onSubAgentDeltaFn?: (name: string, delta: string) => void
@@ -62,6 +63,7 @@ export class AgentTool extends Tool {
 
   setExecutionContext(opts: {
     client: Anthropic
+    advisorClient?: Anthropic
     executeTool: (name: string, input: unknown) => Promise<string>
     emitLine: (line: string) => void
     transcriptRecorder?: TranscriptRecorder
@@ -73,6 +75,7 @@ export class AgentTool extends Tool {
     onBackgroundAgentResult?: (result: BackgroundAgentResult) => void
   }) {
     this.client = opts.client
+    this.advisorClient = opts.advisorClient
     this.executeToolFn = opts.executeTool
     this.emitLineFn = opts.emitLine
     this.transcriptRecorder = opts.transcriptRecorder
@@ -210,6 +213,7 @@ export class AgentTool extends Tool {
       toolRegistrar: this.toolRegistrar,
       executeTool: this.executeToolFn!,
       client: this.client!,
+      advisorClient: this.advisorClient,
       emitLine: (line: string) => this.emitLineFn?.(`[bg:${agentName}] ${line}`),
       onSubAgentDelta: undefined as undefined,
       onSubAgentHeartbeat: undefined as undefined,
@@ -258,6 +262,7 @@ export class AgentTool extends Tool {
       toolRegistrar: this.toolRegistrar,
       executeTool: this.executeToolFn!,
       client: this.client!,
+      advisorClient: this.advisorClient,
       emitLine: this.emitLineFn!,
       onSubAgentDelta: this.onSubAgentDeltaFn,
       onSubAgentHeartbeat: this.onSubAgentHeartbeatFn,

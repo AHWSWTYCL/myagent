@@ -4,6 +4,7 @@
   "description": "Learning agent development with Anthropic SDK",
   "type": "module",
   "scripts": {
+    "build": "tsc -p tsconfig.app.json",
     "hello": "tsx src/hello.ts",
     "agent": "tsx src/agent.ts",
     "start": "node dist/agent.js",

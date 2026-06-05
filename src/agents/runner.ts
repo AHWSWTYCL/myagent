@@ -4,8 +4,8 @@ import { ToolRegistrar } from '../tools/toolregistrar.js'
 import { Tool } from '../tools/tool.js'
 import { extractLastText } from '../utils/agentutils.js'
 import { AgentDefinition, AgentRunContext } from './definition.js'
+import { modelConfig } from '../llm/model-config.js'
 
-const DEFAULT_MODEL = 'claude-sonnet-4-6'
 const DEFAULT_MAX_TURNS = 20
 
 /**
@@ -79,9 +79,18 @@ export async function runAgent(
     return result
   }
 
+  // advisor agent 使用独立的 Claude 原生 client（ctx.advisorClient），其余 agent 走主 client
+  // 注意：当 advisorClient 不可用时回退到主 client，model 也必须跟着回退，
+  // 否则会用 Claude 模型名去请求 DeepSeek API，导致静默失败。
+  const useAdvisorClient = def.name === 'advisor' && ctx.advisorClient
+  const client = useAdvisorClient ? ctx.advisorClient : ctx.client
+  const model = useAdvisorClient
+    ? (typeof def.model === 'function' ? def.model() : (def.model ?? modelConfig.getCurrent()))
+    : modelConfig.getCurrent()
+
   await runAgentLoopStream({
-    client: ctx.client,
-    model: def.model ?? DEFAULT_MODEL,
+    client,
+    model,
     system,
     tools: subRegistrar.getAllTools(),
     messages,

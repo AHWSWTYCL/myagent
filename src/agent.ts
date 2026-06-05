@@ -69,6 +69,10 @@ import { TokenStatsCommand } from './commands/tokenstatscommand.js'
 import { SchedulerTool } from './scheduler/schedulertool.js'
 import { BgCommand } from './commands/bgcommand.js'
 import { VoiceCommand } from './commands/voicecommand.js'
+import { ModelCommand } from './commands/modelcommand.js'
+import { advisorConfig } from './llm/advisor-config.js'
+import { AdvisorCommand } from './commands/advisorcommand.js'
+import { modelConfig } from './llm/model-config.js'
 import { ttsService } from './voice/tts.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
@@ -259,6 +263,7 @@ process.on('SIGTERM', () => { cleanupTranscript(); process.exit(0) })
 import type { BackgroundAgentResult } from './tools/agenttool.js'
 agentTool.setExecutionContext({
   client,
+  advisorClient: advisorConfig.available ? advisorConfig.client! : undefined,
   executeTool: (name, input) => executeTool(name, input),
   emitLine: line => bridge.emitMessage('system', line),
   transcriptRecorder,
@@ -391,6 +396,8 @@ commandRegistry.register(new TokenStatsCommand(() => lastUsage, () => messages))
 commandRegistry.register(new BgCommand())
 commandRegistry.register(new SchedulerCommand())
 commandRegistry.register(new VoiceCommand())
+commandRegistry.register(new ModelCommand(qs => bridge.askChoice(qs)))
+commandRegistry.register(new AdvisorCommand(qs => bridge.askChoice(qs)))
 const commandParser = new CommandParser(commandRegistry)
 
 /**
@@ -424,7 +431,7 @@ async function compactIfNeeded(): Promise<void> {
 
   if (tokenCount >= COMPACT_TOKEN_THRESHOLD) {
     bridge.emitCompacting('start', `${tokenCount.toLocaleString()} tokens`)
-    const compacted = await compactMessages(client, 'claude-sonnet-4-6', messages)
+    const compacted = await compactMessages(client, modelConfig.getCurrent(), messages)
     messages.splice(0, messages.length, ...compacted)
     lastUsage = null
     bridge.emitUsageReset()
@@ -506,7 +513,7 @@ export async function runTurn(
   agentTool.setSignal(signal)
 
   try {
-    messages.push({ role: 'user', content: input as Anthropic.MessageParam['content'] })
+    messages.push({ role: 'user', content: input as any })
 
     // Transcript: set main agent context + record user input
     transcriptRecorder.pushAgentContext('main', null)
@@ -528,7 +535,7 @@ export async function runTurn(
 
     const loopResult = await runAgentLoopStream({
       client,
-      model: 'claude-sonnet-4-6',
+      model: modelConfig.getCurrent(),
       system: buildSystem,
       tools: toolRegistrar.getAllTools(),
       messages,
@@ -594,7 +601,7 @@ export async function runTurn(
       let bgLastUsage: UsageAccum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
       runAgentLoopStream({
         client,
-        model: 'claude-sonnet-4-6',
+        model: modelConfig.getCurrent(),
         system: buildSystem,
         tools: toolRegistrar.getAllTools(),
         messages: forkedMessages,
