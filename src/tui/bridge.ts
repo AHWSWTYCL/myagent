@@ -1,7 +1,7 @@
 import EventEmitter from 'events'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { DiffLine } from '../tools/edittool.js'
-import type { ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
+import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { MCPServerInfo } from '../mcp/mcpmanager.js'
 import type { TodoPlanSnapshot } from '../todos/todo.js'
 
@@ -27,6 +27,13 @@ export interface SubAgentTask {
 export class TuiBridge extends EventEmitter {
   private _autoMode = false
   private _backgroundCount = 0
+
+  /**
+   * 启动时由 agent.ts 设置，存放从 checkpoint 恢复的历史消息（ChatMessage[]）。
+   * App.tsx 启动时从该属性读取并初始化 messages state。
+   * 仅在 session 恢复（--continue / -c）时非空。
+   */
+  initialMessages: ChatMessage[] = []
 
   get autoMode() {
     return this._autoMode

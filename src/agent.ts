@@ -80,6 +80,8 @@ import {
   cleanOldResults,
 } from './utils/backgroundStorage.js'
 import { bgManager } from './utils/backgroundManager.js'
+import { TranscriptRecorder, loadLatestCheckpoint } from './utils/transcript.js'
+import type { ChatMessage } from './tui/types.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -125,18 +127,6 @@ const client = createClient()
 // 当前 runTurn 的 AbortSignal（供 AgentTool 传递给 sub-agent 内部循环）
 let currentAbortSignal: AbortSignal | undefined
 
-// AgentTool 需要 client / executeTool / emitLine —— 这些此时才有，在这里注入
-agentTool.setExecutionContext({
-  client,
-  executeTool: (name, input) => executeTool(name, input),
-  emitLine: line => bridge.emitMessage('system', line),
-  onSubAgentDelta: (name, delta) => bridge.emitSubAgentDelta(name, delta),
-  onSubAgentHeartbeat: (name, elapsedMs) => bridge.emitSubAgentHeartbeat(name, elapsedMs),
-  onSubAgentStart: (name, description, agentType) => bridge.emitSubAgentStart(name, description, agentType),
-  onSubAgentProgress: (name, toolUseCount, tokenCount, lastActivity) => bridge.emitSubAgentProgress(name, toolUseCount, tokenCount, lastActivity),
-  onSubAgentDone: (name, status, error) => bridge.emitSubAgentDone(name, status, error),
-})
-
 // ── MCP Manager ───────────────────────────────────────────────────────────────
 const mcpManager = new MCPManager()
 mcpManager.setRegistrar(toolRegistrar)
@@ -146,10 +136,93 @@ await mcpManager.startAll()
 // 清理超过 24 小时的过期后台结果文件
 cleanOldResults()
 
+// ── Agent state ───────────────────────────────────────────────────────────────
+const MAX_TURNS = 1000
+const messages: Anthropic.MessageParam[] = []
+let agentRunning = false
+let lastUsage: UsageAccum | null = null
+// Tail of the run-turn queue
+let currentTurnTail: Promise<void> = Promise.resolve()
+
+// ── Transcript Recorder ──────────────────────────────────────────────
+const transcriptRecorder = new TranscriptRecorder()
+
+// 检查 --continue / -c 标志，从上一个 session 恢复会话
+const shouldContinue = process.argv.includes('--continue') || process.argv.includes('-c')
+let continuedFromSession: string | undefined
+if (shouldContinue) {
+  const checkpoint = loadLatestCheckpoint()
+  if (checkpoint) {
+    messages.push(...checkpoint.messages)
+    continuedFromSession = checkpoint.sessionId
+    console.log(`[continue] Loaded ${checkpoint.messages.length} messages from ${checkpoint.sessionId}`)
+    // 将恢复的消息转换为 ChatMessage[] 供 TUI 显示历史
+    bridge.initialMessages = convertMessagesForTui(checkpoint.messages)
+  } else {
+    console.log('[continue] No previous session found, starting fresh')
+  }
+}
+
+/**
+ * 将 Anthropic.MessageParam[] 转换为 TUI 可显示的 ChatMessage[]。
+ * 只提取文本内容（跳过 tool_use / tool_result 块），生成稳定的 id。
+ */
+function convertMessagesForTui(msgs: Anthropic.MessageParam[]): ChatMessage[] {
+  const result: ChatMessage[] = []
+  let seq = 0
+  for (const msg of msgs) {
+    seq++
+    const role = msg.role === 'assistant' ? 'agent' as const : 'user' as const
+    const text = extractTextFromContent(msg.content)
+    if (text.trim()) {
+      result.push({ id: `hist-${seq}`, role, content: text })
+    }
+  }
+  return result
+}
+
+/** 从 Anthropic 消息 content（string | ContentBlock[]）中提取纯文本。 */
+function extractTextFromContent(content: string | Anthropic.ContentBlockParam[]): string {
+  if (typeof content === 'string') return content
+  return content
+    .filter((b): b is Anthropic.TextBlockParam => b.type === 'text')
+    .map(b => b.text)
+    .join('\n')
+}
+
+transcriptRecorder.initSession(continuedFromSession)
+
 // ── 启动完成，清理初始化阶段的 Attachment 噪声 ──────────────────────────
 attachmentQueue.clear()
 
-// ── Hooks ─────────────────────────────────────────────────────────────────────
+// ── 进程退出时关闭 transcript session ─────────────────────────────
+function cleanupTranscript(): void {
+  try { transcriptRecorder.closeSession() } catch { /* ignore */ }
+}
+process.on('beforeExit', cleanupTranscript)
+
+// AgentTool 需要 client / executeTool / emitLine / transcriptRecorder —— 这些此时才有，在这里注入
+import type { BackgroundAgentResult } from './tools/agenttool.js'
+agentTool.setExecutionContext({
+  client,
+  executeTool: (name, input) => executeTool(name, input),
+  emitLine: line => bridge.emitMessage('system', line),
+  transcriptRecorder,
+  onSubAgentDelta: (name, delta) => bridge.emitSubAgentDelta(name, delta),
+  onSubAgentHeartbeat: (name, elapsedMs) => bridge.emitSubAgentHeartbeat(name, elapsedMs),
+  onSubAgentStart: (name, description, agentType) => bridge.emitSubAgentStart(name, description, agentType),
+  onSubAgentProgress: (name, toolUseCount, tokenCount, lastActivity) => bridge.emitSubAgentProgress(name, toolUseCount, tokenCount, lastActivity),
+  onSubAgentDone: (name, status, error) => bridge.emitSubAgentDone(name, status, error),
+  onBackgroundAgentResult: (result: BackgroundAgentResult) => {
+    // 后台 sub-agent 完成 → 推 XML 通知进 messages
+    const relativePath = `.myagent/background/${result.taskId}.md`
+    const notification = result.status === 'completed'
+      ? buildBgNotification(result.taskId, 'completed', result.text.slice(0, 200), relativePath)
+      : buildBgNotification(result.taskId, 'failed', result.taskId, relativePath, result.error)
+    messages.push({ role: 'user', content: notification })
+    bridge.emitMessage('system', `[bg:${result.name}] ${result.status === 'completed' ? '√' : '✗'} taskId=${result.taskId}`)
+  },
+})
 const hookManager = new HookManager()
 hookManager.register(new LoggerHook(bridge))
 const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt), toolRegistrar)
@@ -250,15 +323,6 @@ export function drainQueue(): string | undefined {
   return messageQueue.dequeue()
 }
 
-// ── Agent state ───────────────────────────────────────────────────────────────
-const MAX_TURNS = 1000
-const messages: Anthropic.MessageParam[] = []
-let agentRunning = false
-let lastUsage: UsageAccum | null = null
-// Tail of the run-turn queue: each runTurn awaits this and then assigns its own
-// release promise as the new tail, giving FIFO serialization without polling.
-let currentTurnTail: Promise<void> = Promise.resolve()
-
 // ── Commands ──────────────────────────────────────────────────────────────────
 const commandRegistry = new CommandRegistry()
 commandRegistry.register(new HelpCommand(commandRegistry))
@@ -308,6 +372,7 @@ async function compactIfNeeded(): Promise<void> {
     lastUsage = null
     bridge.emitUsageReset()
     bridge.emitCompacting('done', `${tokenCount.toLocaleString()} tokens → ${messages.length} 条消息`)
+    transcriptRecorder.recordCompact(tokenCount, messages.length)
   } else if (tokenCount >= MICRO_COMPACT_TOKEN_THRESHOLD) {
     const freed = microcompactMessages(messages)
     if (freed > 0) {
@@ -386,6 +451,10 @@ export async function runTurn(
   try {
     messages.push({ role: 'user', content: input as Anthropic.MessageParam['content'] })
 
+    // Transcript: set main agent context + record user input
+    transcriptRecorder.pushAgentContext('main', null)
+    transcriptRecorder.recordUserInput(input)
+
     // Recall once per user input (not per inner turn)
     const recallText = extractRecallText(input as string | Array<ContentBlockParam>)
     bridge.emitStatus('召回相关记忆...')
@@ -397,6 +466,8 @@ export async function runTurn(
 
     // Accumulate text across inner turns for memory extraction (one pass per user input, not per inner turn)
     let fullAssistantText = ''
+    // Track the latest stop_reason per LLM round for transcript
+    let lastStopReason: string | undefined
 
     const loopResult = await runAgentLoopStream({
       client,
@@ -411,18 +482,32 @@ export async function runTurn(
       backgroundSignal,
       drainQueue: () => messageQueue.dequeue(),
       drainAttachments: () => attachmentQueue.formatDrain(),
+      onLLMRequest: (model, turn, msgs) => {
+        transcriptRecorder.recordLLMRequest(model, turn, msgs)
+      },
       onText: delta => bridge.emitText(delta),
       onTurnEnd: async (text, msgs) => {
         fullAssistantText += text + '\n'
         bridge.emitTurnEnd(text)
+        // Transcript: record LLM response + checkpoint
+        if (lastUsage && text) {
+          transcriptRecorder.recordLLMResponseEnd(text, lastUsage, lastStopReason)
+        }
+        transcriptRecorder.recordCheckpoint(msgs)
         await hookManager.runOnTurnEnd({
           messages: msgs,
           assistantText: text,
           userInput: recallText,
         })
       },
-      onToolStart: (callId, name, input) => bridge.emitToolStart(callId, name, input),
-      onToolEnd: (callId, name, input, output) => bridge.emitToolEnd(callId, name, input, output),
+      onToolStart: (callId, name, input) => {
+        bridge.emitToolStart(callId, name, input)
+        transcriptRecorder.recordToolStart(callId, name, input)
+      },
+      onToolEnd: (callId, name, input, output) => {
+        bridge.emitToolEnd(callId, name, input, output)
+        transcriptRecorder.recordToolEnd(callId, name, input, output)
+      },
       onTurnToolReset: () => bridge.emitTurnToolReset(),
       onUsage: stats => {
         lastUsage = stats
@@ -436,11 +521,16 @@ export async function runTurn(
       const taskDescription = extractBgDescription(forkedMessages)
       const { id: taskId, abortController } = bgManager.start(taskDescription)
       bridge.emitBackgroundStart()
+      // Transcript: pop main context, record handoff, push bg context
+      transcriptRecorder.popAgentContext()
+      transcriptRecorder.recordBackgroundHandoff(taskId, forkedMessages.length)
+      transcriptRecorder.pushAgentContext(taskId, 'main')
       // Fork a background loop that runs independently (no await).
       // Background uses the same executeTool (hooks still fire — permission prompts work).
       // UI callbacks are no-ops: outputs don't render in the main TUI area.
       // Capture the final turn's conclusion text for the completion message.
       let backgroundConclusion = ''
+      let bgLastUsage: UsageAccum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
       runAgentLoopStream({
         client,
         model: 'claude-sonnet-4-6',
@@ -451,15 +541,30 @@ export async function runTurn(
         executeTool,
         parallelSafeTools: toolRegistrar.getParallelSafeNames(),
         signal: abortController.signal,           // 支持 /bg kill
+        onLLMRequest: (model, turn, msgs) => {
+          transcriptRecorder.recordLLMRequest(model, turn, msgs)
+        },
         // No drain — background doesn't consume foreground message queue
         // No backgroundSignal — background runs independently (Ctrl+B won't re-fork)
         onText: () => {}, // no-op: no streaming text for background
-        onTurnEnd: (text) => { if (text) backgroundConclusion = text }, // capture final conclusion
-        onToolStart: () => {},
-        onToolEnd: () => {},
+        onTurnEnd: (text) => {
+          if (text) backgroundConclusion = text // capture final conclusion
+          // Transcript: record the background LLM response
+          if (bgLastUsage && text) {
+            transcriptRecorder.recordLLMResponseEnd(text, bgLastUsage, undefined)
+          }
+          transcriptRecorder.recordCheckpoint(forkedMessages)
+        },
+        onToolStart: (callId, name, input) => {
+          transcriptRecorder.recordToolStart(callId, name, input)
+        },
+        onToolEnd: (callId, name, input, output) => {
+          transcriptRecorder.recordToolEnd(callId, name, input, output)
+        },
         onTurnToolReset: () => {},
-        onUsage: () => {}, // accumulate silently (optional)
+        onUsage: (stats) => { bgLastUsage = stats },
       }).then(() => {
+        transcriptRecorder.popAgentContext()
         bridge.emitBackgroundEnd()
         const taskInfo = bgManager.get(taskId)
         // 已被用户手动 kill 的，不推送 completion 通知
@@ -476,6 +581,7 @@ export async function runTurn(
         // 4. TUI 只显示一行简短提示
         bridge.emitMessage('system', `[BG] √ ${taskDescription} → ${relativePath}`)
       }).catch((err: unknown) => {
+        transcriptRecorder.popAgentContext()
         bridge.emitBackgroundEnd()
         const msg = err instanceof Error ? err.message : String(err)
         // 失败时也写入文件（含错误信息）
@@ -505,6 +611,8 @@ export async function runTurn(
 
     await compactIfNeeded()
   } finally {
+    // Transcript: pop main agent context
+    transcriptRecorder.popAgentContext()
     agentRunning = false
     releaseTail()
   }
@@ -597,6 +705,7 @@ if (debugOpts) {
 
   // 清理并退出
   scheduler.stop()
+  transcriptRecorder.closeSession()
   await mcpManager.shutdownAll().catch(() => {})
   process.exit(result.status === 'error' ? 1 : 0)
 } else {

@@ -244,6 +244,8 @@ export interface DebugOptions {
   output?: string
   /** 超时秒数（可选，到期自动中断 agent 循环） */
   timeout?: number
+  /** 是否恢复上一次 session */
+  continue: boolean
 }
 
 /**
@@ -256,6 +258,7 @@ export interface DebugOptions {
  *   --debug --input "prompt" --auto-yes
  *   --debug --input "prompt" --output /tmp/out.json
  *   -d "prompt"
+ *   --continue / -c（debug 模式下恢复会话）
  */
 export function parseDebugArgs(): DebugOptions | null {
   const args = process.argv.slice(2)
@@ -269,6 +272,7 @@ export function parseDebugArgs(): DebugOptions | null {
   const options: DebugOptions = {
     input: '',
     autoYes: false,
+    continue: false,
   }
 
   // 解析标记参数
@@ -289,6 +293,8 @@ export function parseDebugArgs(): DebugOptions | null {
         process.exit(1)
       }
       options.timeout = val
+    } else if (arg === '--continue' || arg === '-c') {
+      options.continue = true
     } else if (arg === '--help' || arg === '-h') {
       printHelp()
       process.exit(0)
@@ -314,6 +320,8 @@ Usage:
   node dist/agent.js --debug --input "your prompt"
   node dist/agent.js -d "prompt" --auto-yes
   node dist/agent.js -d -i "prompt" -o result.json
+  node dist/agent.js -c                 # 恢复上一次 session（TUI 模式）
+  node dist/agent.js -d -c "继续"       # 恢复上一次 session 并继续对话
 
 Options:
   --debug, -d             启用 headless debug 模式
@@ -321,6 +329,7 @@ Options:
   --auto-yes, -y          自动授权所有工具调用
   --output, -o <file>     将 JSON 结果写入文件（默认 stdout）
   --timeout, -t <seconds> 超时自动中断（默认不限时）
+  --continue, -c          恢复上一次 session 的对话上下文
   --help, -h              显示帮助
 
 Output (stdout):

@@ -221,6 +221,14 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     transientHintTimerRef.current = setTimeout(() => setTransientHint(''), ms)
   }, [])
 
+  // ── 从 bridge 读取恢复的历史消息（session restore：-c / --continue） ──
+  useEffect(() => {
+    const history = bridge.initialMessages
+    if (history.length > 0) {
+      setMessages(history)
+    }
+  }, [bridge])
+
   useEffect(() => {
     bridge.on('status', (msg: string) => setStatus(msg))
 

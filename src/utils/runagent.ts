@@ -50,6 +50,13 @@ export interface RunAgentOptions {
    * 与 signal（中断信号）互相独立，可同时存在。
    */
   backgroundSignal?: AbortSignal
+
+  /**
+   * 每次 LLM API 调用前触发（仅观察，不阻断）。
+   * 用于 TranscriptRecorder 记录 llm_request 事件。
+   * turn 从 0 开始计，每轮递增。
+   */
+  onLLMRequest?: (model: string, turn: number, messages: Anthropic.MessageParam[]) => void
 }
 
 async function resolveSystem(
@@ -156,7 +163,7 @@ export async function runAgentLoopStream(
   const {
     client, model, system, tools, messages, maxTurns = 20,
     executeTool, onText, onTurnEnd, onToolStart, onToolEnd, onUsage, signal, parallelSafeTools,
-    onTurnToolReset, drainQueue, drainAttachments, backgroundSignal,
+    onTurnToolReset, drainQueue, drainAttachments, backgroundSignal, onLLMRequest,
   } = opts
 
   // input / cacheRead / cacheWrite are PER-REQUEST snapshots (the API already counts
@@ -196,6 +203,7 @@ export async function runAgentLoopStream(
     if (bgHandoff) return bgHandoff
 
     const systemParam = await resolveSystem(system)
+    onLLMRequest?.(model, turn, messages)
     const stream = await withRetry(() => client.messages.stream({
       model,
       max_tokens: 8192,
