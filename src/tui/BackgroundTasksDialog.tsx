@@ -30,14 +30,20 @@ export interface BackgroundTasksDialogProps {
 const STATUS_LABEL: Record<string, string> = {
   running: 'running',
   idle: 'idle',
+  completed: 'completed',
+  failed: 'failed',
+  killed: 'killed',
 }
 
 const STATUS_COLOR: Record<string, string> = {
   running: 'green',
   idle: 'yellow',
+  completed: 'blue',
+  failed: 'red',
+  killed: 'yellow',
 }
 
-export function BackgroundTasksDialog({ tasks, selectedIndex, onClose, onKill, onDetail }: BackgroundTasksDialogProps) {
+export function BackgroundTasksDialog({ tasks, selectedIndex, onClose, onKill, onDetail, onZoomIn }: BackgroundTasksDialogProps) {
   // 安全 clamp：防止 selectedIndex 越界
   const clampedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, tasks.length - 1))
 
@@ -53,7 +59,7 @@ export function BackgroundTasksDialog({ tasks, selectedIndex, onClose, onKill, o
           <Text color="gray" bold>Background Tasks</Text>
         </Box>
         <Box marginTop={1}>
-          <Text dimColor>No teammate tasks running.</Text>
+          <Text dimColor>No teammate tasks.</Text>
         </Box>
         <Box marginTop={1}>
           <Text dimColor>Start a teammate with:</Text>
@@ -115,7 +121,9 @@ export function BackgroundTasksDialog({ tasks, selectedIndex, onClose, onKill, o
 
       <Box marginTop={1}>
         <Text dimColor>
-          {tasks.filter(t => t.status === 'running').length} running, {tasks.filter(t => t.status === 'idle').length} idle
+          {tasks.filter(t => t.status === 'running').length} running,{' '}
+          {tasks.filter(t => t.status === 'idle').length} idle,{' '}
+          {tasks.filter(t => t.status === 'completed' || t.status === 'failed' || t.status === 'killed').length} done
         </Text>
       </Box>
     </Box>

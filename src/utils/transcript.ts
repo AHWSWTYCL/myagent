@@ -238,6 +238,7 @@ export class TranscriptRecorder {
    */
   private writeClosedMarker(): void {
     if (!this.sessionDir) return
+    this.ensureDir(this.sessionDir)
     const markerPath = path.join(this.sessionDir, '.closed')
     const marker = {
       sessionId: this.sessionId,
@@ -333,6 +334,7 @@ export class TranscriptRecorder {
 
     if (outputLength > ARTIFACT_SIZE_THRESHOLD) {
       // 写入 artifact 文件
+      this.ensureDir(path.join(this.sessionDir, 'artifacts'))
       this.artifactSeq++
       const artifactName = `${String(this.artifactSeq).padStart(3, '0')}_${toolName}_${callId.slice(0, 8)}.log`
       const artifactPath = path.join(this.sessionDir, 'artifacts', artifactName)
@@ -378,6 +380,7 @@ export class TranscriptRecorder {
     const cpPath = path.join(this.sessionDir, cpName)
 
     // 写入全量 checkpoint 文件
+    this.ensureDir(this.sessionDir)
     const cpContent = {
       seq: this.checkpointSeq,
       timestamp: new Date().toISOString(),
@@ -420,6 +423,10 @@ export class TranscriptRecorder {
    */
   private writeEventSync(event: TranscriptEvent): void {
     if (!this.transcriptPath) return
+    // Defense: ensure the session directory still exists before writing.
+    // initSession creates it, but external factors (manual deletion, tmp cleaners)
+    // can remove it between init and subsequent writes.
+    this.ensureDir(this.sessionDir)
     this.eventCount++
 
     const ctx = this.currentContext
@@ -450,6 +457,20 @@ export class TranscriptRecorder {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true })
     }
+  }
+
+  // ── Public getters（供外部读取 session 信息/路径）────────────────────
+
+  getSessionId(): string {
+    return this.sessionId
+  }
+
+  getSessionDir(): string {
+    return this.sessionDir
+  }
+
+  getTranscriptPath(): string {
+    return this.transcriptPath
   }
 
   /** 粗略估算 messages 的 token 数（4 chars ≈ 1 token） */

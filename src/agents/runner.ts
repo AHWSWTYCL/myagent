@@ -1,10 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { runAgentLoopStream } from '../utils/runagent.js'
+import { runAgentLoopStream, type UsageAccum } from '../utils/runagent.js'
 import { ToolRegistrar } from '../tools/toolregistrar.js'
 import { Tool } from '../tools/tool.js'
 import { extractLastText } from '../utils/agentutils.js'
 import { AgentDefinition, AgentRunContext } from './definition.js'
 import { modelConfig } from '../llm/model-config.js'
+import { Mailbox, type Mail } from '../mailbox/mailbox.js'
+import { teammateMailPriority } from '../tools/checkmailtool.js'
 
 const DEFAULT_MAX_TURNS = 20
 
@@ -44,6 +46,22 @@ export async function runAgent(
   }
 
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userText }]
+
+  // ── Transcript recording ──────────────────────────────────────────────
+  const recorder = ctx.transcriptRecorder
+  const recorderAgentId = ctx.agentId ?? def.name
+  const recorderParentId = ctx.parentAgentId ?? ctx.source ?? 'main'
+  let latestUsage: UsageAccum = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  }
+  if (recorder) {
+    recorder.pushAgentContext(recorderAgentId, recorderParentId)
+    recorder.recordUserInput(userText)
+    recorder.recordSubAgentStart(def.agentType ?? def.name, String(args.task ?? ''))
+  }
 
   // ── 4. 工具调用计数器，用于进度回调 ─────────────────────────────────
   let toolUseCount = 0
@@ -88,20 +106,111 @@ export async function runAgent(
     ? (typeof def.model === 'function' ? def.model() : (def.model ?? modelConfig.getCurrent()))
     : modelConfig.getCurrent()
 
-  await runAgentLoopStream({
-    client,
-    model,
-    system,
-    tools: subRegistrar.getAllTools(),
-    messages,
-    maxTurns: def.maxTurns ?? DEFAULT_MAX_TURNS,
-    executeTool: subExecuteTool,
-    parallelSafeTools: subRegistrar.getParallelSafeNames(),
-    onText,
-    signal: ctx.signal,
-  })
+  // ── teammate 邮箱轮询 + keepAlive ───────────────────────────────────
+  // 三层机制确保 teammate 长期存活、优先处理用户/leader 消息：
+  //   1. drainMailbox — 每轮 LLM 结束后立即检查邮箱（快速路径），用优先级排序
+  //   2. waitForEvent  — 当 drain 全部为空时，进入轮询等待（每秒查一次）
+  //   3. keepAlive     — 让 runAgentLoopStream 不退出，而是一直等到 close 或 signal
+  const isTeammate = def.agentType === 'teammate'
+  const teammateMailboxId = isTeammate ? String(args.agent_id ?? '') : ''
+  const leaderId = isTeammate ? String(args.leader_id ?? 'leader') : ''
+  let closeReceived = false
 
-  const lastText = extractLastText(messages)
-  const result = def.finalize ? await def.finalize(messages, lastText, ctx, args) : (lastText || `(agent "${def.name}" produced no text output)`)
-  return result
+  // 优先级 pop：用户消息 > close > leader > peer，同优先级 FIFO
+  const popByPriority = (): Mail | null => {
+    const all = Mailbox.list(teammateMailboxId)
+    if (all.length === 0) return null
+    all.sort((a, b) => {
+      const pa = teammateMailPriority(a, leaderId)
+      const pb = teammateMailPriority(b, leaderId)
+      if (pa !== pb) return pa - pb
+      return a.created_at.localeCompare(b.created_at)
+    })
+    const m = all[0]
+    Mailbox.markRead(teammateMailboxId, m.id)
+    return m
+  }
+
+  const formatMailForAgent = (m: Mail): string =>
+    `📬 新邮件 [${m.kind}] from ${m.from}: ${m.subject}\n\n${m.body}`
+
+  const drainMailbox = isTeammate
+    ? () => {
+        const m = popByPriority()
+        if (!m) return undefined
+        if (m.kind === 'close') closeReceived = true
+        return formatMailForAgent(m)
+      }
+    : undefined
+
+  const waitForEvent = isTeammate
+    ? async (): Promise<string | undefined> => {
+        // 已收到 close → 不再等待，让 worker 正常退出
+        if (closeReceived) return undefined
+        // 轮询等待新邮件（每秒一次）
+        while (!ctx.signal?.aborted) {
+          const m = popByPriority()
+          if (m) {
+            if (m.kind === 'close') closeReceived = true
+            return formatMailForAgent(m)
+          }
+          await new Promise(r => setTimeout(r, 1000))
+        }
+        return undefined
+      }
+    : undefined
+
+  try {
+    await runAgentLoopStream({
+      client,
+      model,
+      system,
+      tools: subRegistrar.getAllTools(),
+      messages,
+      maxTurns: def.maxTurns ?? DEFAULT_MAX_TURNS,
+      executeTool: subExecuteTool,
+      parallelSafeTools: subRegistrar.getParallelSafeNames(),
+      onText,
+      signal: ctx.signal,
+      drainMailbox,
+      keepAlive: isTeammate,
+      waitForEvent,
+      onLLMRequest: recorder
+        ? (model, turn, msgs) => recorder.recordLLMRequest(model, turn, msgs)
+        : undefined,
+      onTurnEnd: recorder
+        ? (text, msgs) => {
+            if (text) recorder.recordLLMResponseEnd(text, latestUsage, undefined)
+            recorder.recordCheckpoint(msgs)
+          }
+        : undefined,
+      onToolStart: recorder
+        ? (callId, name, input) => recorder.recordToolStart(callId, name, input)
+        : undefined,
+      onToolEnd: recorder
+        ? (callId, name, input, output) => recorder.recordToolEnd(callId, name, input, output)
+        : undefined,
+      onUsage: stats => {
+        latestUsage = stats
+      },
+    })
+
+    const lastText = extractLastText(messages)
+    const result = def.finalize ? await def.finalize(messages, lastText, ctx, args) : (lastText || `(agent "${def.name}" produced no text output)`)
+
+    if (recorder) {
+      recorder.recordSubAgentEnd(def.agentType ?? def.name, undefined, toolUseCount)
+    }
+    return result
+  } catch (err) {
+    if (recorder) {
+      const msg = err instanceof Error ? err.message : String(err)
+      recorder.recordSubAgentEnd(def.agentType ?? def.name, msg, toolUseCount)
+    }
+    throw err
+  } finally {
+    if (recorder) {
+      recorder.popAgentContext()
+    }
+  }
 }

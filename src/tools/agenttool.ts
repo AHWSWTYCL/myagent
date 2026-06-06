@@ -5,6 +5,7 @@ import { ToolRegistrar } from './toolregistrar.js'
 import { AgentRegistry } from '../agents/registry.js'
 import { runAgent } from '../agents/runner.js'
 import type { TranscriptRecorder } from '../utils/transcript.js'
+import { TranscriptRecorder as TranscriptRecorderClass } from '../utils/transcript.js'
 import { bgManager } from '../utils/backgroundManager.js'
 import { saveBackgroundResult } from '../utils/backgroundStorage.js'
 import { taskRegistry } from '../team/taskRegistry.js'
@@ -199,6 +200,7 @@ export class AgentTool extends Tool {
 
   /**
    * 显式后台模式：立即 fork，不等待。
+   * 为 background teammate 创建独立 TranscriptRecorder，避免共享 contextStack 并发污染。
    */
   private runInBackground(
     def: NonNullable<ReturnType<AgentRegistry['get']>>,
@@ -207,6 +209,11 @@ export class AgentTool extends Tool {
     agentDescription: string,
   ): string {
     const { id: taskId, abortController } = bgManager.start(agentDescription)
+
+    // ── 为 background teammate 创建独立 TranscriptRecorder ────────────
+    const bgRecorder = new TranscriptRecorderClass()
+    bgRecorder.initSession()
+    const transcriptPath = bgRecorder.getTranscriptPath()
 
     // ── 注册 teammate 到 taskRegistry（供 BackgroundTasksDialog 查询） ──
     const registryAgentId = def.name === 'teammate'
@@ -217,6 +224,8 @@ export class AgentTool extends Tool {
         agentId: registryAgentId,
         teamName: args.team_name as string | undefined,
         role: String(args.role ?? 'worker'),
+        bgTaskId: taskId,
+        transcriptPath,
       })
     }
 
@@ -234,19 +243,17 @@ export class AgentTool extends Tool {
       onSubAgentProgress: undefined as undefined,
       onSubAgentDone: undefined as undefined,
       signal: abortController.signal,
+      transcriptRecorder: bgRecorder,
+      agentId: registryAgentId ?? taskId,
+      parentAgentId: 'main',
     }
-
-    // Transcript: push bg agent context + record start
-    const bgAgentId = `bg-${agentName}`
-    this.transcriptRecorder?.pushAgentContext(bgAgentId, 'main')
-    this.transcriptRecorder?.recordSubAgentStart(def.agentType ?? def.name, agentDescription)
 
     // 不 await，后台执行
     runAgent(def, args, bgCtx)
-      .then(result => this.finishBackgroundAgent(taskId, agentName, result, undefined, registryAgentId))
+      .then(result => this.finishBackgroundAgent(taskId, agentName, result, undefined, registryAgentId, bgRecorder))
       .catch(err => {
         const msg = err instanceof Error ? err.message : String(err)
-        this.finishBackgroundAgent(taskId, agentName, '', msg, registryAgentId)
+        this.finishBackgroundAgent(taskId, agentName, '', msg, registryAgentId, bgRecorder)
       })
 
     return `[Background] Running agent "${agentName}" in background (${taskId}). It will push a notification when done.`
@@ -341,6 +348,7 @@ export class AgentTool extends Tool {
 
   /**
    * 后台 agent 完成后的统一处理：写结果文件、更新 bgManager、推通知进 messages。
+   * 对于有独立 TranscriptRecorder 的后台 agent，关闭 recorder 并更新 taskRegistry 状态。
    */
   private finishBackgroundAgent(
     taskId: string,
@@ -348,19 +356,19 @@ export class AgentTool extends Tool {
     text: string,
     error: string | undefined,
     registryAgentId?: string,
+    bgRecorder?: TranscriptRecorder,
   ): void {
-    // Transcript: record end + pop bg context
-    if (error) {
-      this.transcriptRecorder?.recordSubAgentEnd(agentName, error)
-    } else {
-      this.transcriptRecorder?.recordSubAgentEnd(agentName)
+    // ── 关闭独立 transcript recorder（如果有的话） ──
+    if (bgRecorder) {
+      bgRecorder.closeSession()
     }
-    this.transcriptRecorder?.popAgentContext()
 
-    // ── 从 taskRegistry 移除已完成的 teammate ──
-    // 使用注册时的 agentId（而非 agentName），确保能正确移除。
+    // ── 更新 taskRegistry 状态（completed/failed），不再 remove ──
+    // 这样 BackgroundTasksDialog 仍能看到已完成的 teammate 并 zoom-in 查看历史。
     if (registryAgentId) {
-      taskRegistry.remove(registryAgentId)
+      taskRegistry.update(registryAgentId, {
+        status: error ? 'failed' : 'completed',
+      })
     }
 
     if (error) {

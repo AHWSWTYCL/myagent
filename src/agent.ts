@@ -81,6 +81,7 @@ import { handleMCPCommand } from './commands/mcpcommand.js'
 import { todoManager } from './todos/todomanager.js'
 import { attachmentQueue } from './attachment/queue.js'
 import { taskRegistry } from './team/taskRegistry.js'
+import { Mailbox, formatMail } from './mailbox/mailbox.js'
 import {
   saveBackgroundResult,
   buildBgNotification,
@@ -393,6 +394,20 @@ export function drainQueue(): string | undefined {
   return messageQueue.dequeue()
 }
 
+/**
+ * drainMailbox — 扫描主 agent 邮箱中的未读邮件（teammate 发来的 result/status 等），
+ * 全部取出并格式化为文本，推入 LLM 上下文。
+ * 返回 undefined 表示邮箱为空。
+ */
+export function drainMailbox(): string | undefined {
+  const mails = Mailbox.list('main')
+  if (mails.length === 0) return undefined
+  const formatted = mails.map(formatMail).join('\n\n---\n\n')
+  // 全部标记已读
+  for (const m of mails) Mailbox.markRead('main', m.id)
+  return `[New Mail — ${mails.length} unread from teammates]\n\n${formatted}`
+}
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 const commandRegistry = new CommandRegistry()
 commandRegistry.register(new HelpCommand(commandRegistry))
@@ -556,6 +571,7 @@ export async function runTurn(
       backgroundSignal,
       drainQueue: () => messageQueue.dequeue(),
       drainAttachments: () => attachmentQueue.formatDrain(),
+      drainMailbox: () => drainMailbox(),
       onLLMRequest: (model, turn, msgs) => {
         transcriptRecorder.recordLLMRequest(model, turn, msgs)
       },

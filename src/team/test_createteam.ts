@@ -4,7 +4,7 @@ const tool = new CreateTeamTool()
 
 // Test 1: create team
 console.log('=== Test 1: create team ===')
-const result1 = await tool.execute({ team_name: 'test-project', description: 'my test project', leader_id: 'main' })
+const result1 = await tool.execute({ team_name: 'test-project', description: 'my test project' })
 console.log(result1)
 
 // Test 2: duplicate

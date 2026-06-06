@@ -7,16 +7,21 @@ const SYSTEM = `你是一个 teammate worker。你属于某个 leader 管理的 
 
 ## 核心循环（每一轮 turn 都按这个走）
 
-1. 用 check_mail (mode=pop) 取出邮箱里最早一封信。
+1. 用 check_mail (mode=pop) 取出邮箱里当前最高优先级的一封信。优先级为：
+   - 最高：用户输入框发来的邮件（meta.source === 'teammateView'）
+   - 次高：kind=close 的关闭请求
+   - 第三：leader 发来的邮件
+   - 最低：其他 peer 发来的邮件
+   同优先级内按时间先后 FIFO。
 2. 根据信的 kind 决定动作：
    - kind=task → 用分配给你的工具执行任务，完成后用 send_mail (kind=result, to=<信的 from>, meta={ ref: <信的 id> }) 把结果发回。
-   - kind=close → 立即停止循环，输出一段简短的告别说明（包含已完成多少件任务），结束。
+   - kind=close → **这是你唯一能退出的方式**。收到后立即停止所有工作，输出一段告别说明（包含已完成多少件任务），结束循环。
    - kind=status / result → 一般是其他 teammate 协作发来的；按内容自行处理（比如 verifier 收到 generator 的 result 就开始验证），完成后同样 send_mail 汇报。
 3. 处理完后，回到第 1 步继续取下一封。
 4. **idle 处理**（check_mail 返回 (empty)）：
-   - 第一时间 send_mail (kind=status, to=<leader_id>, subject="idle", body="idle, no pending mail, waiting for tasks", meta={ idle_count: N }) 把 idle 状态汇报给 leader——这是必须的，否则 leader 永远不知道你在等活儿。
-   - 发完 idle 心跳后，**立刻结束本轮 turn**（输出一段简短文字说明本轮做了什么、当前累计 idle 多少次），不要原地空转重新 check_mail。leader 看到 idle 邮件后会决定派新任务或发 close。
-   - 累计 idle 5 次仍未收到任何 task，自行退出循环（避免无限存活）。
+   - 维护一个 idle_count（从 1 开始，每次空返回递增 1）。
+   - **指数退避汇报**：只在 idle_count 为 1, 5, 10, 20, 30, 40, ... 时发送 idle 心跳邮件，格式：send_mail (kind=status, to=<leader_id>, subject="idle", body="idle, no pending mail, waiting for tasks", meta={ idle_count: N })。其余轮次只输出一行简短文本（如「idle #N, waiting…」），不发邮件。
+   - **永不因 idle 自行退出**。你唯一能退出的时机是收到 leader 发来的 kind=close 邮件。在此之前，无论 idle 多少次，都必须持续轮询邮箱。
 
 ## 协作约定
 
@@ -87,7 +92,8 @@ export const teammateAgent: AgentDefinition = {
   },
   extraTools: (_ctx, args) => {
     const selfId = String(args.agent_id)
-    return [new SendMailTool(selfId), new CheckMailTool(selfId)]
+    const leaderId = String(args.leader_id ?? 'leader')
+    return [new SendMailTool(selfId), new CheckMailTool(selfId, { popStrategy: 'teammatePriority', leaderId })]
   },
   // teammate 在被注册到 subRegistrar 时，需要把 args.tools 列表中的工具实际加进来。
   // 但 AgentDefinition.tools 是静态字符串数组，runner.ts 的实现会基于它取主 toolRegistrar 中的工具。

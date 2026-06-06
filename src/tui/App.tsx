@@ -8,6 +8,7 @@ import type { CommandParser } from '../commands/commandparser.js'
 import type { Suggestion } from '../commands/commandregistry.js'
 import type { FileAttachment } from '../utils/attachments.js'
 import type { Tool } from '../tools/tool.js'
+import { Mailbox, formatMail } from '../mailbox/mailbox.js'
 import { parseAttachments, buildUserContent, autoPrefixAttachments } from '../utils/attachments.js'
 import { StreamingText } from './MarkdownRenderer.js'
 import { Banner } from './banner.js'
@@ -604,6 +605,11 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     if (input === 'x') {
       const task = teammateTasks[dialogSelectedIndex]
       if (task) {
+        // 禁止对已完成的 teammate 发 close（它们已经停止了）
+        if (task.status === 'completed' || task.status === 'failed' || task.status === 'killed') {
+          showHint(`Teammate already ${task.status}.`)
+          return
+        }
         setAppMode('main')
         const closeMsg = `用 send_mail(kind=close, to="${task.agentId}", subject="terminated", body="Terminated by user from Background Tasks dialog.") 终止这个 teammate。`
         enqueueUserMessage(closeMsg)
@@ -1068,53 +1074,103 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     }
 
     // ── 从队列启动处理（submittingRef 已释放，但仍可被 isProcessing 防护） ──
-    if (!isProcessingRef.current && getQueueLength() > 0) {
-      // 同步更新 ref，防止后续并发 handleSubmit 误判
-      isProcessingRef.current = true
-      setIsProcessing(true)
-
-      setTurnTools([])
-      setStatus('thinking...')
-      streamingRef.current = ''
-      setStreamingText('')
-
-      const ac = new AbortController()
-      abortControllerRef.current = ac
-      const bgAc = new AbortController()
-      bgControllerRef.current = bgAc
-
-      try {
-        while (getQueueLength() > 0 && !ac.signal.aborted) {
-          const nextMsg = dequeueMessage()
-          if (!nextMsg) break
-          const result = await runTurn(nextMsg, ac.signal, bgAc.signal)
-          // If the turn was backgrounded, stop processing the queue. The
-          // background loop is running independently with its forked context.
-          if (result && (result as any).backgrounded) {
-            break
-          }
-        }
-      } catch (err: unknown) {
-        if (!ac.signal.aborted) {
-          const msg = `Error: ${err instanceof Error ? err.message + '\n' + (err.stack || '').split('\n').slice(0, 5).join('\n') : String(err)}`
-          setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
-        }
-      } finally {
-        bgControllerRef.current = null
-        const remaining = streamingRef.current
-        if (remaining) {
-          setMessages(msgs => [...msgs, { id: nextId(), role: 'agent', content: remaining }])
-        }
-        streamingRef.current = ''
-        setStreamingText('')
-        abortControllerRef.current = null
-        isProcessingRef.current = false
-        setIsProcessing(false)
-        setStatus('')
-      }
-    }
+    processQueue()
     // 已在处理中 → 队列中的消息会被 runAgentLoopStream 的 drainQueue 自动消费
   }
+
+  /**
+   * processQueue — 启动处理循环，从消息队列消费用户输入。
+   *
+   * 提取为独立函数，两个调用来源：
+   *   1. handleSubmit — 用户提交输入后
+   *   2. mailbox polling — idle 态检测到 teammate 来信后自动触发
+   */
+  const processQueue = useCallback(async () => {
+    if (isProcessingRef.current || getQueueLength() === 0) return
+
+    isProcessingRef.current = true
+    setIsProcessing(true)
+
+    setTurnTools([])
+    setStatus('thinking...')
+    streamingRef.current = ''
+    setStreamingText('')
+
+    const ac = new AbortController()
+    abortControllerRef.current = ac
+    const bgAc = new AbortController()
+    bgControllerRef.current = bgAc
+
+    try {
+      while (getQueueLength() > 0 && !ac.signal.aborted) {
+        const nextMsg = dequeueMessage()
+        if (!nextMsg) break
+        const result = await runTurn(nextMsg, ac.signal, bgAc.signal)
+        if (result && (result as any).backgrounded) {
+          break
+        }
+      }
+    } catch (err: unknown) {
+      if (!ac.signal.aborted) {
+        const msg = `Error: ${err instanceof Error ? err.message + '\n' + (err.stack || '').split('\n').slice(0, 5).join('\n') : String(err)}`
+        setMessages(msgs => [...msgs, { id: nextId(), role: 'system', content: msg }])
+      }
+    } finally {
+      bgControllerRef.current = null
+      const remaining = streamingRef.current
+      if (remaining) {
+        setMessages(msgs => [...msgs, { id: nextId(), role: 'agent', content: remaining }])
+      }
+      streamingRef.current = ''
+      setStreamingText('')
+      abortControllerRef.current = null
+      isProcessingRef.current = false
+      setIsProcessing(false)
+      setStatus('')
+    }
+  }, [runTurn, getQueueLength, dequeueMessage, setMessages, setTurnTools, setStatus, setStreamingText, nextId])
+
+  // ── 邮箱轮询（idle 态检测 teammate 来信） ──────────────────────────────
+  // Claude Code 的 Mailbox 是 in-memory signal-driven 的，teammate 同进程运行，
+  // send() 时直接 emit signal → React 自动 re-render。myagent 的 teammate 是独立
+  // 进程，通过文件系统邮箱通信，因此需要在 TUI idle 时轮询文件目录。
+  //
+  // 轮询仅在 idle（非处理中 + chat 模式 + main 视图）时激活，避免在处理过程中
+  // 重复注入邮件（处理中的 drainMailbox 回调已覆盖该场景）。
+  useEffect(() => {
+    if (isProcessing || inputMode !== 'chat' || appMode !== 'main') return
+
+    const POLL_INTERVAL_MS = 2000
+    let lastCheckCount = 0
+
+    const timer = setInterval(() => {
+      // 重新检查状态：如果自上次 tick 后用户开始处理，跳过
+      if (isProcessingRef.current || inputMode !== 'chat' || appMode !== 'main') return
+
+      const mails = Mailbox.list('main')
+      if (mails.length === 0 || mails.length === lastCheckCount) return
+
+      // 有新邮件：格式化、标记已读、入队、触发处理
+      lastCheckCount = 0 // 重置计数（邮件将被标记已读）
+      const formatted = mails.map(formatMail).join('\n\n---\n\n')
+      for (const m of mails) Mailbox.markRead('main', m.id)
+
+      // 注入系统消息以通知用户
+      setMessages(prev => [...prev, {
+        id: `mail-${Date.now()}`,
+        role: 'system',
+        content: `📬 [Teammate mail — ${mails.length} unread]\n\n${formatted}`,
+      }])
+
+      // 将邮件内容入队并触发处理循环
+      enqueueUserMessage(
+        `[New Mail — ${mails.length} unread from teammates]\n\n${formatted}`
+      )
+      processQueue()
+    }, POLL_INTERVAL_MS)
+
+    return () => clearInterval(timer)
+  }, [isProcessing, inputMode, appMode, enqueueUserMessage, processQueue, setMessages])
 
   // ── 消息渲染 ────────────────────────────────────────────────────────
   // Rendering moved to MessageRow / DiffView components.

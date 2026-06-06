@@ -24,7 +24,9 @@ function isSimilar(a: string, b: string): boolean {
   return false
 }
 
-const EXTRACT_MODEL = 'claude-haiku-4-5'
+// DeepSeek V4 Flash：便宜、快，适合记忆提取/合并这类轻量任务。
+// createClient() 实际走 settings-using-deepseek.json → DeepSeek 兼容 API。
+const EXTRACT_MODEL = 'deepseek-v4-flash'
 
 const EXTRACT_SYSTEM_PROMPT = `你是记忆抽取助手。从一轮对话中提取值得长期记住的信息。
 

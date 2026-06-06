@@ -45,11 +45,32 @@ export interface RunAgentOptions {
    */
   drainAttachments?: () => string
   /**
+   * Leader 邮箱 drain 回调：每轮工具执行之后调用。
+   * 扫描主 agent 邮箱中的未读邮件（teammate 发来的 result/status 等），
+   * 格式化为文本注入 LLM 上下文。
+   * 返回非空字符串时推入 messages[]。
+   *
+   * 调用点：与 drainQueue 相同
+   */
+  drainMailbox?: () => string | undefined
+  /**
    * 后台信号：当此 signal 触发时（aborted），当前 loop 执行 handoff：
    * fork messages、收尾、返回 backgrounded=true。
    * 与 signal（中断信号）互相独立，可同时存在。
    */
   backgroundSignal?: AbortSignal
+
+  /**
+   * 长期存活模式：当 stop_reason != 'tool_use' 且所有 drain 返回空时，
+   * 不 break，而是调用 waitForEvent 挂起等待新事件。
+   * 适用场景：teammate worker 需要长期轮询邮箱等待用户/leader 消息。
+   */
+  keepAlive?: boolean
+  /**
+   * keepAlive 模式下的事件等待回调。返回非空字符串时注入 messages 并 continue；
+   * 返回 undefined 时 break 退出（收到 close 或 signal abort）。
+   */
+  waitForEvent?: () => Promise<string | undefined>
 
   /**
    * 每次 LLM API 调用前触发（仅观察，不阻断）。
@@ -163,7 +184,8 @@ export async function runAgentLoopStream(
   const {
     client, model, system, tools, messages, maxTurns = 20,
     executeTool, onText, onTurnEnd, onToolStart, onToolEnd, onUsage, signal, parallelSafeTools,
-    onTurnToolReset, drainQueue, drainAttachments, backgroundSignal, onLLMRequest,
+    onTurnToolReset, drainQueue, drainAttachments, drainMailbox, backgroundSignal,
+    keepAlive, waitForEvent, onLLMRequest,
   } = opts
 
   // input / cacheRead / cacheWrite are PER-REQUEST snapshots (the API already counts
@@ -301,6 +323,26 @@ export async function runAgentLoopStream(
           continue
         }
       }
+      // DRAIN POINT 2c: 邮箱 — 确保结束前也查收
+      if (drainMailbox) {
+        const mailText = drainMailbox()
+        if (mailText) {
+          messages.push({ role: 'user', content: mailText })
+          continue
+        }
+      }
+
+      // ── keepAlive：长期存活 worker（如 teammate）不退出，等待异步事件 ──
+      if (keepAlive && waitForEvent && !signal?.aborted) {
+        console.log(`[queryLoop] turn ${turn}: keepAlive — waiting for event...`)
+        const eventText = await waitForEvent()
+        if (eventText) {
+          messages.push({ role: 'user', content: eventText })
+          continue
+        }
+        // waitForEvent 返回 undefined → 正常退出（close 已处理或 signal abort）
+        console.log(`[queryLoop] exit at turn ${turn}: keepAlive — no more events`)
+      }
 
       if (response.stop_reason !== 'end_turn') {
         console.log(`[queryLoop] exit at turn ${turn}: stop_reason=${response.stop_reason}`)
@@ -338,6 +380,13 @@ export async function runAgentLoopStream(
       const attText = drainAttachments()
       if (attText) {
         messages.push({ role: 'user', content: attText })
+      }
+    }
+    // DRAIN POINT 1c: 邮箱 — 自动查收 teammate 发来的邮件
+    if (drainMailbox) {
+      const mailText = drainMailbox()
+      if (mailText) {
+        messages.push({ role: 'user', content: mailText })
       }
     }
 

@@ -15,7 +15,7 @@
 
 import EventEmitter from 'events'
 
-export type TeammateTaskStatus = 'running' | 'idle'
+export type TeammateTaskStatus = 'running' | 'idle' | 'completed' | 'failed' | 'killed'
 
 export interface TeammateTaskInfo {
   /** teammate 的 agent_id（即 mailbox id） */
@@ -34,6 +34,10 @@ export interface TeammateTaskInfo {
   startTime: number
   /** 最后活跃时间 */
   lastActivity: number
+  /** bgManager 中的 taskId（关联后台任务） */
+  bgTaskId?: string
+  /** 独立 transcript 文件路径（供 TeammateConversationView 重建对话） */
+  transcriptPath?: string
 }
 
 class TaskRegistry extends EventEmitter {
@@ -45,6 +49,8 @@ class TaskRegistry extends EventEmitter {
     teamName?: string
     role: string
     toolUseCount?: number
+    bgTaskId?: string
+    transcriptPath?: string
   }): TeammateTaskInfo {
     const now = Date.now()
     const task: TeammateTaskInfo = {
@@ -56,6 +62,8 @@ class TaskRegistry extends EventEmitter {
       unreadCount: 0,
       startTime: now,
       lastActivity: now,
+      bgTaskId: info.bgTaskId,
+      transcriptPath: info.transcriptPath,
     }
     this.tasks.set(info.agentId, task)
     this.emit('change', this.list())
@@ -63,7 +71,7 @@ class TaskRegistry extends EventEmitter {
   }
 
   /** 更新 teammate 状态（部分字段）。只传需要的字段即可。 */
-  update(agentId: string, patch: Partial<Pick<TeammateTaskInfo, 'status' | 'toolUseCount' | 'unreadCount' | 'role' | 'teamName'>>): void {
+  update(agentId: string, patch: Partial<Pick<TeammateTaskInfo, 'status' | 'toolUseCount' | 'unreadCount' | 'role' | 'teamName' | 'transcriptPath'>>): void {
     const task = this.tasks.get(agentId)
     if (!task) return
     Object.assign(task, patch, { lastActivity: Date.now() })

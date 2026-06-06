@@ -13,7 +13,7 @@ const SYSTEM = `你是一个团队的 leader（coordinator）。你的工作模�
    - 这是 leader 专用工具，内部已自动绑定 leader_id 并强制后台执行。
    - tools 用逗号分隔，从主 toolRegistrar 中选（如 "read_file,write_file,bash"）。
    - peers 可选，传入逗号分隔的其他队友 id，让它们能直接协作（如 generator 把代码发给 verifier 验证）。
-4. 启动后用 send_mail (kind=task) 给每个 teammate 投递它的初始任务。
+4. 启动时**务必使用 task 参数**把初始任务预投递到 teammate 邮箱（start_teammate 内部会先写邮箱再启动 worker，避免 race condition）。后续追加任务再用 send_mail (kind=task)。
 
 ## 协调循环
 
@@ -32,7 +32,7 @@ const SYSTEM = `你是一个团队的 leader（coordinator）。你的工作模�
 
 - 你自己不写代码、不读文件、不跑命令；所有实际工作都交给 teammate。你的工具集只有 start_teammate / send_mail / check_mail。
 - 不要并发对同一 teammate 派多个任务，等它的 result 邮件回来再派下一个（同一邮箱按顺序消费）。
-- teammate 启动后必须用 send_mail 给它发 kind=task 才会有事干，光启动不会自己开始。
+- 初始任务通过 start_teammate 的 task 参数预投递；后续任务通过 send_mail (kind=task) 派发。
 - 收尾必须给每个 teammate 发 close，否则它们会一直占用后台 slot。
 
 ## Guidelines
@@ -66,7 +66,7 @@ export const leaderAgent: AgentDefinition = {
   },
   formatUserMessage: (args) => {
     const taskDesc = String(args.task ?? '')
-    return `复杂任务：${taskDesc}\n\n请按 leader 协议完成它：拆任务 → 用 start_teammate 启动 teammate → 派任务（send_mail）→ 收结果循环（check_mail pop）→ 收尾（close + 总结）。`
+    return `复杂任务：${taskDesc}\n\n请按 leader 协议完成它：拆任务 → 用 start_teammate 启动 teammate（带上 task 参数预投递初始任务）→ 收结果循环（check_mail pop）→ 后续派任务（send_mail）→ 收尾（close + 总结）。`
   },
   extraTools: (ctx, args) => {
     const selfId = String(args.leader_id ?? 'leader')

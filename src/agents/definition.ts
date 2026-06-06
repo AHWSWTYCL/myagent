@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { Tool } from '../tools/tool.js'
 import { ToolRegistrar } from '../tools/toolregistrar.js'
+import type { TranscriptRecorder } from '../utils/transcript.js'
 
 export interface AgentRunContext {
   /** 调用方 agent 名（"main" 表示主 agent；其他值表示 agent 调 agent） */
@@ -33,6 +34,15 @@ export interface AgentRunContext {
   onSubAgentProgress?: (name: string, toolUseCount: number, tokenCount: number, lastActivity?: string) => void
   /** 可选的 AbortSignal，用于取消正在运行的 sub-agent */
   signal?: AbortSignal
+  /**
+   * 该 agent 专属的 TranscriptRecorder（独立 session）。
+   * 不设则使用主 recorder（同步 sub-agent 场景），设为独立实例即每个 agent 一个 transcript。
+   */
+  transcriptRecorder?: TranscriptRecorder
+  /** 用于 transcript 的 agentId（不设则 fallback 到 def.name） */
+  agentId?: string
+  /** 用于 transcript 的 parentAgentId（不设则 fallback 到 ctx.source） */
+  parentAgentId?: string
 }
 
 /** Agent 接收的参数 schema 暴露给主 LLM */

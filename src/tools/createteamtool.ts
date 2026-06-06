@@ -21,7 +21,7 @@ export class CreateTeamTool extends Tool {
       'Create a named team (a coordination "room" for leader + teammates).',
       'A team is a file-based grouping stored at ~/.myagent/teams/<team_name>/team.json.',
       'After creating a team, teammate workers can be added via start_teammate (with team_name parameter) or by calling agent(agent="teammate", team_name="...", ...).',
-      'The team manifest tracks: name, leader_id, description, and member list.',
+      'The team manifest tracks: name, leader_id (auto-set to main agent), description, and member list.',
       'Use list_team to see members, disband_team to clean up.',
     ].join(' ')
   }
@@ -31,7 +31,6 @@ export class CreateTeamTool extends Tool {
     return z.object({
       team_name: z.string().regex(nameRe, 'Team name must be 1-64 chars, alphanumeric + _ - .').describe('Unique team name (1-64 chars, alphanumeric + _ - .)'),
       description: z.string().optional().describe('Optional description of what this team does'),
-      leader_id: z.string().optional().describe('Leader agent id. If omitted, defaults to the calling agent\'s id. Typically "leader" or a custom id.'),
     })
   }
 
@@ -51,14 +50,16 @@ export class CreateTeamTool extends Tool {
   async execute(args: {
     team_name: string
     description?: string
-    leader_id?: string
   }): Promise<string> {
-    const { team_name, description, leader_id } = args
+    const { team_name, description } = args
 
     if (TeamManager.exists(team_name)) {
       const existing = TeamManager.get(team_name)!
       return `Team "${team_name}" already exists (created ${existing.created_at}, ${existing.members.length} members). Use it directly or disband first.`
     }
+
+    // leader_id 不暴露给 LLM，内部固定为 "main"（主 agent 唯一身份）
+    const leader_id = 'main'
 
     const manifest = TeamManager.create({
       name: team_name,
@@ -70,7 +71,7 @@ export class CreateTeamTool extends Tool {
     return [
       `Team "${team_name}" created.`,
       `Path: ~/.myagent/teams/${team_name}/team.json`,
-      `Leader: ${leader_id ?? '(not set)'}`,
+      `Leader: ${leader_id}`,
       descLine,
       '',
       'Next: spawn teammates with start_teammate and team_name parameter, or use agent(agent="teammate", team_name="' + team_name + '", ...).',

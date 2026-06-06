@@ -1,7 +1,10 @@
 import { createClient } from '../client.js'
 import { readAllCategoriesForRecall } from './memory.js'
 
-const RECALL_MODEL = 'claude-haiku-4-5'
+// 记忆召回使用 DeepSeek V4 Flash（便宜、快，$0.14/M input）。
+// createClient() 走 settings-using-deepseek.json → DeepSeek Anthropic 兼容 API，
+// 所以模型名必须是 DeepSeek 支持的，不能用 Claude 模型名。
+const RECALL_MODEL = 'deepseek-v4-flash'
 
 const RECALL_SYSTEM_PROMPT = `你是一个记忆召回助手。你的任务是根据用户的当前 query，从历史记忆中筛选出最相关的部分。
 
