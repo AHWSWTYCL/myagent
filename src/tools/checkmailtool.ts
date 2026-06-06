@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { Mailbox, type MailKind, formatMail } from '../mailbox/mailbox.js'
+import { taskRegistry } from '../team/taskRegistry.js'
 
 const KINDS: MailKind[] = ['task', 'result', 'status', 'close', 'permission']
 
@@ -63,11 +64,32 @@ export class CheckMailTool extends Tool {
     const mode = args.mode ?? 'peek'
     if (mode === 'pop') {
       const m = Mailbox.popFirst(this.selfId, { kind: args.kind, from: args.from })
-      if (!m) return '(empty)'
+      if (!m) {
+        // 邮箱为空 → 如果注册在 taskRegistry 中，标记为 idle
+        if (taskRegistry.get(this.selfId)) {
+          taskRegistry.update(this.selfId, { status: 'idle' })
+        }
+        return '(empty)'
+      }
+      // 收到邮件 → 更新活跃状态和未读数
+      if (taskRegistry.get(this.selfId)) {
+        const remaining = Mailbox.list(this.selfId).length
+        taskRegistry.update(this.selfId, { status: 'running', unreadCount: remaining })
+      }
       return formatMail(m)
     }
     const list = Mailbox.list(this.selfId, { kind: args.kind, from: args.from })
-    if (list.length === 0) return '(empty)'
+    if (list.length === 0) {
+      // peek 也是空 → idle
+      if (taskRegistry.get(this.selfId)) {
+        taskRegistry.update(this.selfId, { status: 'idle' })
+      }
+      return '(empty)'
+    }
+    // 有未读邮件 → 更新未读数
+    if (taskRegistry.get(this.selfId)) {
+      taskRegistry.update(this.selfId, { unreadCount: list.length })
+    }
     const limit = args.limit ?? 10
     const slice = list.slice(0, limit)
     const head = `Found ${list.length} mail(s) (showing ${slice.length}). Use mode=pop to consume the earliest.`

@@ -83,7 +83,7 @@ export async function runAgent(
   // 注意：当 advisorClient 不可用时回退到主 client，model 也必须跟着回退，
   // 否则会用 Claude 模型名去请求 DeepSeek API，导致静默失败。
   const useAdvisorClient = def.name === 'advisor' && ctx.advisorClient
-  const client = useAdvisorClient ? ctx.advisorClient : ctx.client
+  const client = useAdvisorClient ? (ctx.advisorClient ?? ctx.client) : ctx.client
   const model = useAdvisorClient
     ? (typeof def.model === 'function' ? def.model() : (def.model ?? modelConfig.getCurrent()))
     : modelConfig.getCurrent()

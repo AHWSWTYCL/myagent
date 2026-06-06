@@ -80,6 +80,7 @@ import { MCPManager } from './mcp/mcpmanager.js'
 import { handleMCPCommand } from './commands/mcpcommand.js'
 import { todoManager } from './todos/todomanager.js'
 import { attachmentQueue } from './attachment/queue.js'
+import { taskRegistry } from './team/taskRegistry.js'
 import {
   saveBackgroundResult,
   buildBgNotification,
@@ -116,6 +117,8 @@ toolRegistrar.registerTool(new (await import('./tools/asktool.js')).AskTool(prom
 toolRegistrar.registerTool(new (await import('./tools/todoPlannerTool.js')).TodoPlannerTool())
 toolRegistrar.registerTool(new (await import('./tools/todoUpdateTool.js')).TodoUpdateTool())
 toolRegistrar.registerTool(new (await import('./tools/createteamtool.js')).CreateTeamTool())
+toolRegistrar.registerTool(new (await import('./tools/sendmailtool.js')).SendMailTool('main'))
+toolRegistrar.registerTool(new (await import('./tools/checkmailtool.js')).CheckMailTool('main'))
 
 // ── Init agent registry & unified agent tool ─────────────────────────────────
 const { AgentRegistry } = await import('./agents/registry.js')
@@ -299,6 +302,11 @@ bridge.on('autoModeChange', (enabled: boolean) => {
 // ── Todo Manager → Bridge ─────────────────────────────────────────────────
 todoManager.on('update', (snapshot) => {
   bridge.emitTodoPlanUpdate(snapshot)
+})
+
+// ── Task Registry → Bridge ────────────────────────────────────────────────
+taskRegistry.on('change', (tasks) => {
+  bridge.emitTeammateTasks(tasks)
 })
 
 // ── ! 命令：执行 bash / !mcp 并推入 messages (Claude Code 模式) ───
@@ -515,11 +523,11 @@ export async function runTurn(
   agentTool.setSignal(signal)
 
   try {
-    messages.push({ role: 'user', content: input as any })
+    messages.push({ role: 'user', content: input } as Anthropic.MessageParam)
 
     // Transcript: set main agent context + record user input
     transcriptRecorder.pushAgentContext('main', null)
-    transcriptRecorder.recordUserInput(input)
+    transcriptRecorder.recordUserInput(input as string | Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam | Anthropic.ToolUseBlockParam | Anthropic.ToolResultBlockParam>)
 
     // Recall once per user input (not per inner turn)
     const recallText = extractRecallText(input as string | Array<ContentBlockParam>)

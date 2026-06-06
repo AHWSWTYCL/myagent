@@ -4,6 +4,7 @@ import type { DiffLine } from '../tools/edittool.js'
 import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRole, PermissionEvent, QuestionEvent, UsageStats } from './types.js'
 import type { MCPServerInfo } from '../mcp/mcpmanager.js'
 import type { TodoPlanSnapshot } from '../todos/todo.js'
+import type { TeammateTaskInfo } from '../team/taskRegistry.js'
 
 /**
  * Sub-agent task state exposed by bridge events to the TUI panel.
@@ -185,5 +186,12 @@ export class TuiBridge extends EventEmitter {
   /** Todo plan 创建、任务状态变更时发出。snapshot 为 null 表示 plan 已清空。 */
   emitTodoPlanUpdate(snapshot: TodoPlanSnapshot | null) {
     this.emit('todoPlanUpdate', snapshot)
+  }
+
+  // ── Teammate task events ───────────────────────────────────────────
+
+  /** Teammate 任务注册表变更时发出。tasks 为当前全部 teammate 列表。 */
+  emitTeammateTasks(tasks: TeammateTaskInfo[]) {
+    this.emit('teammateTasks', tasks)
   }
 }

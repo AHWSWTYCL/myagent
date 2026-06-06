@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool.js'
 import { Mailbox, type MailKind } from '../mailbox/mailbox.js'
+import { taskRegistry } from '../team/taskRegistry.js'
 
 const KINDS: MailKind[] = ['task', 'result', 'status', 'close', 'permission']
 
@@ -63,6 +64,16 @@ export class SendMailTool extends Tool {
       body: args.body,
       meta: args.meta,
     })
+    // 如果调用方在 taskRegistry 中（即是一个 teammate），更新其状态
+    if (taskRegistry.get(this.selfId)) {
+      // 发 close 则标记为 idle（即将退出）
+      if (args.kind === 'close') {
+        taskRegistry.update(this.selfId, { status: 'idle' })
+      } else {
+        // 发了邮件 = 活跃
+        taskRegistry.update(this.selfId, { status: 'running' })
+      }
+    }
     return `Mail ${m.id} sent to ${args.to}.`
   }
 }

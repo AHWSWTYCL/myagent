@@ -7,6 +7,7 @@ import { runAgent } from '../agents/runner.js'
 import type { TranscriptRecorder } from '../utils/transcript.js'
 import { bgManager } from '../utils/backgroundManager.js'
 import { saveBackgroundResult } from '../utils/backgroundStorage.js'
+import { taskRegistry } from '../team/taskRegistry.js'
 import path from 'path'
 
 interface AgentToolInput {
@@ -207,6 +208,18 @@ export class AgentTool extends Tool {
   ): string {
     const { id: taskId, abortController } = bgManager.start(agentDescription)
 
+    // ── 注册 teammate 到 taskRegistry（供 BackgroundTasksDialog 查询） ──
+    const registryAgentId = def.name === 'teammate'
+      ? String(args.agent_id ?? taskId)
+      : undefined
+    if (registryAgentId) {
+      taskRegistry.register({
+        agentId: registryAgentId,
+        teamName: args.team_name as string | undefined,
+        role: String(args.role ?? 'worker'),
+      })
+    }
+
     // 后台执行的上下文：大部分 TUI 回调改为 bg 兼容版
     const bgCtx = {
       source: args.source ?? 'main',
@@ -230,10 +243,10 @@ export class AgentTool extends Tool {
 
     // 不 await，后台执行
     runAgent(def, args, bgCtx)
-      .then(result => this.finishBackgroundAgent(taskId, agentName, result, undefined))
+      .then(result => this.finishBackgroundAgent(taskId, agentName, result, undefined, registryAgentId))
       .catch(err => {
         const msg = err instanceof Error ? err.message : String(err)
-        this.finishBackgroundAgent(taskId, agentName, '', msg)
+        this.finishBackgroundAgent(taskId, agentName, '', msg, registryAgentId)
       })
 
     return `[Background] Running agent "${agentName}" in background (${taskId}). It will push a notification when done.`
@@ -334,6 +347,7 @@ export class AgentTool extends Tool {
     agentName: string,
     text: string,
     error: string | undefined,
+    registryAgentId?: string,
   ): void {
     // Transcript: record end + pop bg context
     if (error) {
@@ -342,6 +356,12 @@ export class AgentTool extends Tool {
       this.transcriptRecorder?.recordSubAgentEnd(agentName)
     }
     this.transcriptRecorder?.popAgentContext()
+
+    // ── 从 taskRegistry 移除已完成的 teammate ──
+    // 使用注册时的 agentId（而非 agentName），确保能正确移除。
+    if (registryAgentId) {
+      taskRegistry.remove(registryAgentId)
+    }
 
     if (error) {
       // 失败

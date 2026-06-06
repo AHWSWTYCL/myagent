@@ -27,8 +27,12 @@ import { TodoPanel } from './TodoPanel.js'
 import type { TodoPlanSnapshot } from '../todos/todo.js'
 import { TODO_STATUS_ICON } from '../todos/todo.js'
 import { ttsService } from '../voice/tts.js'
+import { BackgroundTasksDialog } from './BackgroundTasksDialog.js'
+import { TeammateConversationView } from './TeammateConversationView.js'
+import type { TeammateTaskInfo } from '../team/taskRegistry.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
+type AppMode = 'main' | 'backgroundTasks' | 'teammateView'
 
 interface Props {
   bridge: TuiBridge
@@ -182,6 +186,12 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
   // ── 子 agent 实时输出（路由到 pending agent tool 的 liveOutput）────
   const [todoPlan, setTodoPlan] = useState<TodoPlanSnapshot | null>(null)
+
+  // ── Background Tasks Dialog state ───────────────────────────────────
+  const [appMode, setAppMode] = useState<AppMode>('main')
+  const [teammateTasks, setTeammateTasks] = useState<TeammateTaskInfo[]>([])
+  const [dialogSelectedIndex, setDialogSelectedIndex] = useState(0)
+  const [selectedTeammateId, setSelectedTeammateId] = useState<string | null>(null)
 
   // ── Todo plan 完成态跃迁跟踪（防重复发射静态消息） ────────────────
   const todoSnapshotEmittedRef = useRef(false)
@@ -436,6 +446,10 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
       setBackgroundCount(count)
     })
 
+    bridge.on('teammateTasks', (tasks: TeammateTaskInfo[]) => {
+      setTeammateTasks(tasks)
+    })
+
     bridge.on('todoPlanUpdate', (snapshot: TodoPlanSnapshot | null) => {
       setTodoPlan(snapshot)
 
@@ -497,8 +511,10 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   // Esc: cancels current request + stops any ongoing TTS playback
   // 注意：permission/choice 模式中 Esc 已有自己的处理（拒绝/取消），
   // 但它们和本 handler 不冲突 —— 双方都会触发，行为叠加合理。
+  // teammateView 模式下不触发，由 TeammateConversationView 自己的 useInput 处理。
   useInput((_input, key) => {
     if (!key.escape) return
+    if (appMode === 'teammateView') return
     ttsService.stop()
     if (isProcessingRef.current) {
       abortControllerRef.current?.abort()
@@ -507,6 +523,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
   // Ctrl+E: stop TTS playback only (does NOT abort agent REPL)
   useInput((input, key) => {
+    if (appMode === 'teammateView') return
     if (!key.ctrl || input !== 'e') return
     ttsService.stop()
     showHint('TTS stopped.')
@@ -516,6 +533,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   // 选 Shift+Tab 而非 Ctrl+A，因为 ink-text-input 自身已过滤 Shift+Tab，
   // 不会在输入框里误插字符，无需 hack。
   useInput((_input, key) => {
+    if (appMode === 'teammateView') return
     if (!key.tab || !key.shift) return
     const next = bridge.toggleAutoMode()
     showHint(next ? 'Auto mode ON — permissions handled by AI agent.' : 'Auto mode OFF — manual permission prompts restored.')
@@ -523,6 +541,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
   // Ctrl+O: toggle expanded view of all tool outputs (Claude Code parity).
   useInput((input, key) => {
+    if (appMode === 'teammateView') return
     if (!key.ctrl || input !== 'o') return
     setExpandAll(prev => {
       const next = !prev
@@ -533,6 +552,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
   // Ctrl+B: background the current running task (forks the agent loop).
   useInput((input, key) => {
+    if (appMode === 'teammateView') return
     if (!key.ctrl || input !== 'b') return
     if (!isProcessingRef.current) {
       showHint('No running task to background.')
@@ -541,6 +561,58 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     bgControllerRef.current?.abort()
     showHint('Task moved to background — Ctrl+O to see tool details.')
   })
+
+  // Ctrl+T: toggle Background Tasks dialog (teammate status panel).
+  useInput((input, key) => {
+    if (!key.ctrl || input !== 't') return
+    if (appMode === 'main') {
+      setAppMode('backgroundTasks')
+      setDialogSelectedIndex(0)
+    } else if (appMode === 'backgroundTasks') {
+      setAppMode('main')
+    }
+    // teammateView 模式下 Ctrl+T 无操作
+  })
+
+  // Background Tasks dialog navigation (↑/↓/Enter/f/x/Esc/←)
+  useInput((input, key) => {
+    if (appMode !== 'backgroundTasks') return
+    if (key.escape || key.leftArrow) {
+      setAppMode('main')
+      return
+    }
+    if (key.upArrow) {
+      setDialogSelectedIndex(i => Math.max(0, i - 1))
+      return
+    }
+    if (key.downArrow) {
+      setDialogSelectedIndex(i => Math.min(teammateTasks.length - 1, i + 1))
+      return
+    }
+    if (key.return) {
+      setAppMode('main')
+      return
+    }
+    if (input === 'f') {
+      const task = teammateTasks[dialogSelectedIndex]
+      if (task) {
+        setSelectedTeammateId(task.agentId)
+        setAppMode('teammateView')
+      }
+      return
+    }
+    if (input === 'x') {
+      const task = teammateTasks[dialogSelectedIndex]
+      if (task) {
+        setAppMode('main')
+        const closeMsg = `用 send_mail(kind=close, to="${task.agentId}", subject="terminated", body="Terminated by user from Background Tasks dialog.") 终止这个 teammate。`
+        enqueueUserMessage(closeMsg)
+      }
+      return
+    }
+  })
+
+  // Teammate view keyboard is now handled by TeammateConversationView's own useInput
 
   // Permission mode: ↑/↓ navigate, Enter confirm, Esc = no
   useInput((input, key) => {
@@ -701,6 +773,8 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   // ── 主要键盘处理：历史浏览 + 命令补全 ────────────────────────────────
   const hasSuggestions = suggestions.length > 0
   useInput((_input, key) => {
+    // teammateView 模式下由 TeammateConversationView 独立处理键盘
+    if (appMode === 'teammateView') return
     // 只在聊天模式、非处理状态下生效
     if (inputMode !== 'chat' || isProcessing) return
 
@@ -1172,6 +1246,34 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
         </Box>
       ) : null}
 
+      {/* Background Tasks Dialog (Ctrl+T) — modal overlay for teammate status */}
+      {appMode === 'backgroundTasks' && (
+        <BackgroundTasksDialog
+          tasks={teammateTasks}
+          selectedIndex={dialogSelectedIndex}
+          onClose={() => setAppMode('main')}
+          onKill={(agentId) => {
+            setAppMode('main')
+            const closeMsg = `用 send_mail(kind=close, to="${agentId}", subject="terminated", body="Terminated by user from Background Tasks dialog.") 终止这个 teammate。`
+            enqueueUserMessage(closeMsg)
+          }}
+          onZoomIn={(agentId) => {
+            setSelectedTeammateId(agentId)
+            setAppMode('teammateView')
+          }}
+        />
+      )}
+
+      {/* Teammate Conversation View (f key from Background Tasks) */}
+      {appMode === 'teammateView' && selectedTeammateId && (
+        <TeammateConversationView
+          teammateId={selectedTeammateId}
+          task={teammateTasks.find(t => t.agentId === selectedTeammateId)}
+          userId="main"
+          onBack={() => setAppMode('backgroundTasks')}
+        />
+      )}
+
       {/* Todo List — fixed above InputBox, not scrolling with messages */}
       <TodoPanel plan={todoPlan} />
 
@@ -1187,7 +1289,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
           customInput={choiceCustomInput}
           customValues={choiceCustomValues}
         />
-      ) : (
+      ) : appMode === 'teammateView' ? null : (
         <InputBox
           inputValue={inputValue}
           onChange={handleInputChange}

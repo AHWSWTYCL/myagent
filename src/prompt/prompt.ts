@@ -20,6 +20,8 @@ import { toolName as skillWriteName, toolDescription as skillWriteDesc } from '.
 import { toolName as todoPlanName, toolDescription as todoPlanDesc } from '../tools/todoplannerprompt.js'
 import { toolName as todoUpdateName, toolDescription as todoUpdateDesc } from '../tools/todoupdateprompt.js'
 import { toolName as createTeamName, toolDescription as createTeamDesc } from '../tools/createteamprompt.js'
+import { toolName as sendMailName, toolDescription as sendMailDesc } from '../tools/sendmailprompt.js'
+import { toolName as checkMailName, toolDescription as checkMailDesc } from '../tools/checkmailprompt.js'
 
 const TOOL_PROMPTS: [string, string][] = [
   [bashName, bashDesc],
@@ -41,6 +43,8 @@ const TOOL_PROMPTS: [string, string][] = [
   [todoPlanName, todoPlanDesc],
   [todoUpdateName, todoUpdateDesc],
   [createTeamName, createTeamDesc],
+  [sendMailName, sendMailDesc],
+  [checkMailName, checkMailDesc],
 ]
 
 /** 生成"可用工具"章节的 markdown 文本。 */
