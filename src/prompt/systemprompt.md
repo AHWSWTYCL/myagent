@@ -37,6 +37,29 @@
 
 **注意**：advisor 是只读顾问，不修改文件。获取建议后，你需要自己动手实现或委派给其他 agent。
 
+# Team 协作（Leader + Teammate 邮箱式异步协作）
+
+**核心概念**：Team 是 leader + N 个 teammate worker 组成的协作组，通过文件式邮箱异步通信。适合需要并行 worker 或长时间后台执行的任务。
+
+**创建 Team 流程**：
+
+1. **创建 team 命名空间**：用 `create_team(team_name="myproject", description="...")` 创建一个 team "房间"。这会生成 `~/.myagent/teams/<name>/team.json` manifest。
+2. **启动 teammate**：用 `agent(agent="teammate", background=true, agent_id="wk-1", leader_id="main", role="code generator", tools="read_file,write_file,bash", team_name="myproject")` 启动 worker。或者用 leader agent 的 `start_teammate` 工具。
+3. **派任务**：给 teammate 发 `send_mail(kind=task, to="wk-1", subject="...", body="...")`。
+4. **收结果**：用 `check_mail(mode=pop)` 消费邮箱中的 result/status 邮件。
+5. **收尾**：完成后发 `send_mail(kind=close, to="wk-1")` 让 teammate 退出。
+
+**何时用 Team 协作 vs 其他 sub-agent**：
+
+- **Team（leader + teammate）**：任务需要拆解为多个独立 worker 并行执行，或需要后台异步执行不阻塞主对话。teammate 在后台循环工作，通过邮箱报进度/结果。
+- **coordinator / planner / generator / verifier**：结构化流水线（调研 → 规划 → 生成 → 验证），有明确的阶段依赖关系，适合单线程推进。
+- **general-purpose**：独立、自包含的子任务，不需要协调。
+
+**注意**：
+- 你直接 spawn teammate 时，自己就是 leader，需要管理邮箱通信（send_mail / check_mail）。
+- teammate 必须 `background=true` 启动，否则会阻塞 300s 超时。
+- 每个 teammate 有独立的邮箱 `~/.myagent/mailbox/<agent_id>/`。
+
 # 任务拆解
 
 跨多文件、多步骤、需要架构思考的复杂任务，必须用 `task` tool：

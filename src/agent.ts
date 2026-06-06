@@ -115,6 +115,7 @@ toolRegistrar.registerTool(new (await import('./tools/choicetool.js')).ChoiceToo
 toolRegistrar.registerTool(new (await import('./tools/asktool.js')).AskTool(prompt => bridge.askQuestion(prompt)))
 toolRegistrar.registerTool(new (await import('./tools/todoPlannerTool.js')).TodoPlannerTool())
 toolRegistrar.registerTool(new (await import('./tools/todoUpdateTool.js')).TodoUpdateTool())
+toolRegistrar.registerTool(new (await import('./tools/createteamtool.js')).CreateTeamTool())
 
 // ── Init agent registry & unified agent tool ─────────────────────────────────
 const { AgentRegistry } = await import('./agents/registry.js')
@@ -398,6 +399,7 @@ commandRegistry.register(new SchedulerCommand())
 commandRegistry.register(new VoiceCommand())
 commandRegistry.register(new ModelCommand(qs => bridge.askChoice(qs)))
 commandRegistry.register(new AdvisorCommand(qs => bridge.askChoice(qs)))
+commandRegistry.register(new (await import('./commands/teamcommand.js')).TeamCommand(enqueueUserMessage))
 const commandParser = new CommandParser(commandRegistry)
 
 /**
@@ -750,6 +752,30 @@ if (debugOpts) {
   if (aborted) {
     collector.setError('Interrupted by SIGINT')
     logProgress.error('Interrupted by user')
+  }
+
+  // ── 可选：等所有后台任务完成（--wait-for-bg）─────────────────────────
+  // 主 turn 结束后立刻 buildResult 会丢失后台 leader/teammate 的最终输出，
+  // 因为 onBackgroundAgentResult 还没把通知 push 进 messages。
+  // 这里轮询 bgManager 直到所有 running 任务变成 terminal 状态。
+  if (debugOpts.waitForBg && debugOpts.waitForBg > 0) {
+    const waitMs = debugOpts.waitForBg * 1000
+    const deadline = Date.now() + waitMs
+    const initialRunning = bgManager.list().filter(t => t.status === 'running')
+    if (initialRunning.length > 0) {
+      logProgress.start(`Waiting for ${initialRunning.length} background task(s) (max ${debugOpts.waitForBg}s)...`)
+      while (Date.now() < deadline) {
+        const stillRunning = bgManager.list().filter(t => t.status === 'running')
+        if (stillRunning.length === 0) break
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+      const final = bgManager.list().filter(t => t.status === 'running')
+      if (final.length > 0) {
+        logProgress.error(`Timed out waiting for ${final.length} background task(s) after ${debugOpts.waitForBg}s`)
+      } else {
+        logProgress.ok('All background tasks completed')
+      }
+    }
   }
 
   // 从 messages 数组构建输出

@@ -246,6 +246,12 @@ export interface DebugOptions {
   timeout?: number
   /** 是否恢复上一次 session */
   continue: boolean
+  /**
+   * 主 turn 完成后等待所有 background task 完成再退出。
+   * 解决 leader/teammate 等"短主 turn + 长后台 sub-agent"的场景在 headless 下被截断的问题。
+   * 单位秒，默认 0（不等）。
+   */
+  waitForBg?: number
 }
 
 /**
@@ -295,6 +301,15 @@ export function parseDebugArgs(): DebugOptions | null {
       options.timeout = val
     } else if (arg === '--continue' || arg === '-c') {
       options.continue = true
+    } else if (arg === '--wait-for-bg' || arg === '-w') {
+      const next = remaining[i + 1]
+      if (next && /^\d+$/.test(next)) {
+        options.waitForBg = parseInt(next, 10)
+        i++
+      } else {
+        // 默认等 300s（覆盖一个 leader 协调多 teammate 的常见时长）
+        options.waitForBg = 300
+      }
     } else if (arg === '--help' || arg === '-h') {
       printHelp()
       process.exit(0)
@@ -329,6 +344,7 @@ Options:
   --auto-yes, -y          自动授权所有工具调用
   --output, -o <file>     将 JSON 结果写入文件（默认 stdout）
   --timeout, -t <seconds> 超时自动中断（默认不限时）
+  --wait-for-bg, -w [sec] 主 turn 结束后等所有后台任务完成再退出（默认 300s）
   --continue, -c          恢复上一次 session 的对话上下文
   --help, -h              显示帮助
 
