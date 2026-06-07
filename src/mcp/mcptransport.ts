@@ -7,6 +7,19 @@
 
 import { spawn, ChildProcess } from 'child_process'
 
+// ── stdio 日志收集 ────────────────────────────────────────────────────────────
+
+/** 模块级 sink：设置后 stdio 日志不再走 console.warn，改为回调 */
+let stdioLogSink: ((line: string) => void) | null = null
+
+/**
+ * 设置 stdio 日志回调。
+ * 传入 null 恢复默认行为（console.warn）。
+ */
+export function setStdioLogSink(sink: ((line: string) => void) | null): void {
+  stdioLogSink = sink
+}
+
 // ── 传输接口 ──────────────────────────────────────────────────────────────────
 
 export interface MCPTransport {
@@ -84,7 +97,8 @@ export class StdioTransport implements MCPTransport {
 
       // stderr — 仅做日志，不中断流程
       child.stderr?.on('data', (chunk: Buffer) => {
-        console.warn(`[mcp:stdio] ${chunk.toString('utf-8').trimEnd()}`)
+        const line = `[mcp:stdio] ${chunk.toString('utf-8').trimEnd()}`
+        if (stdioLogSink) { stdioLogSink(line) } else { console.warn(line) }
       })
 
       // 进程退出
@@ -94,7 +108,8 @@ export class StdioTransport implements MCPTransport {
         const reason = signal
           ? `killed by signal ${signal}`
           : `exited with code ${code}`
-        console.warn(`[mcp:stdio] process ${reason}`)
+        const line = `[mcp:stdio] process ${reason}`
+        if (stdioLogSink) { stdioLogSink(line) } else { console.warn(line) }
         if (!this._closing) {
           this._onClose?.()
         }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Box, Text, Static, useInput, useApp } from 'ink'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent } from './types.js'
@@ -29,6 +29,7 @@ import { BackgroundTasksDialog } from './BackgroundTasksDialog.js'
 import { TeammateConversationView } from './TeammateConversationView.js'
 import { Mailbox } from '../mailbox/mailbox.js'
 import { useAppState, useSetAppState } from '../state/AppStateProvider.js'
+import { setStdioLogSink } from '../mcp/mcptransport.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 type AppMode = 'main' | 'backgroundTasks' | 'teammateView'
@@ -158,6 +159,10 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const autoMode = useAppState(s => s.autoMode)
   // Ctrl+O toggles full output for every tool message in the chat.
   const [expandAll, setExpandAll] = useState(false)
+  // Ctrl+L toggles MCP stdio log display
+  const [showMcpStdioLogs, setShowMcpStdioLogs] = useState(false)
+  const [mcpStdioLogs, setMcpStdioLogs] = useState<string[]>([])
+  const MAX_STDIO_LOGS = 200
   const compactingState = useAppState(s => s.compactingState)
   // 临时提示条（footer 上方淡出消息），不进聊天历史
   const [transientHint, setTransientHint] = useState('')
@@ -178,6 +183,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const bgControllerRef = useRef<AbortController | null>(null) // Ctrl+B → background handoff
   const isProcessingRef = useRef(false)    // 同步版 isProcessing，避免闭包过期
   const submittingRef = useRef(false)      // 防止 handleSubmit 并发
+  const turnEndedRef = useRef(false)       // 防止 turnEnd 后的 text delta 复活 streaming
 
   const nextId = useCallback(() => String(++idCounter.current), [])
 
@@ -260,20 +266,23 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     }
 
     on('text', (delta: string) => {
+      if (turnEndedRef.current) return  // 防止 turnEnd 后迟到达的 delta 复活 streaming
       streamingRef.current += delta
       setStreamingText(streamingRef.current)
     })
 
     on('turnEnd', (text: string) => {
       if (!text) return
+      // 先标记 turnEnd + 清除动态 streaming，防止与 Static 中 agent 消息「同框双显」
+      turnEndedRef.current = true
+      streamingRef.current = ''
+      setStreamingText('')
       const entries: ChatMessage[] = [{ id: nextId(), role: 'agent', content: text }]
       if (pendingTodoSnapshotRef.current) {
         entries.unshift({ id: nextId(), role: 'system', content: pendingTodoSnapshotRef.current })
         pendingTodoSnapshotRef.current = null
       }
       setMessages(prev => [...prev, ...entries])
-      streamingRef.current = ''
-      setStreamingText('')
     })
 
     on('message', ({ role, content }: { role: ChatMessage['role']; content: string }) => {
@@ -460,6 +469,17 @@ ${memory}` }])
     setExpandAll(prev => {
       const next = !prev
       showHint(next ? 'Tool outputs expanded — Ctrl+O to collapse.' : 'Tool outputs collapsed.')
+      return next
+    })
+  })
+
+  // Ctrl+L: toggle MCP stdio log panel
+  useInput((input, key) => {
+    if (appMode === 'teammateView') return
+    if (!key.ctrl || input !== 'l') return
+    setShowMcpStdioLogs(prev => {
+      const next = !prev
+      showHint(next ? 'MCP stdio logs visible — Ctrl+L to hide.' : 'MCP stdio logs hidden.')
       return next
     })
   })
@@ -1059,6 +1079,7 @@ ${memory}` }])
 
     setTurnTools([])
     setAppState(prev => ({ ...prev, status: 'thinking...' }))
+    turnEndedRef.current = false
     streamingRef.current = ''
     setStreamingText('')
 
@@ -1182,6 +1203,19 @@ ${memory}` }])
     return unsub
   }, [mode, teammateAgentId])
 
+  // ── MCP stdio log sink ──────────────────────────────────────────────
+  // 注册全局回调，替代 console.warn 输出。
+  // sink 将日志写入环形缓冲区，Ctrl+L 控制是否在 TUI 中显示。
+  useEffect(() => {
+    setStdioLogSink((line: string) => {
+      setMcpStdioLogs(prev => {
+        const next = [...prev, line]
+        return next.length > MAX_STDIO_LOGS ? next.slice(next.length - MAX_STDIO_LOGS) : next
+      })
+    })
+    return () => setStdioLogSink(null)
+  }, [])
+
   // ── 消息渲染 ────────────────────────────────────────────────────────
   // Rendering moved to MessageRow / DiffView components.
 
@@ -1191,9 +1225,21 @@ ${memory}` }])
   // 非探索工具在 toolEnd 时已从 turnTools 移除 -> 在 Static 正常显示。
   // 探索工具不在 messages 中有 toolCall 条目 -> 过滤器不产生影响。
   // 仅在工具刚启动尚未完成（pending）的短暂窗口内有过滤效果。
-  const toolIdsInGroup = new Set(turnTools.filter(Boolean).map(t => t.id))
-  const staticMessages = messages.filter(
-    m => !(m.role === 'tool' && m.toolCall && toolIdsInGroup.has(m.id))
+  const toolIdsInGroup = useMemo(
+    () => new Set(turnTools.filter(Boolean).map(t => t.id)),
+    [turnTools],
+  )
+  const staticMessages = useMemo(
+    () => messages.filter(
+      m => !(m.role === 'tool' && m.toolCall && toolIdsInGroup.has(m.id))
+    ),
+    [messages, toolIdsInGroup],
+  )
+
+  // 动态工具区域渲染计划：避免每帧重新构建
+  const renderPlan = useMemo(
+    () => buildRenderPlan(turnTools),
+    [turnTools],
   )
 
   return (
@@ -1230,7 +1276,7 @@ ${memory}` }])
           因此不会在此区域出现再从动态"跳"到静态的过渡。 */}
       {turnTools.length > 0 ? (
         <Box flexDirection="column">
-          {buildRenderPlan(turnTools).map((item, idx) => {
+          {renderPlan.map((item, idx) => {
             if (item.type === 'summary') {
               const hasExploration = turnTools.some(t => EXPLORATION_TOOLS.has(t.name))
               if (!hasExploration) return null
@@ -1362,7 +1408,7 @@ ${memory}` }])
           onChange={handleInputChange}
           onSubmit={handleSubmit}
           isProcessing={isProcessing}
-          isQuestion={inputMode === 'question'}
+          isQuestion={false}
           questionPrompt={promptText}
           attachments={attachments}
           attachmentErrors={attachmentErrors}
@@ -1370,6 +1416,28 @@ ${memory}` }])
           selectedSuggestionIndex={selectedSuggestionIndex}
         />
       )}
+
+      {/* MCP stdio logs — toggle with Ctrl+L */}
+      {showMcpStdioLogs && mcpStdioLogs.length > 0 ? (
+        <Box
+          flexDirection="column"
+          borderStyle="single"
+          borderColor="yellow"
+          paddingX={1}
+          marginX={1}
+          marginTop={0}
+          maxHeight={8}
+          overflow="hidden"
+        >
+          <Box>
+            <Text color="yellow" bold>MCP stdio logs</Text>
+            <Text color="gray" dimColor> ({mcpStdioLogs.length} lines, Ctrl+L to hide)</Text>
+          </Box>
+          {mcpStdioLogs.slice(-8).map((line, i) => (
+            <Text key={i} color="gray" dimColor>{line}</Text>
+          ))}
+        </Box>
+      ) : null}
 
       <Footer
         isProcessing={isProcessing}

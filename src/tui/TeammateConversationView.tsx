@@ -44,11 +44,18 @@ export function TeammateConversationView({ teammateId, task, userId, onBack }: T
   const hasTranscript = !!task?.transcriptPath
 
   // ── Transcript 加载 + 轮询 ──────────────────────────────────────────
+  const lastTranscriptRef = useRef<string>('')
   const refreshTranscript = useCallback(() => {
     if (!task?.transcriptPath) return
     try {
       const events = loadTranscriptEvents(task.transcriptPath)
-      setTranscriptMessages(transcriptToDisplayMessages(events, teammateId))
+      const newMessages = transcriptToDisplayMessages(events, teammateId)
+      // 用 JSON 序列化比较避免无变化时重复 setState 触发渲染
+      const key = JSON.stringify(newMessages)
+      if (key !== lastTranscriptRef.current) {
+        lastTranscriptRef.current = key
+        setTranscriptMessages(newMessages)
+      }
     } catch {
       // transcript 可能还在写入中，忽略 transient 错误
     }
@@ -61,6 +68,7 @@ export function TeammateConversationView({ teammateId, task, userId, onBack }: T
   }, [refreshTranscript])
 
   // ── Mailbox（fallback：只在没有 transcript 时使用）──────────────────
+  const lastIncomingRef = useRef<string>('')
   const refreshIncoming = useCallback(() => {
     if (hasTranscript) return
     try {
@@ -72,7 +80,12 @@ export function TeammateConversationView({ teammateId, task, userId, onBack }: T
         body: m.body,
         timestamp: new Date(m.created_at).getTime(),
       }))
-      setIncomingMessages(display)
+      // 用 JSON 序列化比较避免无变化时重复 setState 触发渲染
+      const key = JSON.stringify(display)
+      if (key !== lastIncomingRef.current) {
+        lastIncomingRef.current = key
+        setIncomingMessages(display)
+      }
     } catch {
       // mailbox 可能还不存在，忽略
     }
