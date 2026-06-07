@@ -259,8 +259,8 @@ function cleanupTranscript(): void {
   try { transcriptRecorder.closeSession() } catch { /* ignore */ }
 }
 process.on('beforeExit', cleanupTranscript)
-process.on('SIGINT', () => { cleanupTranscript(); process.exit(0) })
-process.on('SIGTERM', () => { cleanupTranscript(); process.exit(0) })
+process.on('SIGINT', () => { cleanupTranscript(); Mailbox.stopWatching('main'); process.exit(0) })
+process.on('SIGTERM', () => { cleanupTranscript(); Mailbox.stopWatching('main'); process.exit(0) })
 
 // AgentTool 需要 client / executeTool / emitLine / transcriptRecorder —— 这些此时才有，在这里注入
 import type { BackgroundAgentResult } from './tools/agenttool.js'
@@ -846,6 +846,10 @@ if (debugOpts) {
   process.exit(result.status === 'error' ? 1 : 0)
 } else {
   // ── 正常 TUI 模式 ─────────────────────────────────────────────────────
+  // 启动主 agent 邮箱监听（轮询模式），使 background teammate 的跨进程邮件
+  // 能被及时感知，通过 Mailbox.subscribe → MessageQueue → processQueue 链路自动处理
+  Mailbox.startWatching('main')
+
   const toolRenderMap = toolRegistrar.buildToolRenderMap()
   render(React.createElement(
     AppStateProvider,

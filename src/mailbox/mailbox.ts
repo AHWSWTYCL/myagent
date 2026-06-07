@@ -5,7 +5,9 @@
  *   - 每个 agent 一个目录 `~/.myagent/mailbox/<agent_id>/`
  *   - 每封信一个 .json 文件，文件名 `<timestamp>-<rand>.json`，自然按时序排序
  *   - 已读邮件移到子目录 `read/`，不删除（便于排查）
- *   - 读写都是单文件原子操作，跨进程安全
+ *   - 写入：先写 .tmp 再 rename 到 .json（原子写，防半读）
+ *   - 跨进程感知：通过轮询扫描 inbox 目录实现（`startWatching`）
+ *   - 去重：全局 `deliveredMailIds` Set，所有投递路径都走 `deliverIfNew()`
  *
  * 邮件 kind:
  *   - task: leader → teammate 派任务
@@ -35,8 +37,27 @@ export interface Mail {
   created_at: string
 }
 
+export interface WatchOptions {
+  /** 轮询间隔（毫秒），默认 1000 */
+  intervalMs?: number
+}
+
 const MAILBOX_BASE = path.join(os.homedir(), '.myagent', 'mailbox')
 const mailboxEvents = new EventEmitter()
+
+// ── 跨进程邮件投递去重 ─────────────────────────────────────────────────
+// 所有投递路径（in-process send、轮询扫描）都走 deliverIfNew()，
+// 用 mail.id 去重，保证同一封邮件只 emit 一次。
+const deliveredMailIds = new Set<string>()
+
+function deliverIfNew(mail: Mail): void {
+  if (deliveredMailIds.has(mail.id)) return
+  deliveredMailIds.add(mail.id)
+  mailboxEvents.emit(mailboxEvent(mail.to), mail)
+}
+
+// ── 轮询定时器管理 ─────────────────────────────────────────────────────
+const pollingTimers = new Map<string, ReturnType<typeof setInterval>>()
 
 function mailboxEvent(agentId: string): string {
   return `mail:${sanitize(agentId)}`
@@ -65,8 +86,41 @@ function genMailId(): string {
   return `${ts}-${rand}`
 }
 
+/**
+ * 扫描 agentId 的 inbox 目录，将新邮件投递给本地订阅者。
+ * 模块内部函数，不对外暴露。
+ */
+function scanAndDeliver(agentId: string): void {
+  ensureDirs(agentId)
+  const dir = mailboxDir(agentId)
+  let entries: string[]
+  try {
+    entries = fs.readdirSync(dir)
+  } catch {
+    return // 目录不存在或不可读，跳过
+  }
+  for (const f of entries) {
+    if (!f.endsWith('.json')) continue
+    const filePath = path.join(dir, f)
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8')
+      const mail = JSON.parse(raw) as Mail
+      deliverIfNew(mail)
+    } catch {
+      // 文件可能还在写入中（.tmp 没 rename 完）、损坏、或已被移动
+      // 跳过，下一轮轮询会重试
+    }
+  }
+}
+
 export class Mailbox {
-  /** 给目标 agent 发一封信，写到他的 inbox 目录。返回邮件 id。 */
+  /**
+   * 给目标 agent 发一封信，写到他的 inbox 目录。
+   *
+   * 采用原子写：先写 .json.tmp，再 rename 到 .json。
+   * 防止轮询扫描读到半写文件。
+   * 返回完整的 Mail 对象。
+   */
   static send(opts: {
     from: string
     to: string
@@ -86,18 +140,34 @@ export class Mailbox {
       meta: opts.meta,
       created_at: new Date().toISOString(),
     }
-    const file = path.join(mailboxDir(opts.to), `${mail.id}.json`)
-    fs.writeFileSync(file, JSON.stringify(mail, null, 2), 'utf-8')
-    mailboxEvents.emit(mailboxEvent(opts.to), mail)
+    // 原子写：先写 .tmp 再 rename → 轮询扫描只认 .json，不会读到半成品
+    const tmpFile = path.join(mailboxDir(opts.to), `${mail.id}.json.tmp`)
+    const finalFile = path.join(mailboxDir(opts.to), `${mail.id}.json`)
+    fs.writeFileSync(tmpFile, JSON.stringify(mail, null, 2), 'utf-8')
+    fs.renameSync(tmpFile, finalFile)
+    // 本进程内直接投递（快路径），跨进程靠轮询扫描
+    deliverIfNew(mail)
     return mail
   }
 
+  /**
+   * 订阅 agentId 的邮件到达事件。
+   * 返回 unsubscribe 函数。
+   *
+   * 注意：此订阅覆盖两类来源：
+   *   1. 本进程 Mailbox.send() → deliverIfNew() → emit
+   *   2. 跨进程写入 → startWatching 轮询扫描 → deliverIfNew() → emit
+   */
   static subscribe(agentId: string, listener: (mail: Mail) => void): () => void {
     const event = mailboxEvent(agentId)
     mailboxEvents.on(event, listener)
     return () => mailboxEvents.off(event, listener)
   }
 
+  /**
+   * 等待 agentId 收到新邮件（单次 Promise）。
+   * 用于 teammate keepAlive 模式：挂起直到有邮件到达或 signal abort。
+   */
   static waitForMail(agentId: string, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.resolve()
     return new Promise(resolve => {
@@ -114,6 +184,49 @@ export class Mailbox {
     })
   }
 
+  /**
+   * 启动 agentId 的邮箱监听（轮询模式）。
+   *
+   * 启动时立即扫描一次（处理启动前已有的邮件），
+   * 之后按 intervalMs 间隔定期扫描 inbox 目录。
+   * 发现新邮件后通过 deliverIfNew → mailboxEvents 投递给订阅者。
+   *
+   * 重复调用同一个 agentId 是安全的（已启动则跳过）。
+   */
+  static startWatching(agentId: string, options: WatchOptions = {}): void {
+    const key = sanitize(agentId)
+    if (pollingTimers.has(key)) return // 已在监听
+
+    const intervalMs = options.intervalMs ?? 1000
+
+    // 启动时立即扫描一次，处理已有邮件
+    scanAndDeliver(agentId)
+
+    // 定时轮询
+    const timer = setInterval(() => {
+      scanAndDeliver(agentId)
+    }, intervalMs)
+
+    // unref 让定时器不阻止进程退出（TUI 模式下 Ink 会保持事件循环）
+    timer.unref()
+
+    pollingTimers.set(key, timer)
+  }
+
+  /**
+   * 停止 agentId 的邮箱监听。
+   * 测试清理 / 进程退出时调用。
+   */
+  static stopWatching(agentId: string): void {
+    const key = sanitize(agentId)
+    const timer = pollingTimers.get(key)
+    if (timer) {
+      clearInterval(timer)
+      pollingTimers.delete(key)
+    }
+  }
+
+  /** agentId 的收件箱是否有未读邮件。 */
   static hasUnread(agentId: string): boolean {
     return Mailbox.list(agentId).length > 0
   }
@@ -160,6 +273,7 @@ export class Mailbox {
 
   /** 清空一个 agent 的整个邮箱（含已读）。测试 / 收尾用。 */
   static destroy(agentId: string): void {
+    Mailbox.stopWatching(agentId)
     fs.rmSync(mailboxDir(agentId), { recursive: true, force: true })
   }
 }

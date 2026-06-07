@@ -164,7 +164,7 @@ export async function runAgent(
       system,
       tools: subRegistrar.getAllTools(),
       messages,
-      maxTurns: def.maxTurns ?? DEFAULT_MAX_TURNS,
+      maxTurns: isTeammate ? Infinity : (def.maxTurns ?? DEFAULT_MAX_TURNS),
       executeTool: subExecuteTool,
       parallelSafeTools: subRegistrar.getParallelSafeNames(),
       onText,

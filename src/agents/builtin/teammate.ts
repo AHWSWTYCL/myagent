@@ -3,6 +3,24 @@ import { SendMailTool } from '../../tools/sendmailtool.js'
 import { CheckMailTool } from '../../tools/checkmailtool.js'
 import { TeamManager } from '../../team/team.js'
 
+/**
+ * 解析 teammate 的 leader_id，优先级：
+ * 1. 显式传入的 args.leader_id
+ * 2. team manifest 中的 leader_id（如有 team_name）
+ * 3. 默认 "main"
+ */
+function resolveLeaderId(args: Record<string, unknown>): string {
+  if (args.leader_id !== undefined && args.leader_id !== null && String(args.leader_id).trim()) {
+    return String(args.leader_id)
+  }
+  const teamName = args.team_name as string | undefined
+  if (teamName && TeamManager.exists(teamName)) {
+    const team = TeamManager.get(teamName)
+    if (team?.leader_id) return team.leader_id
+  }
+  return 'main'
+}
+
 const SYSTEM = `你是一个 teammate worker。你属于某个 leader 管理的 team，通过文件式邮箱与 leader / 其他 teammate 协作。
 
 ## 核心循环（每一轮 turn 都按这个走）
@@ -19,8 +37,11 @@ const SYSTEM = `你是一个 teammate worker。你属于某个 leader 管理的 
    - kind=status / result → 一般是其他 teammate 协作发来的；按内容自行处理（比如 verifier 收到 generator 的 result 就开始验证），完成后同样 send_mail 汇报。
 3. 处理完后，回到第 1 步继续取下一封。
 4. **idle 处理**（check_mail 返回 (empty)）：
-   - 维护一个 idle_count（从 1 开始，每次空返回递增 1）。
-   - **指数退避汇报**：只在 idle_count 为 1, 5, 10, 20, 30, 40, ... 时发送 idle 心跳邮件，格式：send_mail (kind=status, to=<leader_id>, subject="idle", body="idle, no pending mail, waiting for tasks", meta={ idle_count: N })。其余轮次只输出一行简短文本（如「idle #N, waiting…」），不发邮件。
+   - 维护一个 was_idle 标志（初始为 false，表示之前处于"有活干"状态）。
+   - 当 check_mail 返回空时：
+     - 若 was_idle === false（从有活干 → 空闲的状态变化）：发送一封 idle 心跳邮件给 leader，格式：send_mail (kind=status, to=<leader_id>, subject="idle", body="idle, no pending mail, waiting for tasks")。然后将 was_idle 设为 true。
+     - 若 was_idle === true（一直空闲，状态未变）：只输出一行简短文本（如「idle, waiting…」），不发邮件。
+   - 当 check_mail 返回非空邮件时（说明有活干了）：将 was_idle 重置为 false。
    - **永不因 idle 自行退出**。你唯一能退出的时机是收到 leader 发来的 kind=close 邮件。在此之前，无论 idle 多少次，都必须持续轮询邮箱。
 
 ## 协作约定
@@ -42,7 +63,7 @@ export const teammateAgent: AgentDefinition = {
   description:
     'A worker that joins a team. Polls its own mailbox, executes task mails, reports results back to the sender. ' +
     'Spawn it in background (background: true) and communicate via send_mail / check_mail. ' +
-    'Inputs: agent_id (this worker\'s mailbox id, must be unique), leader_id (default "leader"), ' +
+    'Inputs: agent_id (this worker\'s mailbox id, must be unique), leader_id (optional; when team_name is provided defaults to the team\'s leader_id, otherwise defaults to "main"), ' +
     'tools (comma-separated tool names this worker is allowed to use besides mail tools), ' +
     'role (a one-line description of this teammate\'s specialty so the LLM knows what kind of tasks to accept), ' +
     'team_name (optional — join a named team created with create_team).',
@@ -68,15 +89,16 @@ export const teammateAgent: AgentDefinition = {
       teamSection = `\n注意：team "${teamName}" 不存在或尚未创建。你的 leader 应该先调用 create_team。`
     }
 
-    return SYSTEM + `\n\n## 当前身份\n你的 agent_id: ${args.agent_id}\n你的 leader_id: ${args.leader_id ?? 'leader'}\n你的角色: ${role}${peersLine}${teamSection}`
+    const leaderId = resolveLeaderId(args)
+    return SYSTEM + `\n\n## 当前身份\n你的 agent_id: ${args.agent_id}\n你的 leader_id: ${leaderId}\n你的角色: ${role}${peersLine}${teamSection}`
   },
   // 工作工具由调用方通过 tools 字段传入；mail 工具走 extraTools 注入（绑定 selfId）
   tools: [],
-  maxTurns: 50,
+  // maxTurns 在 runner.ts 中对 teammate 强制设为 Infinity，不设上限
   inputSchema: {
     properties: {
       agent_id: { type: 'string', description: 'Unique mailbox id for this teammate' },
-      leader_id: { type: 'string', description: 'Leader agent id, default "leader"' },
+      leader_id: { type: 'string', description: 'Leader agent id. If omitted, defaults to team leader_id when team_name is provided, otherwise defaults to "main".' },
       role: { type: 'string', description: 'One-line specialty description' },
       tools: { type: 'string', description: 'Comma-separated work tools this teammate is allowed to use' },
       peers: { type: 'string', description: 'Optional comma-separated peer teammate ids for direct collaboration' },
@@ -92,7 +114,7 @@ export const teammateAgent: AgentDefinition = {
   },
   extraTools: (_ctx, args) => {
     const selfId = String(args.agent_id)
-    const leaderId = String(args.leader_id ?? 'leader')
+    const leaderId = resolveLeaderId(args)
     return [new SendMailTool(selfId), new CheckMailTool(selfId, { popStrategy: 'teammatePriority', leaderId })]
   },
   // teammate 在被注册到 subRegistrar 时，需要把 args.tools 列表中的工具实际加进来。
