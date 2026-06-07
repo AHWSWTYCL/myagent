@@ -211,13 +211,13 @@ export async function runAgentLoopStream(
       onTurnEnd?.(currentTurnText, messages)?.catch(() => {})
     }
     onTurnToolReset?.()
-    console.log(`[queryLoop] background handoff at turn (forked ${forkedMessages.length} messages)`)
+    process.stderr.write(`[queryLoop] background handoff at turn (forked ${forkedMessages.length} messages)\n`)
     return { messages, backgrounded: true, fork: { messages: forkedMessages, usage: forkedUsage } }
   }
 
   for (let turn = 0; turn < maxTurns; turn++) {
     if (signal?.aborted) {
-      console.log(`[queryLoop] exit: aborted before turn ${turn}`)
+      process.stderr.write(`[queryLoop] exit: aborted before turn ${turn}\n`)
       break
     }
     // Check background signal at start of each turn
@@ -266,7 +266,7 @@ export async function runAgentLoopStream(
     if (onUsage) onUsage({ ...cumUsage })
 
     if (streamAborted || signal?.aborted) {
-      console.log(`[queryLoop] exit: aborted during stream at turn ${turn}`)
+      process.stderr.write(`[queryLoop] exit: aborted during stream at turn ${turn}\n`)
       break
     }
     // Background check after streaming
@@ -279,119 +279,94 @@ export async function runAgentLoopStream(
     try {
       response = await stream.finalMessage()
     } catch (err) {
-      console.error(`[queryLoop] exit: stream.finalMessage failed at turn ${turn}:`, err)
+      process.stderr.write(`[queryLoop] exit: stream.finalMessage failed at turn ${turn}: ${err}\n`)
       break
     }
     messages.push({ role: 'assistant', content: response.content })
 
-    if (response.stop_reason !== 'tool_use') {
-      // Fire onTurnEnd after the assistant message is in the history, so hooks
-      // observe a consistent snapshot. Awaited so per-turn side effects (memory
-      // extract scheduling, retrospective counting) run before the next iteration.
+    const isToolUse = response.stop_reason === 'tool_use'
+
+    if (!isToolUse) {
+      // ── end_turn / stop_sequence / max_tokens ──────────────────────
       if (turnText) await onTurnEnd?.(turnText, messages)
-      // Background check before stopping (non-tool_use turn)
       {
         const bg = doBackgroundHandoff('')
         if (bg) return bg
       }
       if (response.stop_reason === 'max_tokens') {
         if (maxTokensRecoveryCount >= MAX_TOKENS_RECOVERY_LIMIT) {
-          console.log(`[queryLoop] exit at turn ${turn}: max_tokens recovery limit reached`)
+          process.stderr.write(`[queryLoop] exit at turn ${turn}: max_tokens recovery limit reached\n`)
           break
         }
         maxTokensRecoveryCount++
-        console.log(`[queryLoop] turn ${turn}: max_tokens hit (recovery ${maxTokensRecoveryCount}/${MAX_TOKENS_RECOVERY_LIMIT}), continuing...`)
-        // Inject a continuation prompt so the model knows to resume rather than restart
+        process.stderr.write(`[queryLoop] turn ${turn}: max_tokens hit (recovery ${maxTokensRecoveryCount}/${MAX_TOKENS_RECOVERY_LIMIT}), continuing...\n`)
         messages.push({ role: 'user', content: 'Output token limit hit. Resume your response directly from where you left off, without repeating anything.' })
         continue
       }
       maxTokensRecoveryCount = 0
+      // 不 break — 先走统一 drain，有内容则 continue，无内容才 break
+    } else {
+      // ── tool_use ───────────────────────────────────────────────────
+      maxTokensRecoveryCount = 0
+      const rawBlocks = response.content.filter(b => b && b.type === 'tool_use')
+      const toolBlocks = rawBlocks as Anthropic.ToolUseBlock[]
+      const toolResults = await executeToolsWithParallelism(toolBlocks, executeTool, onToolStart, onToolEnd, parallelSafeTools, onTurnToolReset)
+      messages.push({ role: 'user', content: toolResults })
 
-      // DRAIN POINT 2: end_turn/stop 前 — 如有排队消息则不 break 而 continue
-      if (drainQueue) {
-        const nextMsg = drainQueue()
-        if (nextMsg) {
-          messages.push({ role: 'user', content: nextMsg })
-          continue
-        }
-      }
-      // DRAIN POINT 2b: Attachment 队列 — 确保结束前也注入
-      if (drainAttachments) {
-        const attText = drainAttachments()
-        if (attText) {
-          messages.push({ role: 'user', content: attText })
-          continue
-        }
-      }
-      // DRAIN POINT 2c: 邮箱 — 确保结束前也查收
-      if (drainMailbox) {
-        const mailText = drainMailbox()
-        if (mailText) {
-          messages.push({ role: 'user', content: mailText })
-          continue
-        }
-      }
+      if (turnText) await onTurnEnd?.(turnText, messages)
 
-      // ── keepAlive：长期存活 worker（如 teammate）不退出，等待异步事件 ──
+      {
+        const bg = doBackgroundHandoff('')
+        if (bg) return bg
+      }
+    }
+
+    // ── 统一 DRAIN（每次 LLM 调用结束后都执行）──────────────────────
+    // 放在 for 循环底部，tool_use / end_turn 都会走到这里。
+    // drain 到任何内容 → push 到 messages → continue 下一轮 LLM 及时处理
+    if (drainQueue) {
+      const nextMsg = drainQueue()
+      if (nextMsg) {
+        messages.push({ role: 'user', content: nextMsg })
+        continue
+      }
+    }
+    if (drainAttachments) {
+      const attText = drainAttachments()
+      if (attText) {
+        messages.push({ role: 'user', content: attText })
+        continue
+      }
+    }
+    if (drainMailbox) {
+      const mailText = drainMailbox()
+      if (mailText) {
+        messages.push({ role: 'user', content: mailText })
+        continue
+      }
+    }
+
+    // 无 drain 内容
+    if (!isToolUse) {
+      // ── keepAlive：长期存活 worker 不退出，等待异步事件 ──────────
       if (keepAlive && waitForEvent && !signal?.aborted) {
-        console.log(`[queryLoop] turn ${turn}: keepAlive — waiting for event...`)
+        process.stderr.write(`[queryLoop] turn ${turn}: keepAlive — waiting for event...\n`)
         const eventText = await waitForEvent()
         if (eventText) {
           messages.push({ role: 'user', content: eventText })
           continue
         }
-        // waitForEvent 返回 undefined → 正常退出（close 已处理或 signal abort）
-        console.log(`[queryLoop] exit at turn ${turn}: keepAlive — no more events`)
+        process.stderr.write(`[queryLoop] exit at turn ${turn}: keepAlive — no more events\n`)
       }
 
       if (response.stop_reason !== 'end_turn') {
-        console.log(`[queryLoop] exit at turn ${turn}: stop_reason=${response.stop_reason}`)
+        process.stderr.write(`[queryLoop] exit at turn ${turn}: stop_reason=${response.stop_reason}\n`)
       }
       break
     }
-    maxTokensRecoveryCount = 0
-
-    // Filter out any undefined entries from the API response content array
-    const rawBlocks = response.content.filter(b => b && b.type === 'tool_use')
-    const toolBlocks = rawBlocks as Anthropic.ToolUseBlock[]
-    const toolResults = await executeToolsWithParallelism(toolBlocks, executeTool, onToolStart, onToolEnd, parallelSafeTools, onTurnToolReset)
-    messages.push({ role: 'user', content: toolResults })
-
-    // Fire onTurnEnd AFTER tools execute so the TUI shows tools before the
-    // assistant's summary text (Claude Code display order: tools first, text last).
-    if (turnText) await onTurnEnd?.(turnText, messages)
-
-    // Background check after tool execution
-    {
-      const bg = doBackgroundHandoff('')
-      if (bg) return bg
-    }
-
-    // DRAIN POINT 1: 工具执行完成后，从队列获取下一条用户消息。
-    // 新消息推入 messages 后，下一轮 LLM 调用会自动看到它。
-    if (drainQueue) {
-      const nextMsg = drainQueue()
-      if (nextMsg) {
-        messages.push({ role: 'user', content: nextMsg })
-      }
-    }
-    // DRAIN POINT 1b: Attachment 队列 — 系统状态变更自动注入 LLM 上下文
-    if (drainAttachments) {
-      const attText = drainAttachments()
-      if (attText) {
-        messages.push({ role: 'user', content: attText })
-      }
-    }
-    // DRAIN POINT 1c: 邮箱 — 自动查收 teammate 发来的邮件
-    if (drainMailbox) {
-      const mailText = drainMailbox()
-      if (mailText) {
-        messages.push({ role: 'user', content: mailText })
-      }
-    }
 
     if (turn === maxTurns - 1) {
-      console.log(`[queryLoop] exit: hit maxTurns=${maxTurns} (model still wanted to call tools)`)
+      process.stderr.write(`[queryLoop] exit: hit maxTurns=${maxTurns} (model still wanted to call tools)\n`)
     }
   }
 

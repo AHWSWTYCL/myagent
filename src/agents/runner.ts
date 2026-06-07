@@ -6,7 +6,6 @@ import { extractLastText } from '../utils/agentutils.js'
 import { AgentDefinition, AgentRunContext } from './definition.js'
 import { modelConfig } from '../llm/model-config.js'
 import { Mailbox, type Mail } from '../mailbox/mailbox.js'
-import { teammateMailPriority } from '../tools/checkmailtool.js'
 
 const DEFAULT_MAX_TURNS = 20
 
@@ -107,49 +106,38 @@ export async function runAgent(
     : modelConfig.getCurrent()
 
   // ── teammate 邮箱信号 + keepAlive ───────────────────────────────────
-  // 三层机制确保 teammate 长期存活、优先处理用户/leader 消息：
-  //   1. drainMailbox — 每轮 LLM 结束后立即检查邮箱（快速路径），用优先级排序
-  //   2. waitForEvent  — 当 drain 全部为空时，等待 Mailbox.send() 的进程内信号
-  //   3. keepAlive     — 让 runAgentLoopStream 不退出，而是一直等到 close 或 signal
+  // 邮件消费策略：LLM 通过 check_mail(mode=pop) 独占消费，drainMailbox 不预 pop。
+  // 三层机制确保 teammate 长期存活：
+  //   1. check_mail  — LLM 轮询邮箱，pop 消费邮件（唯一消费路径）
+  //   2. waitForEvent — drain 全部为空时，等待新邮件到达信号（只检测，不 pop）
+  //   3. keepAlive    — 让 runAgentLoopStream 不退出，一直到 close 或 signal
+  //
+  // 例外：close 邮件由 waitForEvent 直接处理（pop + markRead），因为需要
+  // 设置 closeReceived 标志来终止 keepAlive 循环。
   const isTeammate = def.agentType === 'teammate'
   const teammateMailboxId = isTeammate ? String(args.agent_id ?? '') : ''
-  const leaderId = isTeammate ? String(args.leader_id ?? 'leader') : ''
   let closeReceived = false
-
-  // 优先级 pop：用户消息 > close > leader > peer，同优先级 FIFO
-  const popByPriority = (): Mail | null => {
-    const all = Mailbox.list(teammateMailboxId)
-    if (all.length === 0) return null
-    all.sort((a, b) => {
-      const pa = teammateMailPriority(a, leaderId)
-      const pb = teammateMailPriority(b, leaderId)
-      if (pa !== pb) return pa - pb
-      return a.created_at.localeCompare(b.created_at)
-    })
-    const m = all[0]
-    Mailbox.markRead(teammateMailboxId, m.id)
-    return m
-  }
 
   const formatMailForAgent = (m: Mail): string =>
     `📬 新邮件 [${m.kind}] from ${m.from}: ${m.subject}\n\n${m.body}`
 
-  const drainMailbox = isTeammate
-    ? () => {
-        const m = popByPriority()
-        if (!m) return undefined
-        if (m.kind === 'close') closeReceived = true
-        return formatMailForAgent(m)
-      }
-    : undefined
+  // teammate 不使用 drainMailbox 预 pop —— 邮件由 LLM 通过 check_mail 工具独占消费
+  const drainMailbox = undefined
 
   const waitForEvent = isTeammate
     ? async (): Promise<string | undefined> => {
         while (!ctx.signal?.aborted && !closeReceived) {
-          const existing = popByPriority()
-          if (existing) {
-            if (existing.kind === 'close') closeReceived = true
-            return formatMailForAgent(existing)
+          const all = Mailbox.list(teammateMailboxId)
+          // close 邮件特殊处理：直接 pop + markRead，设置 closeReceived 终止循环
+          const closeMail = all.find(m => m.kind === 'close')
+          if (closeMail) {
+            closeReceived = true
+            Mailbox.markRead(teammateMailboxId, closeMail.id)
+            return formatMailForAgent(closeMail)
+          }
+          // 其他邮件：只检测不 pop，返回唤醒消息让 LLM 用 check_mail 消费
+          if (all.length > 0) {
+            return '📬 New mail in your inbox — call check_mail(mode=pop) to read it.'
           }
           await Mailbox.waitForMail(teammateMailboxId, ctx.signal)
         }

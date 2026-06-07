@@ -57,6 +57,12 @@
 - **coordinator / planner / generator / verifier**：结构化流水线（调研 → 规划 → 生成 → 验证），有明确的阶段依赖关系，适合单线程推进。
 - **general-purpose**：独立、自包含的子任务，不需要协调。
 
+**Leader 处理 teammate 邮件的规则**：
+- 当收到 `[New Mail]` 通知时，你必须**主动处理**每封邮件，不能静默忽略：
+  - **status 邮件（含任务请求/问候）**：用 `send_mail` 回复 teammate，分配任务或确认收到
+  - **result 邮件**：检查结果，必要时回复或派后续任务
+  - **idle 通知**：如果当前无任务，告知 teammate 继续等待；如果有任务，立即派发
+
 **注意**：
 - 你直接 spawn teammate 时，自己就是 leader，需要管理邮箱通信（send_mail / check_mail）。
 - teammate 必须 `background=true` 启动，否则会阻塞 300s 超时。

@@ -27,10 +27,12 @@ import { TODO_STATUS_ICON, type TodoPlanSnapshot } from '../todos/todo.js'
 import { ttsService } from '../voice/tts.js'
 import { BackgroundTasksDialog } from './BackgroundTasksDialog.js'
 import { TeammateConversationView } from './TeammateConversationView.js'
+import { Mailbox } from '../mailbox/mailbox.js'
 import { useAppState, useSetAppState } from '../state/AppStateProvider.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 type AppMode = 'main' | 'backgroundTasks' | 'teammateView'
+type RunMode = 'main' | 'teammate'
 
 interface Props {
   bridge: TuiBridge
@@ -41,11 +43,15 @@ interface Props {
   enqueueUserMessage: (msg: string) => void
   enqueueMainMailboxWake: () => void
   subscribeQueue: (listener: () => void) => () => void
-  subscribeMainMailbox: (listener: () => void) => () => void
-  hasUnreadMainMail: () => boolean
+  subscribeMainMailbox?: (listener: () => void) => () => void
+  hasUnreadMainMail?: () => boolean
   getQueueLength: () => number
   dequeueMessage: () => string | undefined
   initialMessages?: ChatMessage[]
+  /** Teammate mode props */
+  mode?: RunMode
+  teammateAgentId?: string
+  teammateLeaderId?: string
 }
 
 const MAX_HISTORY = 100
@@ -71,6 +77,9 @@ const MAX_CONTEXT = 200_000
 type RenderPlanItem =
   | { type: 'summary' }
   | { type: 'tool-group'; items: TurnToolItem[] }
+
+/** Stable banner placeholder — never changes, so keep a single reference for Ink Static. */
+const BANNER_ITEM: ChatMessage = { id: '__banner__', role: 'system', content: '' }
 
 function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
   const plan: RenderPlanItem[] = []
@@ -111,7 +120,7 @@ function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
   return plan
 }
 
-export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueUserMessage, enqueueMainMailboxWake, subscribeQueue, subscribeMainMailbox, hasUnreadMainMail, getQueueLength, dequeueMessage, initialMessages = [] }: Props) {
+export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueUserMessage, enqueueMainMailboxWake, subscribeQueue, subscribeMainMailbox, hasUnreadMainMail, getQueueLength, dequeueMessage, initialMessages = [], mode = 'main', teammateAgentId, teammateLeaderId }: Props) {
   const { exit } = useApp()
   const setAppState = useSetAppState()
   const [messages, rawSetMessages] = useState<ChatMessage[]>(() => initialMessages)
@@ -164,7 +173,6 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const pendingResolveRef = useRef<((v: any) => void) | null>(null)
   const idCounter = useRef(0)
   const streamingRef = useRef('')
-  const turnVersionRef = useRef(0) // turn 版本守卫：防止 stale setImmediate 在 turnEnd 后更新 streamingText
   const historyIndexRef = useRef(-1)
   const abortControllerRef = useRef<AbortController | null>(null)
   const bgControllerRef = useRef<AbortController | null>(null) // Ctrl+B → background handoff
@@ -251,25 +259,13 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
       unsubscribers.push(() => bridge.off(event, handler))
     }
 
-    let rafPending = false
-
     on('text', (delta: string) => {
       streamingRef.current += delta
-      if (!rafPending) {
-        rafPending = true
-        const versionAtSchedule = turnVersionRef.current
-        setImmediate(() => {
-          rafPending = false
-          if (versionAtSchedule === turnVersionRef.current) {
-            setStreamingText(streamingRef.current)
-          }
-        })
-      }
+      setStreamingText(streamingRef.current)
     })
 
     on('turnEnd', (text: string) => {
       if (!text) return
-      turnVersionRef.current++
       const entries: ChatMessage[] = [{ id: nextId(), role: 'agent', content: text }]
       if (pendingTodoSnapshotRef.current) {
         entries.unshift({ id: nextId(), role: 'system', content: pendingTodoSnapshotRef.current })
@@ -285,6 +281,8 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     })
 
     on('toolStart', ({ callId, name, input }: { callId: string; name: string; input: unknown }) => {
+      // Mail tools are internal — don't show in TUI
+      if (name === 'send_mail' || name === 'check_mail') return
       setAppState(prev => prev.status ? { ...prev, status: '' } : prev)
       setTurnTools(prev => [...prev, { id: callId, name, input, output: '', isError: false, isPending: true }])
     })
@@ -340,6 +338,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
       if (name === 'edit_file') return
       if (name === 'ask_user' || name === 'ask_user_choice') return
+      if (name === 'send_mail' || name === 'check_mail') return
 
       setMessages(prev => [...prev, {
         id: callId,
@@ -869,6 +868,55 @@ ${memory}` }])
       return
     }
 
+    // ── @teammate-name 直接发邮件 ────────────────────────────────────
+    // 语法：@teammate-name 消息内容
+    // 匹配已知 teammate 时直接发送 task 邮件，绕过 LLM
+    // 不匹配时保留原文，走正常 LLM 处理（跳过附件解析，避免 @mention 被误判为文件路径）
+    let skipAttachmentParsing = false
+    if (trimmed.startsWith('@') && inputMode === 'chat') {
+      const spaceIdx = trimmed.indexOf(' ')
+      const mention = spaceIdx > 1 ? trimmed.slice(1, spaceIdx) : trimmed.slice(1)
+      const body = spaceIdx > 1 ? trimmed.slice(spaceIdx + 1).trim() : ''
+
+      const matchedTeammate = teammateTasks.find(
+        t => t.agentId === mention && (t.status === 'running' || t.status === 'idle')
+      )
+
+      if (matchedTeammate && body) {
+        // 防并发（和下方 submittingRef 逻辑一致）
+        if (submittingRef.current) return
+        submittingRef.current = true
+        setInputValue('')
+        setHistoryIndex(-1)
+        clearSuggestions()
+        addToHistory(trimmed)
+
+        const from = mode === 'teammate' && teammateAgentId ? teammateAgentId : 'main'
+        const mail = Mailbox.send({
+          from,
+          to: mention,
+          subject: body.slice(0, 80),
+          kind: 'task',
+          body,
+        })
+
+        setMessages(prev => [...prev, {
+          id: nextId(),
+          role: 'user',
+          content: `@${mention} ${body}`,
+        }, {
+          id: nextId(),
+          role: 'system',
+          content: `📨 → @${mention}: task sent («${body.slice(0, 60)}${body.length > 60 ? '…' : ''}»)`,
+        }])
+
+        submittingRef.current = false
+        return
+      }
+      // 不匹配已知 teammate → 保留原始文本走 LLM 处理，不走附件解析
+      skipAttachmentParsing = true
+    }
+
     // 防止 handleSubmit 并发（仅防重复点击 Enter）
     if (submittingRef.current) return
 
@@ -949,7 +997,7 @@ ${memory}` }])
       let userContent: string | any[]
       let displayText = safeValue
 
-      if (safeValue.includes('@') && !safeValue.startsWith('/') && !safeValue.startsWith('!')) {
+      if (safeValue.includes('@') && !skipAttachmentParsing && !safeValue.startsWith('/') && !safeValue.startsWith('!')) {
         const { cleaned, attachments: atts, errors: attErrors } = await parseAttachments(safeValue)
         if (atts.length > 0) {
           userContent = buildUserContent(cleaned, atts)
@@ -1000,7 +1048,11 @@ ${memory}` }])
    *   2. mailbox polling — idle 态检测到 teammate 来信后自动触发
    */
   const processQueue = useCallback(async () => {
-    if (isProcessingRef.current || getQueueLength() === 0) return
+    process.stderr.write(`[tui:processQueue] enter — isProcessing=${isProcessingRef.current} queueLength=${getQueueLength()}\n`)
+    if (isProcessingRef.current || getQueueLength() === 0) {
+      process.stderr.write(`[tui:processQueue] exit early (isProcessing or empty queue)\n`)
+      return
+    }
 
     isProcessingRef.current = true
     setIsProcessing(true)
@@ -1018,9 +1070,21 @@ ${memory}` }])
     try {
       while (getQueueLength() > 0 && !ac.signal.aborted) {
         const nextMsg = dequeueMessage()
-        if (!nextMsg) break
+        process.stderr.write(`[tui:processQueue] dequeueMessage returned: ${nextMsg ? `"${nextMsg.slice(0, 80)}..." (${nextMsg.length} chars)` : 'undefined'}\n`)
+        if (!nextMsg) {
+          // drainQueue consumed a mailbox-wake item (it only returns 'user' kind).
+          // If there are actual unread mails, inject a trigger so runTurn starts
+          // and drainMailbox picks them up during the runAgentLoopStream drain phase.
+          if (hasUnreadMainMail?.()) {
+            process.stderr.write(`[tui:processQueue] mailbox-wake consumed, has unread mails → injecting trigger\n`)
+            await runTurn('(mailbox wake — check for new messages)', ac.signal, bgAc.signal)
+            continue
+          }
+          break
+        }
         const result = await runTurn(nextMsg, ac.signal, bgAc.signal)
         if (result && (result as any).backgrounded) {
+          process.stderr.write(`[tui:processQueue] turn backgrounded, breaking loop\n`)
           break
         }
       }
@@ -1040,29 +1104,83 @@ ${memory}` }])
       abortControllerRef.current = null
       isProcessingRef.current = false
       setIsProcessing(false)
+      process.stderr.write(`[tui:processQueue] finished — isProcessing set to false\n`)
       setAppState(prev => prev.status ? { ...prev, status: '' } : prev)
     }
-  }, [runTurn, getQueueLength, dequeueMessage, setMessages, setAppState, setStreamingText, nextId])
+  }, [runTurn, getQueueLength, dequeueMessage, hasUnreadMainMail, setMessages, setAppState, setStreamingText, nextId])
 
   useEffect(() => {
-    return subscribeMainMailbox(() => {
-      enqueueMainMailboxWake()
-    })
+    if (subscribeMainMailbox) {
+      return subscribeMainMailbox(() => {
+        process.stderr.write(`[tui:mailbox] subscribeMainMailbox fired → enqueuing mailbox-wake\n`)
+        enqueueMainMailboxWake()
+      })
+    }
   }, [subscribeMainMailbox, enqueueMainMailboxWake])
 
   useEffect(() => {
     return subscribeQueue(() => {
-      if (!isProcessingRef.current && inputMode === 'chat' && appMode === 'main') {
+      const allowedMode = mode === 'teammate' ? true : appMode === 'main'
+      process.stderr.write(`[tui:queue] subscribeQueue fired — isProcessing=${isProcessingRef.current} inputMode=${inputMode} allowedMode=${allowedMode}\n`)
+      if (!isProcessingRef.current && inputMode === 'chat' && allowedMode) {
+        process.stderr.write(`[tui:queue] → calling processQueue()\n`)
         void processQueue()
+      } else {
+        process.stderr.write(`[tui:queue] → skipped (isProcessing or wrong mode)\n`)
       }
     })
-  }, [subscribeQueue, inputMode, appMode, processQueue])
+  }, [subscribeQueue, inputMode, appMode, mode, processQueue])
+
+  // ── unreadCheck debounce timer（防止 isProcessing 翻转时级联重入）──
+  const unreadCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    if (isProcessing || inputMode !== 'chat' || appMode !== 'main') return
-    if (hasUnreadMainMail()) enqueueMainMailboxWake()
-    if (getQueueLength() > 0) void processQueue()
-  }, [isProcessing, inputMode, appMode, hasUnreadMainMail, enqueueMainMailboxWake, getQueueLength, processQueue])
+    const allowedMode = mode === 'teammate' ? true : appMode === 'main'
+    process.stderr.write(`[tui:unreadCheck] useEffect fired — isProcessing=${isProcessing} inputMode=${inputMode} appMode=${appMode} allowedMode=${allowedMode}\n`)
+    if (isProcessing || inputMode !== 'chat' || !allowedMode) return
+
+    // 500ms debounce：避免 processQueue 刚结束 isProcessing 翻转时立即再次触发
+    if (unreadCheckTimerRef.current) clearTimeout(unreadCheckTimerRef.current)
+    unreadCheckTimerRef.current = setTimeout(() => {
+      unreadCheckTimerRef.current = null
+      if (hasUnreadMainMail && hasUnreadMainMail()) {
+        process.stderr.write(`[tui:unreadCheck] hasUnreadMainMail=true → enqueuing mailbox-wake\n`)
+        enqueueMainMailboxWake()
+      }
+      if (getQueueLength() > 0) {
+        process.stderr.write(`[tui:unreadCheck] queue not empty (${getQueueLength()} items) → calling processQueue\n`)
+        void processQueue()
+      }
+    }, 500)
+
+    return () => {
+      if (unreadCheckTimerRef.current) {
+        clearTimeout(unreadCheckTimerRef.current)
+        unreadCheckTimerRef.current = null
+      }
+    }
+  }, [isProcessing, inputMode, appMode, mode, hasUnreadMainMail, enqueueMainMailboxWake, getQueueLength, processQueue])
+
+  // ── Teammate mode: auto-start initial turn ───────────────────────────
+  useEffect(() => {
+    if (mode !== 'teammate' || !teammateAgentId) return
+    const initMsg = `你已加入团队，开始 worker 循环。\n\n现在调用 check_mail (mode=pop) 看看邮箱里有什么。`
+    setMessages(prev => [...prev, { id: nextId(), role: 'system', content: `👂 Teammate "${teammateAgentId}" 已启动，等待任务…` }])
+    // Small delay to let TUI render before enqueuing
+    const t = setTimeout(() => enqueueUserMessage(initMsg), 200)
+    return () => clearTimeout(t)
+  }, [mode, teammateAgentId])
+
+  // ── Teammate mode: subscribe to own mailbox for wakeups ──────────────
+  useEffect(() => {
+    if (mode !== 'teammate' || !teammateAgentId) return
+    const unsub = Mailbox.subscribe(teammateAgentId, () => {
+      if (!isProcessingRef.current) {
+        enqueueUserMessage('New mail arrived — call check_mail(mode=pop) to read it.')
+      }
+    })
+    return unsub
+  }, [mode, teammateAgentId])
 
   // ── 消息渲染 ────────────────────────────────────────────────────────
   // Rendering moved to MessageRow / DiffView components.
@@ -1082,8 +1200,7 @@ ${memory}` }])
     <ToolRenderProvider toolMap={toolMap}>
     <Box flexDirection="column">
       <Static
-        key={expandAll ? 'static-expanded' : 'static-collapsed'}
-        items={[{ id: "__banner__", role: "system", content: "" } as ChatMessage, ...staticMessages].filter(Boolean)}
+        items={[BANNER_ITEM, ...staticMessages].filter(Boolean)}
       >
         {(msg) => {
           if (msg.id === '__banner__') return <Banner key="__banner__" />
@@ -1225,10 +1342,11 @@ ${memory}` }])
       {/* Todo List — fixed above InputBox, not scrolling with messages */}
       <TodoPanel plan={todoPlan} />
 
-      {/* Mode-specific prompts */}
-      {inputMode === 'permission' ? (
+      {/* Mode-specific prompts — always mounted to avoid Ink cleanup artifacts on mode switch */}
+      {inputMode !== 'permission' ? null : (
         <PermissionPrompt prompt={promptText} selected={permissionChoice} />
-      ) : inputMode === 'choice' ? (
+      )}
+      {inputMode !== 'choice' ? null : (
         <ChoicePrompt
           questions={choiceQuestions}
           selections={choiceSelections}
@@ -1237,7 +1355,8 @@ ${memory}` }])
           customInput={choiceCustomInput}
           customValues={choiceCustomValues}
         />
-      ) : appMode === 'teammateView' ? null : (
+      )}
+      {inputMode !== 'chat' || appMode === 'teammateView' ? null : (
         <InputBox
           inputValue={inputValue}
           onChange={handleInputChange}

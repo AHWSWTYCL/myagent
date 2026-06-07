@@ -28,7 +28,7 @@ const SENTENCE_BOUNDARY = /(?<=[。！？.!?])\s+|(?<=\n)\s*/g
 const MAX_BUFFER_CHARS = 300
 
 class TTSService {
-  private enabled = true
+  private enabled = false
   private voice: string | undefined          // undefined → 系统默认音色
   private rate: number | undefined           // undefined → 默认语速（约 175 wpm）
   private queue: string[] = []

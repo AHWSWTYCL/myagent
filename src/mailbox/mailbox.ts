@@ -53,6 +53,7 @@ const deliveredMailIds = new Set<string>()
 function deliverIfNew(mail: Mail): void {
   if (deliveredMailIds.has(mail.id)) return
   deliveredMailIds.add(mail.id)
+  process.stderr.write(`[mailbox:deliver] ${mail.id} kind=${mail.kind} from=${mail.from} → ${mail.to} subject="${mail.subject}"\n`)
   mailboxEvents.emit(mailboxEvent(mail.to), mail)
 }
 
@@ -99,17 +100,25 @@ function scanAndDeliver(agentId: string): void {
   } catch {
     return // 目录不存在或不可读，跳过
   }
+  let newCount = 0
   for (const f of entries) {
     if (!f.endsWith('.json')) continue
     const filePath = path.join(dir, f)
     try {
       const raw = fs.readFileSync(filePath, 'utf-8')
       const mail = JSON.parse(raw) as Mail
+      // 仅通知实际收件人，防止 outgoing 回显：mail.to 必须匹配当前扫描的 agentId
+      if (mail.to !== agentId) continue
+      const isNew = !deliveredMailIds.has(mail.id)
       deliverIfNew(mail)
+      if (isNew) newCount++
     } catch {
       // 文件可能还在写入中（.tmp 没 rename 完）、损坏、或已被移动
       // 跳过，下一轮轮询会重试
     }
+  }
+  if (newCount > 0) {
+    process.stderr.write(`[mailbox:scan] agent=${agentId} found ${newCount} new mail(s) in inbox\n`)
   }
 }
 
@@ -145,6 +154,7 @@ export class Mailbox {
     const finalFile = path.join(mailboxDir(opts.to), `${mail.id}.json`)
     fs.writeFileSync(tmpFile, JSON.stringify(mail, null, 2), 'utf-8')
     fs.renameSync(tmpFile, finalFile)
+    process.stderr.write(`[mailbox:send] wrote ${mail.id} kind=${mail.kind} from=${opts.from} → ${opts.to} to ${finalFile}\n`)
     // 本进程内直接投递（快路径），跨进程靠轮询扫描
     deliverIfNew(mail)
     return mail
@@ -199,8 +209,15 @@ export class Mailbox {
 
     const intervalMs = options.intervalMs ?? 1000
 
-    // 启动时立即扫描一次，处理已有邮件
-    scanAndDeliver(agentId)
+    process.stderr.write(`[mailbox:watch] starting poll for agent="${agentId}" (interval=${intervalMs}ms)\n`)
+
+    // 注意：不在启动时立即扫描。原因是 Mailbox.startWatching 在 render(App)
+    // 之前调用，而 App 的 useEffect 才注册 subscribe 回调。如果此时扫描到旧邮件，
+    // deliverIfNew 会将 mail.id 加入 deliveredMailIds 全局去重集合，但此时零 listener，
+    // 后续轮询再遇到同一邮件时 deliveredMailIds 拦截 → 回调永不触发。
+    //
+    // 改为依赖定时轮询的第一次触发（≤ intervalMs），此时 App 已 mount 完毕，
+    // subscribeMainMailbox 回调已注册到位。
 
     // 定时轮询
     const timer = setInterval(() => {
@@ -259,6 +276,8 @@ export class Mailbox {
     if (!fs.existsSync(src)) return false
     const dst = path.join(readDir(agentId), `${mailId}.json`)
     fs.renameSync(src, dst)
+    // 从全局去重集合中移除，防止 deliveredMailIds 只增不删导致内存泄漏
+    deliveredMailIds.delete(mailId)
     return true
   }
 

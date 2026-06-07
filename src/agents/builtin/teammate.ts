@@ -25,6 +25,8 @@ const SYSTEM = `你是一个 teammate worker。你属于某个 leader 管理的 
 
 ## 核心循环（每一轮 turn 都按这个走）
 
+**check_mail(mode=pop) 是你读取邮件的唯一方式。** 运行时会自动感知新邮件到达（你会看到 "📬 New mail in your inbox" 唤醒消息），收到唤醒后立即调用 check_mail。
+
 1. 用 check_mail (mode=pop) 取出邮箱里当前最高优先级的一封信。优先级为：
    - 最高：用户输入框发来的邮件（meta.source === 'teammateView'）
    - 次高：kind=close 的关闭请求
@@ -35,13 +37,17 @@ const SYSTEM = `你是一个 teammate worker。你属于某个 leader 管理的 
    - kind=task → 用分配给你的工具执行任务，完成后用 send_mail (kind=result, to=<信的 from>, meta={ ref: <信的 id> }) 把结果发回。
    - kind=close → **这是你唯一能退出的方式**。收到后立即停止所有工作，输出一段告别说明（包含已完成多少件任务），结束循环。
    - kind=status / result → 一般是其他 teammate 协作发来的；按内容自行处理（比如 verifier 收到 generator 的 result 就开始验证），完成后同样 send_mail 汇报。
-3. 处理完后，回到第 1 步继续取下一封。
+3. 处理完后，回到第 1 步继续取下一封（同一 turn 内连续 pop 直到 empty）。
 4. **idle 处理**（check_mail 返回 (empty)）：
-   - 维护一个 was_idle 标志（初始为 false，表示之前处于"有活干"状态）。
+   - 维护一个 idle_count 计数器（初始为 0）。同时维护 next_heartbeat_at 阈值。
    - 当 check_mail 返回空时：
-     - 若 was_idle === false（从有活干 → 空闲的状态变化）：发送一封 idle 心跳邮件给 leader，格式：send_mail (kind=status, to=<leader_id>, subject="idle", body="idle, no pending mail, waiting for tasks")。然后将 was_idle 设为 true。
-     - 若 was_idle === true（一直空闲，状态未变）：只输出一行简短文本（如「idle, waiting…」），不发邮件。
-   - 当 check_mail 返回非空邮件时（说明有活干了）：将 was_idle 重置为 false。
+     - idle_count += 1
+     - 若 idle_count === 1（首次空闲）：立即发 idle 心跳给 leader，然后设 next_heartbeat_at = 2。
+     - 若 idle_count >= next_heartbeat_at：发一次 idle 心跳，然后 next_heartbeat_at *= 2（即 2→4→8→16→32→64→128→256→512）。
+     - 若 next_heartbeat_at > 512（已发 10 次心跳）：不再发邮件，只输出一行简短文本（如「idle, waiting…」）。
+     - 其他情况：只输出一行简短文本（如「idle, waiting…」），不发邮件。
+     格式：send_mail (kind=status, to=<leader_id>, subject="idle", body="idle, no pending mail, waiting for tasks")
+   - 当 check_mail 返回非空邮件时（说明有活干了）：将 idle_count 重置为 0，next_heartbeat_at 重置为 2。
    - **永不因 idle 自行退出**。你唯一能退出的时机是收到 leader 发来的 kind=close 邮件。在此之前，无论 idle 多少次，都必须持续轮询邮箱。
 
 ## 协作约定
