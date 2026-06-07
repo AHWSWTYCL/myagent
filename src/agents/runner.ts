@@ -106,10 +106,10 @@ export async function runAgent(
     ? (typeof def.model === 'function' ? def.model() : (def.model ?? modelConfig.getCurrent()))
     : modelConfig.getCurrent()
 
-  // ── teammate 邮箱轮询 + keepAlive ───────────────────────────────────
+  // ── teammate 邮箱信号 + keepAlive ───────────────────────────────────
   // 三层机制确保 teammate 长期存活、优先处理用户/leader 消息：
   //   1. drainMailbox — 每轮 LLM 结束后立即检查邮箱（快速路径），用优先级排序
-  //   2. waitForEvent  — 当 drain 全部为空时，进入轮询等待（每秒查一次）
+  //   2. waitForEvent  — 当 drain 全部为空时，等待 Mailbox.send() 的进程内信号
   //   3. keepAlive     — 让 runAgentLoopStream 不退出，而是一直等到 close 或 signal
   const isTeammate = def.agentType === 'teammate'
   const teammateMailboxId = isTeammate ? String(args.agent_id ?? '') : ''
@@ -145,16 +145,13 @@ export async function runAgent(
 
   const waitForEvent = isTeammate
     ? async (): Promise<string | undefined> => {
-        // 已收到 close → 不再等待，让 worker 正常退出
-        if (closeReceived) return undefined
-        // 轮询等待新邮件（每秒一次）
-        while (!ctx.signal?.aborted) {
-          const m = popByPriority()
-          if (m) {
-            if (m.kind === 'close') closeReceived = true
-            return formatMailForAgent(m)
+        while (!ctx.signal?.aborted && !closeReceived) {
+          const existing = popByPriority()
+          if (existing) {
+            if (existing.kind === 'close') closeReceived = true
+            return formatMailForAgent(existing)
           }
-          await new Promise(r => setTimeout(r, 1000))
+          await Mailbox.waitForMail(teammateMailboxId, ctx.signal)
         }
         return undefined
       }

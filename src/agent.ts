@@ -90,6 +90,9 @@ import {
 import { bgManager } from './utils/backgroundManager.js'
 import { TranscriptRecorder, loadLatestCheckpoint } from './utils/transcript.js'
 import type { ChatMessage } from './tui/types.js'
+import { sessionState } from './state/sessionState.js'
+import { setAutoModeChangeHandler } from './state/onChangeAppState.js'
+import { AppStateProvider, appStateStore } from './state/AppStateProvider.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
 const skillManager = new SkillManager()
@@ -149,11 +152,8 @@ cleanOldResults()
 
 // ── Agent state ───────────────────────────────────────────────────────────────
 const MAX_TURNS = 1000
-const messages: Anthropic.MessageParam[] = []
-let agentRunning = false
-let lastUsage: UsageAccum | null = null
-// Tail of the run-turn queue
 let currentTurnTail: Promise<void> = Promise.resolve()
+let initialTuiMessages: ChatMessage[] = []
 
 // ── Transcript Recorder ──────────────────────────────────────────────
 const transcriptRecorder = new TranscriptRecorder()
@@ -163,15 +163,13 @@ const transcriptRecorder = new TranscriptRecorder()
 // 不会传到 agent.ts。请使用 npm run agent -- -c 或 npm run continue。
 // 环境变量 MYAGENT_CONTINUE=1 可作为备选（适用于 docker/CI 等场景）。
 const shouldContinue = process.argv.includes('--continue') || process.argv.includes('-c') || process.env.MYAGENT_CONTINUE === '1'
-let continuedFromSession: string | undefined
 if (shouldContinue) {
   const checkpoint = loadLatestCheckpoint()
   if (checkpoint) {
-    messages.push(...checkpoint.messages)
-    continuedFromSession = checkpoint.sessionId
+    sessionState.hydrate(checkpoint.messages, checkpoint.sessionId)
     console.log(`[continue] Loaded ${checkpoint.messages.length} messages from ${checkpoint.sessionId}`)
     // 将恢复的消息转换为 ChatMessage[] 供 TUI 显示历史
-    bridge.initialMessages = convertMessagesForTui(checkpoint.messages)
+    initialTuiMessages = convertMessagesForTui(checkpoint.messages)
   } else {
     console.log('[continue] No previous session found, starting fresh')
   }
@@ -239,13 +237,13 @@ function extractTextFromContent(content: string | Anthropic.ContentBlockParam[])
     .join('\n')
 }
 
-transcriptRecorder.initSession(continuedFromSession)
+transcriptRecorder.initSession(sessionState.continuedFromSession)
 
 // ── -c 恢复后立即保存初始 checkpoint ──────────────────────────────
 // 防止用户在不发消息的情况下退出，导致新会话没有 checkpoint，
 // 下次 -c 会跳过新会话、又加载旧会话的 checkpoint。
-if (shouldContinue && messages.length > 0) {
-  transcriptRecorder.recordCheckpoint(messages)
+if (shouldContinue && sessionState.messages.length > 0) {
+  transcriptRecorder.recordCheckpoint(sessionState.messages)
 }
 
 // ── 启动完成，清理初始化阶段的 Attachment 噪声 ──────────────────────────
@@ -283,8 +281,16 @@ agentTool.setExecutionContext({
     const notification = result.status === 'completed'
       ? buildBgNotification(result.taskId, 'completed', result.text.slice(0, 200), relativePath)
       : buildBgNotification(result.taskId, 'failed', result.taskId, relativePath, result.error)
-    messages.push({ role: 'user', content: notification })
+    sessionState.appendMessage({ role: 'user', content: notification })
     bridge.emitMessage('system', `[bg:${result.name}] ${result.status === 'completed' ? '√' : '✗'} taskId=${result.taskId}`)
+
+    // 立即 drain 邮箱：后台 teammate 完成时可能已通过 send_mail 投递了详细结果，
+    // 此时主循环可能已结束当前 turn，等下一轮用户输入才查收会延迟。
+    // 这里主动 drain，将 teammate result 邮件即时注入 messages。
+    const mailDrain = drainMailbox()
+    if (mailDrain) {
+      sessionState.appendMessage({ role: 'user', content: mailDrain })
+    }
   },
 })
 const hookManager = new HookManager()
@@ -296,7 +302,7 @@ hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
 
 // 初始时立即同步 auto mode 状态（默认开启），无需等待 toggle 事件
 permissionHook.setAutoMode(bridge.autoMode, autoPermissionAgent)
-bridge.on('autoModeChange', (enabled: boolean) => {
+setAutoModeChangeHandler(enabled => {
   permissionHook.setAutoMode(enabled, autoPermissionAgent)
 })
 
@@ -327,7 +333,7 @@ export async function runBash(cmd: string): Promise<string> {
   if (cmd.trim().toLowerCase().startsWith('mcp')) {
     const args = cmd.trim().slice(3).trim()
     const result = await handleMCPCommand(args, mcpManager)
-    messages.push(
+    sessionState.appendMessages(
       { role: 'user', content: `<mcp-cmd>${escapeForTag(args)}</mcp-cmd>` },
       { role: 'user', content: `<mcp-result>\n${escapeForTag(result)}\n</mcp-result>` },
     )
@@ -338,7 +344,7 @@ export async function runBash(cmd: string): Promise<string> {
   if (!tool) return 'Error: Bash tool not found'
   // 跳过权限检查：用户主动输入 ! 命令即已授权
   const result = await tool.execute({ command: cmd })
-  messages.push(
+  sessionState.appendMessages(
     { role: 'user', content: `<bash-input>${escapeForTag(cmd)}</bash-input>` },
     { role: 'user', content: `<bash-stdout>${escapeForTag(result)}</bash-stdout>` },
   )
@@ -387,11 +393,23 @@ const messageQueue = new MessageQueue()
 export function enqueueUserMessage(msg: string): void {
   messageQueue.enqueue(msg)
 }
+export function enqueueMainMailboxWake(): void {
+  messageQueue.enqueueMailboxWake('main')
+}
+export function subscribeQueue(listener: () => void): () => void {
+  return messageQueue.subscribe(listener)
+}
 export function getQueueLength(): number {
   return messageQueue.length
 }
 export function drainQueue(): string | undefined {
-  return messageQueue.dequeue()
+  while (true) {
+    const item = messageQueue.dequeueItem()
+    if (!item) return undefined
+    if (item.kind === 'user') return item.value
+    const mail = drainMailbox()
+    if (mail) return mail
+  }
 }
 
 /**
@@ -414,9 +432,9 @@ commandRegistry.register(new HelpCommand(commandRegistry))
 commandRegistry.register(new SkillCommand(skillManager, prompt => bridge.askQuestion(prompt)))
 commandRegistry.register(new TaskCommand())
 // RetrospectiveCommand 需要访问 messages，传一个 getter 函数
-commandRegistry.register(new RetrospectiveCommand(client, () => messages, skillManager, bridge))
+commandRegistry.register(new RetrospectiveCommand(client, () => sessionState.messages, skillManager, bridge))
 // TokenStatsCommand 需要访问 lastUsage 和 messages，传 getter 函数
-commandRegistry.register(new TokenStatsCommand(() => lastUsage, () => messages))
+commandRegistry.register(new TokenStatsCommand(() => sessionState.lastUsage, () => sessionState.messages))
 commandRegistry.register(new BgCommand())
 commandRegistry.register(new SchedulerCommand())
 commandRegistry.register(new VoiceCommand())
@@ -452,20 +470,20 @@ function buildSystemSegments(memoryFragment: string): Anthropic.TextBlockParam[]
 }
 
 async function compactIfNeeded(): Promise<void> {
-  const tokenCount = lastUsage ? lastUsage.inputTokens : estimateTokens(messages)
+  const tokenCount = sessionState.lastUsage ? sessionState.lastUsage.inputTokens : estimateTokens(sessionState.messages)
 
   if (tokenCount >= COMPACT_TOKEN_THRESHOLD) {
     bridge.emitCompacting('start', `${tokenCount.toLocaleString()} tokens`)
-    const compacted = await compactMessages(client, modelConfig.getCurrent(), messages)
-    messages.splice(0, messages.length, ...compacted)
-    lastUsage = null
+    const compacted = await compactMessages(client, modelConfig.getCurrent(), sessionState.messages)
+    sessionState.replaceMessages(compacted)
+    sessionState.setUsage(null)
     bridge.emitUsageReset()
-    bridge.emitCompacting('done', `${tokenCount.toLocaleString()} tokens → ${messages.length} 条消息`)
-    transcriptRecorder.recordCompact(tokenCount, messages.length)
+    bridge.emitCompacting('done', `${tokenCount.toLocaleString()} tokens → ${sessionState.messages.length} 条消息`)
+    transcriptRecorder.recordCompact(tokenCount, sessionState.messages.length)
   } else if (tokenCount >= MICRO_COMPACT_TOKEN_THRESHOLD) {
-    const freed = microcompactMessages(messages)
+    const freed = microcompactMessages(sessionState.messages)
     if (freed > 0) {
-      lastUsage = null
+      sessionState.setUsage(null)
       bridge.emitUsageReset()
       bridge.emitCompacting('micro', `释放约 ${freed.toLocaleString()} tokens`)
     }
@@ -533,12 +551,12 @@ export async function runTurn(
   currentTurnTail = new Promise<void>(resolve => { releaseTail = resolve })
   await previous
 
-  agentRunning = true
+  sessionState.setRunning(true)
   currentAbortSignal = signal
   agentTool.setSignal(signal)
 
   try {
-    messages.push({ role: 'user', content: input } as Anthropic.MessageParam)
+    sessionState.appendMessage({ role: 'user', content: input } as Anthropic.MessageParam)
 
     // Transcript: set main agent context + record user input
     transcriptRecorder.pushAgentContext('main', null)
@@ -563,13 +581,13 @@ export async function runTurn(
       model: modelConfig.getCurrent(),
       system: buildSystem,
       tools: toolRegistrar.getAllTools(),
-      messages,
+      messages: sessionState.messages,
       maxTurns: MAX_TURNS,
       executeTool,
       parallelSafeTools: toolRegistrar.getParallelSafeNames(),
       signal,
       backgroundSignal,
-      drainQueue: () => messageQueue.dequeue(),
+      drainQueue: () => drainQueue(),
       drainAttachments: () => attachmentQueue.formatDrain(),
       drainMailbox: () => drainMailbox(),
       onLLMRequest: (model, turn, msgs) => {
@@ -584,8 +602,8 @@ export async function runTurn(
         bridge.emitTurnEnd(text)
         ttsService.flush()
         // Transcript: record LLM response + checkpoint
-        if (lastUsage && text) {
-          transcriptRecorder.recordLLMResponseEnd(text, lastUsage, lastStopReason)
+        if (sessionState.lastUsage && text) {
+          transcriptRecorder.recordLLMResponseEnd(text, sessionState.lastUsage, lastStopReason)
         }
         transcriptRecorder.recordCheckpoint(msgs)
         await hookManager.runOnTurnEnd({
@@ -604,7 +622,7 @@ export async function runTurn(
       },
       onTurnToolReset: () => bridge.emitTurnToolReset(),
       onUsage: stats => {
-        lastUsage = stats
+        sessionState.setUsage(stats)
         bridge.emitUsage(stats)
       },
     })
@@ -671,7 +689,7 @@ export async function runTurn(
         // 3. 轻量 XML 通知推入 messages（LLM 可见）
         const relativePath = path.relative(process.cwd(), outputPath)
         const notification = buildBgNotification(taskId, 'completed', summary, relativePath)
-        messages.push({ role: 'user', content: notification })
+        sessionState.appendMessage({ role: 'user', content: notification })
         // 4. TUI 只显示一行简短提示
         bridge.emitMessage('system', `[BG] √ ${taskDescription} → ${relativePath}`)
       }).catch((err: unknown) => {
@@ -682,7 +700,7 @@ export async function runTurn(
         const outputPath = saveBackgroundResult(taskId, taskDescription, `Error: ${msg}`)
         bgManager.fail(taskId, msg, outputPath)
         const notification = buildBgNotification(taskId, 'failed', taskDescription, `.myagent/background/${taskId}.md`, msg)
-        messages.push({ role: 'user', content: notification })
+        sessionState.appendMessage({ role: 'user', content: notification })
         bridge.emitMessage('system', `[BG] ✗ ${taskDescription}: ${msg}`)
       })
 
@@ -707,7 +725,7 @@ export async function runTurn(
   } finally {
     // Transcript: pop main agent context
     transcriptRecorder.popAgentContext()
-    agentRunning = false
+    sessionState.setRunning(false)
     releaseTail()
   }
 }
@@ -715,7 +733,7 @@ export async function runTurn(
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 const scheduler = new Scheduler(
   prompt => runTurn(prompt),
-  () => agentRunning,
+  () => sessionState.agentRunning,
   bridge,
 )
 scheduler.start()
@@ -803,7 +821,7 @@ if (debugOpts) {
   }
 
   // 从 messages 数组构建输出
-  const result = collector.buildResult(messages as Array<{ role: string; content: string | Array<unknown> }>)
+  const result = collector.buildResult(sessionState.messages as Array<{ role: string; content: string | Array<unknown> }>)
 
   const output = JSON.stringify(result, null, 2)
 
@@ -829,5 +847,23 @@ if (debugOpts) {
 } else {
   // ── 正常 TUI 模式 ─────────────────────────────────────────────────────
   const toolRenderMap = toolRegistrar.buildToolRenderMap()
-  render(React.createElement(App, { bridge, commandParser, runTurn, runBash, toolMap: toolRenderMap, enqueueUserMessage, getQueueLength, dequeueMessage: drainQueue }))
+  render(React.createElement(
+    AppStateProvider,
+    { store: appStateStore },
+    React.createElement(App, {
+      bridge,
+      commandParser,
+      runTurn,
+      runBash,
+      toolMap: toolRenderMap,
+      enqueueUserMessage,
+      enqueueMainMailboxWake,
+      subscribeQueue,
+      subscribeMainMailbox: listener => Mailbox.subscribe('main', listener),
+      hasUnreadMainMail: () => Mailbox.hasUnread('main'),
+      getQueueLength,
+      dequeueMessage: drainQueue,
+      initialMessages: initialTuiMessages,
+    }),
+  ))
 }

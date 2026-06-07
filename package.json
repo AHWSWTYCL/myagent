@@ -8,8 +8,8 @@
     "hello": "tsx src/hello.ts",
     "agent": "tsx src/agent.ts",
     "start": "node dist/agent.js",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run src",
+    "test:watch": "vitest src"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.2",

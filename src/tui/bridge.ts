@@ -5,6 +5,7 @@ import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, MessageRol
 import type { MCPServerInfo } from '../mcp/mcpmanager.js'
 import type { TodoPlanSnapshot } from '../todos/todo.js'
 import type { TeammateTaskInfo } from '../team/taskRegistry.js'
+import { appStateStore, type AppStateStore } from '../state/appState.js'
 
 /**
  * Sub-agent task state exposed by bridge events to the TUI panel.
@@ -26,40 +27,37 @@ export interface SubAgentTask {
 }
 
 export class TuiBridge extends EventEmitter {
-  private _autoMode = true
-  private _backgroundCount = 0
-
-  /**
-   * 启动时由 agent.ts 设置，存放从 checkpoint 恢复的历史消息（ChatMessage[]）。
-   * App.tsx 启动时从该属性读取并初始化 messages state。
-   * 仅在 session 恢复（--continue / -c）时非空。
-   */
-  initialMessages: ChatMessage[] = []
+  constructor(private readonly store: AppStateStore = appStateStore) {
+    super()
+  }
 
   get autoMode() {
-    return this._autoMode
+    return this.store.getState().autoMode
   }
 
   get backgroundCount() {
-    return this._backgroundCount
+    return this.store.getState().backgroundCount
   }
 
   toggleAutoMode() {
-    this._autoMode = !this._autoMode
-    this.emit('autoModeChange', this._autoMode)
-    return this._autoMode
+    const next = !this.store.getState().autoMode
+    this.store.setState(prev => ({ ...prev, autoMode: next }))
+    this.emit('autoModeChange', next)
+    return next
   }
 
   /** 后台任务启动时调用，更新计数。 */
   emitBackgroundStart() {
-    this._backgroundCount++
-    this.emit('backgroundCount', this._backgroundCount)
+    const next = this.store.getState().backgroundCount + 1
+    this.store.setState(prev => ({ ...prev, backgroundCount: next }))
+    this.emit('backgroundCount', next)
   }
 
   /** 后台任务完成/失败时调用，更新计数。 */
   emitBackgroundEnd() {
-    this._backgroundCount = Math.max(0, this._backgroundCount - 1)
-    this.emit('backgroundCount', this._backgroundCount)
+    const next = Math.max(0, this.store.getState().backgroundCount - 1)
+    this.store.setState(prev => ({ ...prev, backgroundCount: next }))
+    this.emit('backgroundCount', next)
   }
 
   askPermission(prompt: string): Promise<PermissionAnswer> {
@@ -81,6 +79,7 @@ export class TuiBridge extends EventEmitter {
   }
 
   emitStatus(msg: string) {
+    this.store.setState(prev => prev.status === msg ? prev : { ...prev, status: msg })
     this.emit('status', msg)
   }
 
@@ -109,6 +108,7 @@ export class TuiBridge extends EventEmitter {
 
   /** Called after each API turn with cumulative token counts. */
   emitUsage(stats: UsageStats) {
+    this.store.setState(prev => ({ ...prev, usage: stats }))
     this.emit('usage', stats)
   }
 
@@ -119,11 +119,14 @@ export class TuiBridge extends EventEmitter {
 
   /** Called when context compaction starts or finishes. state='start'|'done'|'micro' */
   emitCompacting(state: 'start' | 'done' | 'micro', detail?: string) {
+    const compactingState = state === 'start' ? 'running' : state === 'micro' ? 'micro' : 'idle'
+    this.store.setState(prev => ({ ...prev, compactingState }))
     this.emit('compacting', { state, detail })
   }
 
   /** Called after context compaction — resets the token counter in the TUI. */
   emitUsageReset() {
+    this.store.setState(prev => prev.usage === null ? prev : { ...prev, usage: null })
     this.emit('usageReset')
   }
 
@@ -139,6 +142,7 @@ export class TuiBridge extends EventEmitter {
 
   /** Called when MCP server status changes. */
   emitMcpStatus(servers: MCPServerInfo[]) {
+    this.store.setState(prev => ({ ...prev, mcpServers: servers }))
     this.emit('mcp-status', servers)
   }
 
@@ -146,16 +150,42 @@ export class TuiBridge extends EventEmitter {
 
   /** Sub-agent started: creates a new row in the task panel. */
   emitSubAgentStart(name: string, description: string, agentType: string) {
+    const startTime = Date.now()
+    this.store.setState(prev => {
+      const existing = prev.subAgentTasks.find(t => t.name === name && t.status === 'running')
+      if (existing) return prev
+      return {
+        ...prev,
+        subAgentTasks: [...prev.subAgentTasks, {
+          id: `${name}-${startTime}`,
+          name,
+          description,
+          agentType,
+          status: 'running',
+          startTime,
+          toolUseCount: 0,
+          tokenCount: 0,
+        }],
+      }
+    })
     this.emit('subAgentStart', {
       name,
       description,
       agentType,
-      startTime: Date.now(),
+      startTime,
     })
   }
 
   /** Sub-agent progress update: tool counts, token counts, current activity. */
   emitSubAgentProgress(name: string, toolUseCount: number, tokenCount: number, lastActivity?: string) {
+    this.store.setState(prev => ({
+      ...prev,
+      subAgentTasks: prev.subAgentTasks.map(t =>
+        t.name === name && t.status === 'running'
+          ? { ...t, toolUseCount, tokenCount, lastActivity }
+          : t,
+      ),
+    }))
     this.emit('subAgentProgress', { name, toolUseCount, tokenCount, lastActivity })
   }
 
@@ -178,6 +208,15 @@ export class TuiBridge extends EventEmitter {
 
   /** 子 agent 执行完毕，TUI 从面板移除任务行。status may be 'completed'|'failed'|'killed'. */
   emitSubAgentDone(name: string, status: 'completed' | 'failed' | 'killed', error?: string) {
+    const endTime = Date.now()
+    this.store.setState(prev => ({
+      ...prev,
+      subAgentTasks: prev.subAgentTasks.map(t =>
+        t.name === name && t.status === 'running'
+          ? { ...t, status, endTime, error }
+          : t,
+      ),
+    }))
     this.emit('subAgentDone', { name, status, error })
   }
 
@@ -185,6 +224,7 @@ export class TuiBridge extends EventEmitter {
 
   /** Todo plan 创建、任务状态变更时发出。snapshot 为 null 表示 plan 已清空。 */
   emitTodoPlanUpdate(snapshot: TodoPlanSnapshot | null) {
+    this.store.setState(prev => ({ ...prev, todoPlan: snapshot }))
     this.emit('todoPlanUpdate', snapshot)
   }
 
@@ -192,6 +232,7 @@ export class TuiBridge extends EventEmitter {
 
   /** Teammate 任务注册表变更时发出。tasks 为当前全部 teammate 列表。 */
   emitTeammateTasks(tasks: TeammateTaskInfo[]) {
+    this.store.setState(prev => ({ ...prev, teammateTasks: tasks }))
     this.emit('teammateTasks', tasks)
   }
 }

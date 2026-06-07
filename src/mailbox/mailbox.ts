@@ -19,6 +19,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as crypto from 'crypto'
+import { EventEmitter } from 'events'
 
 export type MailKind = 'task' | 'result' | 'status' | 'close' | 'permission'
 
@@ -35,6 +36,11 @@ export interface Mail {
 }
 
 const MAILBOX_BASE = path.join(os.homedir(), '.myagent', 'mailbox')
+const mailboxEvents = new EventEmitter()
+
+function mailboxEvent(agentId: string): string {
+  return `mail:${sanitize(agentId)}`
+}
 
 function mailboxDir(agentId: string): string {
   return path.join(MAILBOX_BASE, sanitize(agentId))
@@ -82,7 +88,34 @@ export class Mailbox {
     }
     const file = path.join(mailboxDir(opts.to), `${mail.id}.json`)
     fs.writeFileSync(file, JSON.stringify(mail, null, 2), 'utf-8')
+    mailboxEvents.emit(mailboxEvent(opts.to), mail)
     return mail
+  }
+
+  static subscribe(agentId: string, listener: (mail: Mail) => void): () => void {
+    const event = mailboxEvent(agentId)
+    mailboxEvents.on(event, listener)
+    return () => mailboxEvents.off(event, listener)
+  }
+
+  static waitForMail(agentId: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve()
+    return new Promise(resolve => {
+      const unsubscribe = Mailbox.subscribe(agentId, done)
+      const abort = () => done()
+
+      function done(): void {
+        unsubscribe()
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }
+
+      signal?.addEventListener('abort', abort, { once: true })
+    })
+  }
+
+  static hasUnread(agentId: string): boolean {
+    return Mailbox.list(agentId).length > 0
   }
 
   /** 列出某个 agent 收件箱中的未读邮件，可按 kind 过滤。 */
