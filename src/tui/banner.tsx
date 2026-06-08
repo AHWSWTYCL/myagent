@@ -32,12 +32,14 @@ const pad = (s: string) => s + ' '.repeat(W - s.length)
 
 const top = '┌' + '─'.repeat(W) + '┐'
 const bottom = '└' + '─'.repeat(W) + '┘'
-const BANNER_ART = [top, ...CONTENT.map(l => `│${pad(l)}│`), bottom].join('\n')
+const BANNER_LINES: readonly string[] = [top, ...CONTENT.map(l => `│${pad(l)}│`), bottom]
 
-export function Banner() {
+export const Banner = React.memo(function Banner() {
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Text color={COFFEE}>{BANNER_ART}</Text>
+      {BANNER_LINES.map((line, i) => (
+        <Text key={i} color={COFFEE}>{line}</Text>
+      ))}
     </Box>
   )
-}
+})

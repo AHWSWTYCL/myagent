@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Box, Text, Static, useInput, useApp } from 'ink'
+import { Box, Text, useInput, useApp } from 'ink'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent } from './types.js'
 import type { TuiBridge } from './bridge.js'
@@ -78,9 +78,6 @@ const MAX_CONTEXT = 200_000
 type RenderPlanItem =
   | { type: 'summary' }
   | { type: 'tool-group'; items: TurnToolItem[] }
-
-/** Stable banner placeholder — never changes, so keep a single reference for Ink Static. */
-const BANNER_ITEM: ChatMessage = { id: '__banner__', role: 'system', content: '' }
 
 function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
   const plan: RenderPlanItem[] = []
@@ -1245,26 +1242,35 @@ ${memory}` }])
   return (
     <ToolRenderProvider toolMap={toolMap}>
     <Box flexDirection="column">
-      <Static
-        items={[BANNER_ITEM, ...staticMessages].filter(Boolean)}
-      >
-        {(msg) => {
-          if (msg.id === '__banner__') return <Banner key="__banner__" />
-          return <MessageRow key={msg.id} msg={msg} diffs={editDiffs} expanded={expandAll} />
-        }}
-      </Static>
+      {/* 历史消息 + Banner，全部在动态 ink 树中渲染（对齐 Claude Code 非
+          fullscreen 路径：Messages.tsx 的 renderableMessages.flatMap）。
+          不使用 <Static>，因为 Static 会把内容写入终端 scrollback，与动态
+          区超视口部分留下的残影一起造成"同段内容打印两次"。React.memo 在
+          MessageRow 内部保证未变化的消息不重复 render。 */}
+      <Banner />
+      {staticMessages.map(msg => (
+        <MessageRow key={msg.id} msg={msg} diffs={editDiffs} expanded={expandAll} />
+      ))}
 
       {/* Streaming LLM response text — rendered BEFORE dynamic tools because
           the LLM's reasoning text appears chronologically before tool calls.
           When tools start, streamingText stays visible; toolEnd removes
-          non-exploration tools from turnTools, so they appear directly in Static,
-          keeping the reading order: reasoning → tools → more reasoning. */}
+          non-exploration tools from turnTools, so they appear directly in
+          history, keeping the reading order: reasoning → tools → more
+          reasoning. We display only the prefix up to the last newline so
+          a half-written line doesn't keep growing the dynamic block (which
+          would interact badly with re-renders). The remainder shows up
+          when the next \n arrives, or all at once on turnEnd. Mirrors
+          Claude Code's visibleStreamingText (REPL.tsx:1505). */}
       {streamingText ? (
         <Box flexDirection="column" marginBottom={1}>
           <Box>
             <Text color="cyan">⏺ </Text>
             <Box flexDirection="column" flexGrow={1}>
-              <StreamingText text={streamingText} showCursor />
+              <StreamingText
+                text={streamingText.substring(0, streamingText.lastIndexOf('\n') + 1) || ''}
+                showCursor
+              />
             </Box>
           </Box>
         </Box>

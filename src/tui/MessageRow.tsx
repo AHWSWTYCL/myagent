@@ -29,7 +29,7 @@ interface Props {
  *   tool:   "  ⎿ {text}"   (indented, gray, no dot)
  *   system: "  · {text}"   (indented, dim)
  */
-export function MessageRow({ msg, diffs, expanded }: Props) {
+export const MessageRow = React.memo(function MessageRow({ msg, diffs, expanded }: Props) {
   if (msg.role === 'user') {
     return (
       <Box>
@@ -98,4 +98,4 @@ export function MessageRow({ msg, diffs, expanded }: Props) {
       </Box>
     </Box>
   )
-}
+})
