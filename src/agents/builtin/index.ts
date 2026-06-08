@@ -12,6 +12,7 @@ import { projectBuilderAgent } from './project_builder.js'
 import { advisorAgent } from './advisor.js'
 import { leaderAgent } from './leader.js'
 import { teammateAgent } from './teammate.js'
+import { goalVerifierAgent } from './goal_verifier.js'
 
 export const builtinAgents: AgentDefinition[] = [
   analystAgent,
@@ -22,6 +23,7 @@ export const builtinAgents: AgentDefinition[] = [
   plannerAgent,
   generatorAgent,
   verifierAgent,
+  goalVerifierAgent,
   coordinatorAgent,
   generalPurposeAgent,
   advisorAgent,

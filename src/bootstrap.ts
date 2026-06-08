@@ -72,6 +72,8 @@ import { VoiceCommand } from './commands/voicecommand.js'
 import { ModelCommand } from './commands/modelcommand.js'
 import { advisorConfig } from './llm/advisor-config.js'
 import { AdvisorCommand } from './commands/advisorcommand.js'
+import { GoalCommand } from './commands/goalcommand.js'
+import { GoalHook } from './hooks/goalhook.js'
 import { modelConfig } from './llm/model-config.js'
 import { ttsService } from './voice/tts.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
@@ -296,6 +298,7 @@ const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt)
 const autoPermissionAgent = new AutoPermissionAgent(client)
 hookManager.register(permissionHook)
 hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
+hookManager.register(new GoalHook(agentTool, enqueueUserMessage, bridge))
 
 // 初始时立即同步 auto mode 状态（默认开启），无需等待 toggle 事件
 permissionHook.setAutoMode(bridge.autoMode, autoPermissionAgent)
@@ -471,6 +474,7 @@ commandRegistry.register(new SchedulerCommand())
 commandRegistry.register(new VoiceCommand())
 commandRegistry.register(new ModelCommand(qs => bridge.askChoice(qs)))
 commandRegistry.register(new AdvisorCommand(qs => bridge.askChoice(qs)))
+commandRegistry.register(new GoalCommand())
 commandRegistry.register(new (await import('./commands/teamcommand.js')).TeamCommand(enqueueUserMessage))
 const commandParser = new CommandParser(commandRegistry)
 

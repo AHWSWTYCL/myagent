@@ -223,6 +223,12 @@ export async function runTurn(
         sessionState.appendMessage({ role: 'user', content: notification })
         // 4. TUI 只显示一行简短提示
         bridge.emitMessage('system', `[BG] √ ${taskDescription} → ${relativePath}`)
+        // 5. 触发 goal 检查（background 完成后的验证，fire-and-forget）
+        hookManager.runOnLoopEnd({
+          messages: sessionState.messages,
+          assistantText: backgroundConclusion,
+          userInput: taskDescription,
+        }).catch(err => console.error('[goal] bg check error:', err))
       }).catch((err: unknown) => {
         transcriptRecorder.popAgentContext()
         bridge.emitBackgroundEnd()
@@ -239,6 +245,13 @@ export async function runTurn(
     }
 
     // ── Normal path (not backgrounded) ─────────────────────────────────────
+    // Notify hooks that the loop has ended (goal check, etc.)
+    await hookManager.runOnLoopEnd({
+      messages: sessionState.messages,
+      assistantText: fullAssistantText,
+      userInput: recallText,
+    })
+
     // Extract memories once per user input (not per inner turn)
     if (fullAssistantText.trim()) {
       extractMemoryFromTurn(recallText, fullAssistantText)

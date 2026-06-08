@@ -17,6 +17,23 @@ export interface TurnEndContext {
   userInput?: string
 }
 
+/**
+ * runAgentLoopStream 整体退出后触发（非 background 分支）。
+ * 与 onTurnEnd 的区别：onTurnEnd 每轮 LLM 调用后都触发，
+ * onLoopEnd 只在整个 loop 彻底结束时（end_turn + 无 drain 内容）触发一次。
+ *
+ * 适用场景：目标达成检查、会话摘要等"agent 停下来后"的副作用。
+ * 回调内可做 side effect（如 enqueue message），但不影响当前 runTurn 的控制流。
+ */
+export interface LoopEndContext {
+  /** 当前会话消息（只读） */
+  messages: Anthropic.MessageParam[]
+  /** 本 loop 中所有 turn 的 assistant 文本拼接 */
+  assistantText: string
+  /** 本轮 runTurn 的原始用户输入 */
+  userInput?: string
+}
+
 // Hook 执行结果：continue 继续执行，block 阻断
 export type HookResult =
   | { action: 'continue' }
@@ -30,6 +47,8 @@ export interface Hook {
   onToolResult?(ctx: HookContext): Promise<void>
   // 内层 queryLoop 每一 turn 模型出 text 后触发（纯观察 / 副作用）
   onTurnEnd?(ctx: TurnEndContext): Promise<void>
+  // queryLoop 全部结束后触发（纯观察 / 副作用；不阻断主流程）
+  onLoopEnd?(ctx: LoopEndContext): Promise<void>
 }
 
 export class HookManager {
@@ -69,6 +88,18 @@ export class HookManager {
         await hook.onTurnEnd(ctx)
       } catch (err) {
         console.error(`[hooks] ${hook.name}.onTurnEnd error:`, err)
+      }
+    }
+  }
+
+  // queryLoop 全部结束后调用（纯观察，不阻断；hook 内部异常被吞掉以免影响主循环）
+  async runOnLoopEnd(ctx: LoopEndContext): Promise<void> {
+    for (const hook of this.hooks) {
+      if (!hook.onLoopEnd) continue
+      try {
+        await hook.onLoopEnd(ctx)
+      } catch (err) {
+        console.error(`[hooks] ${hook.name}.onLoopEnd error:`, err)
       }
     }
   }
