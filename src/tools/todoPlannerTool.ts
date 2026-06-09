@@ -51,7 +51,7 @@ export class TodoPlannerTool extends Tool {
   }
 
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
-    const desc = (input as unknown as TodoPlanArgs).description ?? ''
+    const desc = ((input as unknown as TodoPlanArgs).description ?? '').split('\n')[0]
     return {
       label: '📋 Task Plan',
       args: desc.length > 60 ? desc.slice(0, 57) + '…' : desc,

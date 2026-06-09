@@ -7,27 +7,23 @@ export class GoalCommand extends Command {
   }
 
   get description(): string {
-    return '设置任务完成标准，agent 完成后自动验证是否达标'
+    return '设置任务完成标准，agent 完成后自动验证是否达标。不带参数查看当前目标，/goal clear 清除。'
   }
 
   get usage(): string {
-    return '/goal <条件>          → 设置目标，如 /goal "所有测试通过"\n  /goal                  → 查看当前目标\n  /goal clear            → 清除目标'
+    return '/goal <条件>          → 设置目标\n  /goal                  → 查看当前目标\n  /goal status           → 查看当前目标\n  /goal clear            → 清除目标'
   }
 
   async execute(args: string[]): Promise<void> {
-    const input = args.join(' ').trim()
+    let input = args.join(' ').trim()
+    // 去掉可能被 command parser 保留的外层引号
+    if ((input.startsWith('"') && input.endsWith('"')) || (input.startsWith("'") && input.endsWith("'"))) {
+      input = input.slice(1, -1)
+    }
+    console.error(`[GoalCommand] execute args=[${args.map(a => `"${a}"`).join(', ')}] input="${input}"`)
 
-    if (!input) {
-      // 查看当前目标
-      if (goalManager.isActive()) {
-        const iter = goalManager.getIteration()
-        const max = goalManager.getMaxIterations()
-        console.log(`当前目标：${goalManager.getGoal()}`)
-        console.log(`状态：激活中（已检查 ${iter}/${max} 次）`)
-      } else {
-        console.log('当前无活跃目标。')
-        console.log(`用法：/goal <条件>  例如 /goal "所有测试用例通过"`)
-      }
+    if (!input || input === 'status') {
+      this.showStatus()
       return
     }
 
@@ -45,5 +41,17 @@ export class GoalCommand extends Command {
     goalManager.setGoal(input)
     console.log(`目标已设置：${input}`)
     console.log(`Agent 完成后将自动验证是否达标（最多 ${goalManager.getMaxIterations()} 次迭代）。`)
+  }
+
+  private showStatus(): void {
+    if (goalManager.isActive()) {
+      const iter = goalManager.getIteration()
+      const max = goalManager.getMaxIterations()
+      console.log(`当前目标：${goalManager.getGoal()}`)
+      console.log(`状态：激活中（已检查 ${iter}/${max} 次）`)
+    } else {
+      console.log('当前无活跃目标。')
+      console.log(`用法：/goal <条件>  例如 /goal "所有测试用例通过"`)
+    }
   }
 }

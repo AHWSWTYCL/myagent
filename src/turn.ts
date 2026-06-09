@@ -246,6 +246,7 @@ export async function runTurn(
 
     // ── Normal path (not backgrounded) ─────────────────────────────────────
     // Notify hooks that the loop has ended (goal check, etc.)
+    console.error('[turn] about to call hookManager.runOnLoopEnd, fullAssistantText length=', fullAssistantText.length)
     await hookManager.runOnLoopEnd({
       messages: sessionState.messages,
       assistantText: fullAssistantText,

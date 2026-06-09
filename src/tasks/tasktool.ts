@@ -15,6 +15,14 @@ type TaskAction = 'create' | 'get' | 'list' | 'update' | 'delete' | 'graph'
 export class TaskTool extends Tool {
   private manager = new TaskManager()
 
+  /** 最后一次 list 操作的结构化结果，供 TUI 通过 ToolRenderContext 读取 */
+  lastListPayload: Array<{
+    id: string
+    title: string
+    status: TaskStatus
+    depends_on: string[]
+  }> | null = null
+
   get name(): string {
     return 'task'
   }
@@ -51,7 +59,6 @@ export class TaskTool extends Tool {
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
     const action = String(input.action ?? '')
     if (action === 'list') {
-      // 解析 output 中的任务数量（由 execute 写入 __TASK_JSON__）
       return { label: 'TaskList', args: '' }
     }
     const id = String(input.id ?? input.title ?? '')
@@ -137,16 +144,14 @@ export class TaskTool extends Tool {
       lines.push(formatTaskLine(task))
     }
 
-    // Append a structured payload so the TUI can render a Claude Code-style
-    // checklist. The TUI strips this line; the LLM still sees the human text
-    // above. Sentinel format: __TASK_JSON__:{json}
-    const payload = tasks.map(t => ({
+    // 将结构化数据存到实例属性，供 TUI 通过 ToolRenderContext 读取。
+    // 不再拼入返回文本，避免原始 JSON 污染 LLM 上下文（浪费 token）。
+    this.lastListPayload = tasks.map(t => ({
       id: t.id,
       title: t.title,
       status: t.status,
       depends_on: t.depends_on,
     }))
-    lines.push(`__TASK_JSON__:${JSON.stringify(payload)}`)
 
     return lines.join('\n')
   }

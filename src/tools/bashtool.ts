@@ -270,7 +270,8 @@ export class BashTool extends Tool {
     }
 
     renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
-        return { label: 'Bash', args: Tool.truncate(String(input.command ?? ''), 120) }
+        const cmd = String(input.command ?? '').replace(/\n+/g, ' ').trim()
+        return { label: 'Bash', args: Tool.truncate(cmd, 120) }
     }
 
     renderToolResult(output: string, isError: boolean): string[] {

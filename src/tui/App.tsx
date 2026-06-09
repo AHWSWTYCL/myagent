@@ -28,6 +28,7 @@ import { ttsService } from '../voice/tts.js'
 import { BackgroundTasksDialog } from './BackgroundTasksDialog.js'
 import { TeammateConversationView } from './TeammateConversationView.js'
 import { Mailbox } from '../mailbox/mailbox.js'
+import { goalManager } from '../goal/goalManager.js'
 import { useAppState, useSetAppState } from '../state/AppStateProvider.js'
 import { setStdioLogSink } from '../mcp/mcptransport.js'
 
@@ -197,6 +198,16 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const [attachmentErrors, setAttachmentErrors] = useState<string[]>([])
   const pendingAttachmentCheckRef = useRef<string | null>(null) // 防止异步竞态
 
+  // ── Goal 状态（goalManager 是普通单例，不触发 React re-render） ──────
+  const [goalText, setGoalText] = useState<string | undefined>(() =>
+    goalManager.isActive() ? `🎯 ${(goalManager.getGoal() ?? '').slice(0, 20)} [${goalManager.getIteration()}/${goalManager.getMaxIterations()}]` : undefined
+  )
+  const refreshGoalText = useCallback(() => {
+    setGoalText(goalManager.isActive()
+      ? `🎯 ${(goalManager.getGoal() ?? '').slice(0, 20)} [${goalManager.getIteration()}/${goalManager.getMaxIterations()}]`
+      : undefined)
+  }, [])
+
   // ── MCP 状态 ─────────────────────────────────────────────────────────
   const mcpServers = useAppState(s => s.mcpServers)
 
@@ -284,6 +295,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
     on('message', ({ role, content }: { role: ChatMessage['role']; content: string }) => {
       setMessages(prev => [...prev, { id: nextId(), role, content }])
+      refreshGoalText()
     })
 
     on('toolStart', ({ callId, name, input }: { callId: string; name: string; input: unknown }) => {
@@ -1095,11 +1107,21 @@ ${memory}` }])
           // and drainMailbox picks them up during the runAgentLoopStream drain phase.
           if (hasUnreadMainMail?.()) {
             process.stderr.write(`[tui:processQueue] mailbox-wake consumed, has unread mails → injecting trigger\n`)
+            turnEndedRef.current = false
+            streamingRef.current = ''
+            setStreamingText('')
             await runTurn('(mailbox wake — check for new messages)', ac.signal, bgAc.signal)
             continue
           }
           break
         }
+        // Reset per-turn streaming state before each runTurn. turnEndedRef is set
+        // to true when the previous turn's turnEnd event fires; without resetting it
+        // here, text deltas from goal-feedback turns (and any subsequent queued
+        // messages) would be silently dropped by the 'text' event handler.
+        turnEndedRef.current = false
+        streamingRef.current = ''
+        setStreamingText('')
         const result = await runTurn(nextMsg, ac.signal, bgAc.signal)
         if (result && (result as any).backgrounded) {
           process.stderr.write(`[tui:processQueue] turn backgrounded, breaking loop\n`)
@@ -1122,6 +1144,7 @@ ${memory}` }])
       abortControllerRef.current = null
       isProcessingRef.current = false
       setIsProcessing(false)
+      refreshGoalText()
       process.stderr.write(`[tui:processQueue] finished — isProcessing set to false\n`)
       setAppState(prev => prev.status ? { ...prev, status: '' } : prev)
     }
@@ -1455,6 +1478,7 @@ ${memory}` }])
         transientHint={transientHint}
         subAgentTasks={visibleTasks}
         backgroundCount={backgroundCount}
+        goalText={goalText}
       />
 
       {mcpServers.length > 0 ? (

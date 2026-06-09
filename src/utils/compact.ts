@@ -11,10 +11,23 @@ const COMPACT_SYSTEM = `你是一个对话历史压缩助手。你的任务是�
 - 用中文输出摘要
 - 直接输出摘要内容，不要加任何前缀标题`
 
-const KEEP_RECENT = 10       // 完整压缩后保留最近 N 条原始消息
-const MC_KEEP_RECENT_TURNS = 5  // microcompact 保留最近 N 轮（每轮 = 一次 user+assistant 交换）
+function truncateToolInput(input: Record<string, unknown>): string {
+  const MAX_FIELD_LEN = 80
+  const truncated: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(input)) {
+    if (typeof v === 'string' && v.length > MAX_FIELD_LEN) {
+      truncated[k] = v.slice(0, MAX_FIELD_LEN) + `…[截断 ${v.length - MAX_FIELD_LEN} 字符]`
+    } else {
+      truncated[k] = v
+    }
+  }
+  return JSON.stringify(truncated)
+}
 
-export const MICRO_COMPACT_TOKEN_THRESHOLD = 100_000
+const KEEP_RECENT = 10       // 完整压缩后保留最近 N 条原始消息
+const MC_KEEP_RECENT_TURNS = 3  // microcompact 保留最近 N 轮（每轮 = 一次 user+assistant 交换）
+
+export const MICRO_COMPACT_TOKEN_THRESHOLD = 80_000
 export const COMPACT_TOKEN_THRESHOLD = 150_000
 
 // 这些工具的 result 内容体积大但事后价值低，microcompact 时直接清除
@@ -146,11 +159,11 @@ export async function compactMessages(
       const text = m.content
         .map(b => {
           if (b.type === 'text') return b.text
-          if (b.type === 'tool_use') return `[调用工具 ${b.name}: ${JSON.stringify(b.input)}]`
+          if (b.type === 'tool_use') return `[调用工具 ${b.name}: ${truncateToolInput(b.input as Record<string, unknown>)}]`
           if (b.type === 'tool_result') {
             const c = b.content
             const result = typeof c === 'string' ? c : Array.isArray(c) ? c.map(x => x.type === 'text' ? x.text : '').join('') : ''
-            return `[工具结果: ${result.slice(0, 500)}${result.length > 500 ? '...' : ''}]`
+            return `[工具结果: ${result.slice(0, 150)}${result.length > 150 ? '...' : ''}]`
           }
           return ''
         })
@@ -170,9 +183,7 @@ export async function compactMessages(
   const summaryBlock = response.content.find(b => b.type === 'text')
   const summary = summaryBlock ? summaryBlock.text.trim() : '（对话历史已压缩）'
 
-  const continuationMessage = `This session is being continued from a previous conversation that has been compacted.
-
-以下是之前对话的摘要：
+  const continuationMessage = `以下是从之前对话压缩而来的会话摘要：
 
 ${summary}`
 

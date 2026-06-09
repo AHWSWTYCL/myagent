@@ -8,6 +8,7 @@
     "hello": "tsx src/hello.ts",
     "agent": "tsx src/agent.ts",
     "start": "node dist/agent.js",
+    "pretest": "node -e \"const v=process.versions.node.split('.');if(+v[0]<20){console.error('❌ Node >=20.12.0 required, got '+process.version);process.exit(1)}\"",
     "test": "vitest run src",
     "test:watch": "vitest src"
   },
@@ -22,6 +23,9 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=20.12.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

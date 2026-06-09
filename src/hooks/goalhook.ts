@@ -26,6 +26,7 @@ export class GoalHook implements Hook {
   ) {}
 
   async onLoopEnd(ctx: LoopEndContext): Promise<void> {
+    console.error('[GoalHook] onLoopEnd called, isActive=', goalManager.isActive(), 'goal=', goalManager.getGoal())
     if (!goalManager.isActive()) return
 
     // 先检查上限，再递增（保证第 N 次调用时 iter=N，执行 N 次后停止）
@@ -82,7 +83,7 @@ export class GoalHook implements Hook {
     goal: string,
     ctx: LoopEndContext,
   ): Promise<{ approved: boolean; feedback: string }> {
-    const messageSummary = this.summarizeMessages(ctx.messages, 20)
+    const messageSummary = this.summarizeMessages(ctx.messages, 5)
 
     const verifierPrompt = `## Goal (Success Criterion)
 ${goal}

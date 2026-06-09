@@ -1,10 +1,11 @@
 import React from 'react'
 import { Box, Text } from 'ink'
 import type { ToolCallPayload } from './types.js'
-import { parseTaskListPayload, TaskListView } from './TaskListView.js'
+import { TaskListView, type TaskItem } from './TaskListView.js'
 import { GlowingDot, type DotStatus } from './GlowingDot.js'
 import { TaskExecutionProgress, useTaskProgressFromOutput } from './TaskExecutionProgress.js'
-import { useToolRender, useToolResult } from './ToolRenderContext.js'
+import { useToolRender, useToolResult, useToolInstance } from './ToolRenderContext.js'
+import type { TaskTool } from '../tasks/tasktool.js'
 
 interface Props {
   payload: ToolCallPayload
@@ -36,8 +37,10 @@ export function ToolCallView({ payload, expanded, focused, onActivate }: Props) 
   const { label, args } = useToolRender(name, inputRecord)
   const summary = useToolResult(name, output, !!isError, inputRecord)
 
-  // Special case: `task` tool's list action emits a structured payload
-  const taskItems = name === 'task' ? parseTaskListPayload(output) : null
+  // Special case: `task` tool's list action — read structured data from tool instance
+  // side-channel instead of parsing a sentinel from output (avoids polluting LLM context).
+  const taskToolInstance = useToolInstance('task') as TaskTool | undefined
+  const taskItems: TaskItem[] | null = name === 'task' ? (taskToolInstance?.lastListPayload ?? null) : null
 
   // Decide dot status based on tool result
   const status: DotStatus = isError ? 'error' : 'success'

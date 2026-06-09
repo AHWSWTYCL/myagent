@@ -57,6 +57,10 @@ export class AgentTool extends Tool {
   private onBackgroundAgentResultFn?: (result: BackgroundAgentResult) => void
   private transcriptRecorder?: TranscriptRecorder
   private currentSignal?: AbortSignal
+  // 缓存：避免每轮 LLM 调用都重建 description 和 input_schema
+  private _descCache?: string
+  private _schemaCache?: { type: 'object'; properties: object; required: string[] }
+  private _agentCount = -1
 
   constructor(
     private registry: AgentRegistry,
@@ -101,14 +105,28 @@ export class AgentTool extends Tool {
     const task = String(input.task ?? '')
     const isBg = input.background === true
     const label = isBg ? `Background(${agentName})` : `Task(${agentName})`
-    return { label, args: task ? Tool.truncate(task, 100) : '' }
+    const taskFirstLine = task.split('\n')[0]
+    return { label, args: taskFirstLine ? Tool.truncate(taskFirstLine, 100) : '' }
   }
 
   renderToolResult(output: string, isError: boolean): string[] {
     return Tool.summarize(output, isError)
   }
 
+  /** agent 列表变化时自动失效缓存 */
+  private isCacheValid(): boolean {
+    return this._agentCount === this.registry.list().length && this._agentCount >= 0
+  }
+
+  private invalidateCache(): void {
+    this._agentCount = this.registry.list().length
+    this._descCache = undefined
+    this._schemaCache = undefined
+  }
+
   get description(): string {
+    if (!this.isCacheValid()) this.invalidateCache()
+    if (this._descCache) return this._descCache
     const lines = [
       'Spawn a sub-agent to handle a self-contained task.',
       'Pick `agent` from the registered list. Each agent has its own description, allowed tools and input schema; the union of input fields is exposed below — pass only what the chosen agent expects.',
@@ -118,7 +136,8 @@ export class AgentTool extends Tool {
     for (const a of this.registry.list()) {
       lines.push(`- **${a.name}** — ${a.description.replace(/\s+/g, ' ').trim()}`)
     }
-    return lines.join('\n')
+    this._descCache = lines.join('\n')
+    return this._descCache
   }
 
   get inputSchemaZod() {
@@ -139,6 +158,9 @@ export class AgentTool extends Tool {
   }
 
   get input_schema(): { type: 'object'; properties: object; required: string[] } {
+    if (!this.isCacheValid()) this.invalidateCache()
+    if (this._schemaCache) return this._schemaCache
+
     const properties: Record<string, unknown> = {
       agent: {
         type: 'string',
@@ -165,11 +187,12 @@ export class AgentTool extends Tool {
         properties[k] = v
       }
     }
-    return {
+    this._schemaCache = {
       type: 'object',
       properties,
       required: ['agent'],
     }
+    return this._schemaCache
   }
 
   async checkPermission(): Promise<import('./tool.js').ToolPermissionResult> {

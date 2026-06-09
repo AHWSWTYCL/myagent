@@ -297,14 +297,18 @@ export class Mailbox {
   }
 }
 
-/** 把邮件渲染成可读字符串（给 LLM 看）。 */
+/** 把邮件渲染成可读字符串（给 LLM 看）。正文超过 1000 字符时截断。 */
 export function formatMail(m: Mail): string {
+  const MAX_BODY = 1000
+  const body = m.body.length > MAX_BODY
+    ? m.body.slice(0, MAX_BODY) + `\n…[截断 ${m.body.length - MAX_BODY} 字符，完整内容通过 check_mail(mode=pop) 读取]`
+    : m.body
   const metaStr = m.meta ? `\nmeta: ${JSON.stringify(m.meta)}` : ''
   return [
     `[${m.id}] kind=${m.kind} from=${m.from} → ${m.to}`,
     `subject: ${m.subject}`,
     `created_at: ${m.created_at}${metaStr}`,
     '',
-    m.body,
+    body,
   ].join('\n')
 }

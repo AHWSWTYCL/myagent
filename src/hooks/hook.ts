@@ -94,8 +94,10 @@ export class HookManager {
 
   // queryLoop 全部结束后调用（纯观察，不阻断；hook 内部异常被吞掉以免影响主循环）
   async runOnLoopEnd(ctx: LoopEndContext): Promise<void> {
+    console.error('[HookManager] runOnLoopEnd: hooks count=', this.hooks.length)
     for (const hook of this.hooks) {
       if (!hook.onLoopEnd) continue
+      console.error('[HookManager] calling', hook.name, '.onLoopEnd')
       try {
         await hook.onLoopEnd(ctx)
       } catch (err) {
