@@ -448,16 +448,7 @@ export function drainMailbox(agentId?: string): string | undefined {
   // drainedMailIds 去重集合保证即使邮件未被消费也不会重复注入。
 
   const header = `[New Mail — ${newMails.length} unread from teammates]`
-  const instruction = [
-    '',
-    '⚠️ 你必须逐封处理以上邮件：',
-    '1. 用 check_mail mode=pop 取出一封（pop 会标记已读，所以处理完再 pop 下一封）',
-    '2. 根据邮件内容决定行动：用 send_mail 回复，或执行请求的任务',
-    '3. 重复直到 check_mail 返回 "(empty)"',
-    '不要静默忽略任何邮件。',
-  ].join('\n')
-
-  return `${header}\n${instruction}\n\n${formatted}`
+  return `${header}\n\n${formatted}`
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -478,9 +469,24 @@ commandRegistry.register(new GoalCommand())
 commandRegistry.register(new (await import('./commands/teamcommand.js')).TeamCommand(enqueueUserMessage))
 const commandParser = new CommandParser(commandRegistry)
 
+// advisor 不可用时预先裁剪 stable text，模块级缓存（advisor 可用性运行时不变化）
+let _cachedStableText: string | null = null
+function getStableText(agentSection: string | undefined): string {
+  if (_cachedStableText) return _cachedStableText
+  let text = getSystemPrompt(agentSection)
+  if (!advisorConfig.available) {
+    text = text.replace(
+      /# Advisor Agent 使用规范\n\n\*\*核心原则[\s\S]*?(?=\n# [^#])/,
+      '',
+    ).replace(/\n{3,}/g, '\n\n') // 清理多余空行
+  }
+  _cachedStableText = text
+  return text
+}
+
 /**
  * Build the system prompt as TWO segments so prompt cache stays warm:
- *   - stable: base prompt + tools section + agent registry description
+ *   - stable: base prompt + agent registry description
  *     (only changes when code/agents change)
  *   - dynamic: recalled memory + active skills (changes per user input / skill toggle)
  * Only the stable segment carries cache_control. The dynamic segment is appended
@@ -488,7 +494,7 @@ const commandParser = new CommandParser(commandRegistry)
  */
 export function buildSystemSegments(memoryFragment: string): Anthropic.TextBlockParam[] {
   const agentSection = agentRegistry.describeForPrompt() || undefined
-  const stableText = getSystemPrompt(agentSection)
+  const stableText = getStableText(agentSection)
 
   const dynamicParts: string[] = []
   if (memoryFragment) dynamicParts.push(`## 相关记忆\n${memoryFragment}`)

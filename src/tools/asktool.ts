@@ -43,7 +43,9 @@ export class AskTool extends Tool {
 
   renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
     const prompt = typeof input.prompt === 'string' ? input.prompt : ''
-    return { label: 'AskUser', args: prompt }
+    const firstLine = prompt.split('\n')[0]
+    const args = firstLine.length > 60 ? firstLine.slice(0, 59) + '…' : firstLine
+    return { label: 'AskUser', args }
   }
 
   /** 用户交互工具，再走权限确认就成了循环提问，直接放行。 */

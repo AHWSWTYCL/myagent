@@ -52,11 +52,11 @@ export class ChoiceTool extends Tool {
     const questions = Array.isArray(input.questions) ? input.questions : []
     if (questions.length === 0) return { label: 'AskUserChoice', args: '' }
     const first = questions[0] as Record<string, unknown> | undefined
-    const firstPrompt = typeof first?.prompt === 'string' ? first.prompt : ''
-    const suffix = questions.length > 1
-      ? `${firstPrompt} +${questions.length - 1} more`
-      : firstPrompt
-    return { label: 'AskUserChoice', args: suffix }
+    const firstPrompt = typeof first?.prompt === 'string' ? first.prompt.split('\n')[0] : ''
+    const tail = questions.length > 1 ? ` +${questions.length - 1} more` : ''
+    const maxLen = 60 - tail.length
+    const truncated = firstPrompt.length > maxLen ? firstPrompt.slice(0, maxLen - 1) + '…' : firstPrompt
+    return { label: 'AskUserChoice', args: truncated + tail }
   }
 
   /** ChoiceTool 本身就是用户交互工具，再走权限确认就是循环提问，直接放行。 */

@@ -141,6 +141,7 @@ interface FooterProps {
   modelName?: string
   subAgentTasks?: SubAgentTask[]
   backgroundCount?: number
+  goalText?: string
 }
 
 const fmt = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
@@ -168,6 +169,7 @@ export function Footer({
   modelName,
   subAgentTasks,
   backgroundCount = 0,
+  goalText,
 }: FooterProps) {
   const left = hasSuggestions
     ? '↑↓ navigate · tab/→ accept · esc close · enter run'
@@ -197,6 +199,12 @@ export function Footer({
       <Box justifyContent="space-between" paddingX={1}>
         <Text color="gray" dimColor>{left}</Text>
         <Box>
+          {goalText ? (
+            <>
+              <Text color="yellow">{goalText}</Text>
+              <Text color="gray" dimColor>  ·  </Text>
+            </>
+          ) : null}
           {backgroundCount > 0 ? (
             <>
               <Text color="yellow" bold>{`[bg:${backgroundCount}]`}</Text>
