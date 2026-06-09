@@ -1,6 +1,6 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import TextInput from 'ink-text-input'
+import { MultilineTextInput } from './MultilineTextInput.js'
 import type { Suggestion } from '../commands/commandregistry.js'
 import type { FileAttachment } from '../utils/attachments.js'
 import type { SubAgentTask } from './bridge.js'
@@ -95,7 +95,7 @@ export function InputBox(props: InputBoxProps) {
       >
         <Box>
           <Text color={promptColor as any} bold>{promptGlyph}</Text>
-          <TextInput
+          <MultilineTextInput
             value={inputValue}
             onChange={onChange}
             onSubmit={onSubmit}
@@ -175,7 +175,7 @@ export function Footer({
     ? '↑↓ navigate · tab/→ accept · esc close · enter run'
     : isProcessing
       ? 'esc interrupt · ctrl+e stop tts · ctrl+b background · / commands · @ files'
-      : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · ctrl+o ${expanded ? 'collapse' : 'expand'} · ctrl+l logs`
+      : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · \\ then enter newline · ctrl+o ${expanded ? 'collapse' : 'expand'} · ctrl+l logs`
 
   // Only show sub-agent summary in Footer when >=2 parallel agents.
   // With a single agent, the tool card header (e.g. "⏺ Task(explore)") is sufficient.
