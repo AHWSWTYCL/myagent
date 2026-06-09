@@ -8,25 +8,6 @@ export interface TaskItem {
   depends_on?: string[]
 }
 
-const SENTINEL = '__TASK_JSON__:'
-
-/**
- * Try to extract structured task data emitted by the task tool's list action.
- * Returns null if the output doesn't carry a payload.
- */
-export function parseTaskListPayload(output: string): TaskItem[] | null {
-  const idx = output.indexOf(SENTINEL)
-  if (idx < 0) return null
-  const json = output.slice(idx + SENTINEL.length).trim()
-  try {
-    const parsed = JSON.parse(json)
-    if (Array.isArray(parsed)) return parsed as TaskItem[]
-  } catch {
-    // not parseable
-  }
-  return null
-}
-
 const STATUS_GLYPH: Record<TaskItem['status'], string> = {
   done:        '✔',
   in_progress: '◼',

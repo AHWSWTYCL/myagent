@@ -20,6 +20,15 @@ export function ToolRenderProvider({ toolMap, children }: {
 }
 
 /**
+ * 获取工具实例（不做渲染，返回原始 Tool 对象）。
+ * 用于 TUI 组件从工具实例读取 side-channel 数据（如 TaskTool.lastListPayload）。
+ */
+export function useToolInstance(name: string): Tool | undefined {
+  const map = useContext(ToolRenderContext)
+  return map?.get(name)
+}
+
+/**
  * 根据工具名获取渲染信息。
  * 返回 { label, args } 头部渲染结果。
  * 找不到工具时退回默认格式。
