@@ -48,8 +48,15 @@ export class ChoiceTool extends Tool {
 
   get parallelSafe(): boolean { return false }
 
-  renderToolUseMessage(_input: Record<string, unknown>): ToolRenderHeader {
-    return { label: 'AskUserChoice', args: '' }
+  renderToolUseMessage(input: Record<string, unknown>): ToolRenderHeader {
+    const questions = Array.isArray(input.questions) ? input.questions : []
+    if (questions.length === 0) return { label: 'AskUserChoice', args: '' }
+    const first = questions[0] as Record<string, unknown> | undefined
+    const firstPrompt = typeof first?.prompt === 'string' ? first.prompt : ''
+    const suffix = questions.length > 1
+      ? `${firstPrompt} +${questions.length - 1} more`
+      : firstPrompt
+    return { label: 'AskUserChoice', args: suffix }
   }
 
   /** ChoiceTool 本身就是用户交互工具，再走权限确认就是循环提问，直接放行。 */

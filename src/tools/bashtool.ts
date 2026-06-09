@@ -43,6 +43,7 @@ const READONLY_PREFIXES = [
     'pwd', 'which', 'type', 'where',
     'du ', 'df ', 'stat ', 'file ',
     'env', 'printenv',
+    'gh auth status', 'gh auth token',
     'git status', 'git log', 'git diff', 'git show', 'git branch', 'git stash list',
     'git stash show', 'git diff --staged', 'git diff --cached',
     'git config', 'git remote', 'git ls-files', 'git ls-tree',
@@ -78,6 +79,10 @@ const SAFE_WRITE_PREFIXES = [
     'go build', 'go run', 'go test', 'go mod', 'go install', 'go get',
     'rustup',
     'make', 'cmake', 'cmake --build', 'cmake --install',
+    // gh CLI（GitHub 操作，需 gh auth login 认证）
+    'gh auth', 'gh api', 'gh repo', 'gh issue', 'gh pr',
+    'gh release', 'gh run', 'gh workflow', 'gh secret', 'gh variable',
+    'gh search', 'gh gist', 'gh label', 'gh project',
     // git 写操作
     'git add', 'git commit', 'git push', 'git pull', 'git merge',
     'git checkout', 'git switch', 'git reset', 'git revert',
