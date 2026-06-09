@@ -125,6 +125,7 @@ toolRegistrar.registerTool(new (await import('./tools/todoUpdateTool.js')).TodoU
 toolRegistrar.registerTool(new (await import('./tools/createteamtool.js')).CreateTeamTool())
 toolRegistrar.registerTool(new (await import('./tools/sendmailtool.js')).SendMailTool('main'))
 toolRegistrar.registerTool(new (await import('./tools/checkmailtool.js')).CheckMailTool('main'))
+toolRegistrar.registerTool(new (await import('./tools/gitworktreetool.js')).GitWorktreeTool())
 
 // ── Init agent registry & unified agent tool ─────────────────────────────────
 const { AgentRegistry } = await import('./agents/registry.js')

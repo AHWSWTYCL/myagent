@@ -32,11 +32,51 @@ import { parseTeammateArgs } from './teammate/teammateRuntime.js'
 import { teammateAgent } from './agents/builtin/teammate.js'
 import { SendMailTool } from './tools/sendmailtool.js'
 import { CheckMailTool } from './tools/checkmailtool.js'
+import { WorktreeManager } from './worktree/worktreeManager.js'
 import type Anthropic from '@anthropic-ai/sdk'
 
 // ── 解析 CLI 参数，决定运行模式：teammate TUI > debug > TUI ──────────────
 const teammateOpts = parseTeammateArgs()
 const debugOpts = parseDebugArgs()
+
+// ── --worktree / -w: 启动时自动创建 worktree ──────────────────────────
+// null = 未指定; undefined = 无 name（随机生成）; string = 指定 name
+// 注意：会从 process.argv 中移除 --worktree 参数，避免后续 parser 误解析
+function parseWorktreeArg(): string | null | undefined {
+  const args = process.argv
+  for (let i = 2; i < args.length; i++) {
+    if (args[i] === '--worktree' || args[i] === '-w') {
+      const hasValue = args[i + 1] && !args[i + 1].startsWith('-')
+      const name = hasValue ? args[i + 1] : undefined
+      args.splice(i, hasValue ? 2 : 1) // 从 argv 中移除，避免干扰 debug/teammate parser
+      return name
+    }
+  }
+  return null
+}
+
+const worktreeName = parseWorktreeArg()
+if (worktreeName !== null && !teammateOpts) {
+  const wm = WorktreeManager.getInstance()
+  const r = wm.create(worktreeName)
+  if (!r.success) {
+    originalConsoleError(`[worktree] Failed: ${r.error}`)
+    process.exit(1)
+  }
+  originalConsoleError(`[worktree] Working in: ${r.name} (${r.branch})`)
+  originalConsoleError(`[worktree]   path: ${r.path}`)
+  // 退出时提示 worktree 仍在，可复用
+  const cleanup = () => {
+    const st = wm.getStatus()
+    if (st) {
+      originalConsoleError(`\n[worktree] Worktree "${st.worktreeName}" still exists at ${st.worktreePath}`)
+      originalConsoleError(`[worktree] Resume: --worktree ${st.worktreeName}`)
+      originalConsoleError(`[worktree] Cleanup: node -e "require('./dist/worktree/worktreeManager.js').WorktreeManager.getInstance().exit(true)"`)
+    }
+  }
+  process.on('SIGINT', cleanup)
+  process.on('SIGTERM', cleanup)
+}
 
 if (teammateOpts) {
   // ════════════════════════════════════════════════════════════════════════
