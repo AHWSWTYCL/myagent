@@ -290,7 +290,11 @@ function balanceFences(text: string): string {
       inFence = false
     }
   }
-  return inFence ? text + '\n' + fenceMarker : text
+  if (inFence) return text + '\n' + fenceMarker
+  // 修复流式过程中未闭合的 bold（奇数个 **）
+  const boldCount = (text.match(/\*\*/g) ?? []).length
+  if (boldCount % 2 !== 0) return text + '**'
+  return text
 }
 
 export function StreamingText({ text, showCursor = false }: { text: string; showCursor?: boolean }) {

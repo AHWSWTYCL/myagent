@@ -135,10 +135,14 @@ enterPlanModeTool.inject(() => {
   bridge.enterPlanMode()
   return prev
 })
-exitPlanModeTool.inject(() => {
-  bridge.exitPlanMode()
-  return bridge.mode
-})
+exitPlanModeTool.inject(
+  () => {
+    bridge.exitPlanMode()
+    return bridge.mode
+  },
+  (qs) => bridge.askChoice(qs),
+  (prompt) => bridge.askQuestion(prompt),
+)
 toolRegistrar.registerTool(enterPlanModeTool)
 toolRegistrar.registerTool(exitPlanModeTool)
 

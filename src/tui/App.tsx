@@ -1294,7 +1294,7 @@ ${memory}` }])
             <Text color="cyan">⏺ </Text>
             <Box flexDirection="column" flexGrow={1}>
               <StreamingText
-                text={streamingText.substring(0, streamingText.lastIndexOf('\n') + 1) || ''}
+                text={streamingText}
                 showCursor
               />
             </Box>
@@ -1434,13 +1434,13 @@ ${memory}` }])
           customValues={choiceCustomValues}
         />
       )}
-      {inputMode !== 'chat' || appMode === 'teammateView' ? null : (
+      {(inputMode !== 'chat' && inputMode !== 'question') || appMode === 'teammateView' ? null : (
         <InputBox
           inputValue={inputValue}
           onChange={handleInputChange}
           onSubmit={handleSubmit}
           isProcessing={isProcessing}
-          isQuestion={false}
+          isQuestion={inputMode === 'question'}
           questionPrompt={promptText}
           attachments={attachments}
           attachmentErrors={attachmentErrors}
