@@ -15,6 +15,7 @@ import {
   toolRegistrar,
   hookManager,
   sessionState,
+  sessionManager,
   transcriptRecorder,
   agentTool,
   skillManager,
@@ -158,11 +159,10 @@ export async function runTurn(
         fullAssistantText += text + '\n'
         bridge.emitTurnEnd(text)
         ttsService.flush()
-        // Transcript: record LLM response + checkpoint
         if (sessionState.lastUsage && text) {
           transcriptRecorder.recordLLMResponseEnd(text, sessionState.lastUsage, lastStopReason)
         }
-        transcriptRecorder.recordCheckpoint(msgs)
+        sessionManager.recordCheckpoint(msgs)
         await hookManager.runOnTurnEnd({
           messages: msgs,
           assistantText: text,
@@ -176,10 +176,12 @@ export async function runTurn(
       onToolEnd: (callId, name, input, output) => {
         bridge.emitToolEnd(callId, name, input, output)
         transcriptRecorder.recordToolEnd(callId, name, input, output)
+        sessionManager.recordToolCall()
       },
       onTurnToolReset: () => bridge.emitTurnToolReset(),
       onUsage: stats => {
         sessionState.setUsage(stats)
+        sessionManager.recordTurn(stats)
         bridge.emitUsage(stats)
       },
     })

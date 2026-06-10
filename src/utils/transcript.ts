@@ -136,6 +136,33 @@ export interface CompactData {
   afterMessages: number
 }
 
+// ── Session metadata event types ─────────────────────────────────────
+
+export interface CustomTitleData {
+  customTitle: string
+  sessionId: string
+}
+
+export interface TagData {
+  tag: string
+  sessionId: string
+}
+
+export interface LastPromptData {
+  lastPrompt: string
+  sessionId: string
+}
+
+export interface SessionStatsData {
+  sessionId: string
+  turns: number
+  toolCalls: number
+  tokensIn: number
+  tokensOut: number
+  compactions: number
+  errors: number
+}
+
 // ── Event union ─────────────────────────────────────────────────────
 
 export type TranscriptEvent =
@@ -151,6 +178,10 @@ export type TranscriptEvent =
   | { type: 'checkpoint'; data: CheckpointData }
   | { type: 'background_handoff'; data: BackgroundHandoffData }
   | { type: 'compact'; data: CompactData }
+  | { type: 'custom_title'; data: CustomTitleData }
+  | { type: 'tag'; data: TagData }
+  | { type: 'last_prompt'; data: LastPromptData }
+  | { type: 'session_stats'; data: SessionStatsData }
 
 // ── TranscriptRecorder ──────────────────────────────────────────────
 
@@ -171,6 +202,12 @@ export class TranscriptRecorder {
   private checkpointSeq = 0
   /** Session 开始时间 */
   private startTime = 0
+
+  // ── 写入缓冲（批量写入优化，减少 fsync 次数） ──────────────────────
+  private writeBuffer: string[] = []
+  private flushTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly FLUSH_INTERVAL_MS = 100
+  private readonly FLUSH_BATCH_SIZE = 50
 
   // ── Session lifecycle ─────────────────────────────────────────────
 
@@ -217,6 +254,10 @@ export class TranscriptRecorder {
    */
   closeSession(): void {
     if (!this.transcriptPath) return
+
+    // 强制 flush 缓冲中所有事件
+    this.flushBufferSync()
+
     if (!fs.existsSync(this.transcriptPath)) return
 
     this.writeEventSync({
@@ -227,8 +268,10 @@ export class TranscriptRecorder {
       },
     })
 
-    // 写入 .closed 标记文件，标识 session 正常关闭
-    // 仅含 .closed 标记的 session 会被 -c 识别为可恢复
+    // 立即 flush session_end
+    this.flushBufferSync()
+
+    // 写入 .closed 标记文件
     this.writeClosedMarker()
   }
 
@@ -415,17 +458,49 @@ export class TranscriptRecorder {
     })
   }
 
+  // ── Metadata recorders ────────────────────────────────────────────
+
+  /** 写入自定义标题（供 /session rename 和 --resume 列表显示） */
+  recordCustomTitle(customTitle: string, sessionId: string): void {
+    this.writeEventSync({
+      type: 'custom_title',
+      data: { customTitle, sessionId },
+    })
+  }
+
+  /** 写入标签（供 /session list 过滤） */
+  recordTag(tag: string, sessionId: string): void {
+    this.writeEventSync({
+      type: 'tag',
+      data: { tag, sessionId },
+    })
+  }
+
+  /** 写入最后一轮用户输入摘要（供 --resume 列表显示） */
+  recordLastPrompt(lastPrompt: string, sessionId: string): void {
+    this.writeEventSync({
+      type: 'last_prompt',
+      data: { lastPrompt, sessionId },
+    })
+  }
+
+  /** 写入 session stats 快照（进程退出前调用一次） */
+  recordSessionStats(stats: SessionStatsData): void {
+    this.writeEventSync({
+      type: 'session_stats',
+      data: stats,
+    })
+  }
+
   // ── Internal ──────────────────────────────────────────────────────
 
   /**
-   * 写入一行 NDJSON 事件（同步 appendFileSync）。
-   * 每行格式：{"type":"xxx","ts":"2026-06-05T...","agentId":"xxx","parentAgentId":"xxx","data":{...}}
+   * 写入一行 NDJSON 事件。
+   * 先缓冲到 writeBuffer，达到阈值或超时后批量写入。
+   * session_start/end 事件强制立即 flush。
    */
   private writeEventSync(event: TranscriptEvent): void {
     if (!this.transcriptPath) return
-    // Defense: ensure the session directory still exists before writing.
-    // initSession creates it, but external factors (manual deletion, tmp cleaners)
-    // can remove it between init and subsequent writes.
     this.ensureDir(this.sessionDir)
     this.eventCount++
 
@@ -437,7 +512,40 @@ export class TranscriptRecorder {
       parentAgentId: ctx?.parentAgentId ?? null,
     }) + '\n'
 
-    fs.appendFileSync(this.transcriptPath, line, 'utf-8')
+    this.writeBuffer.push(line)
+
+    // session_start/end 立即 flush
+    if (event.type === 'session_start' || event.type === 'session_end') {
+      this.flushBufferSync()
+      return
+    }
+
+    // 达到批量阈值 → 立即 flush
+    if (this.writeBuffer.length >= this.FLUSH_BATCH_SIZE) {
+      this.flushBufferSync()
+      return
+    }
+
+    // 启动定时器（非阻塞，unref 防止阻止进程退出）
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null
+        this.flushBufferSync()
+      }, this.FLUSH_INTERVAL_MS)
+      this.flushTimer.unref()
+    }
+  }
+
+  /** 同步 flush 缓冲中的所有事件行到文件 */
+  private flushBufferSync(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    if (this.writeBuffer.length === 0) return
+    const content = this.writeBuffer.join('')
+    this.writeBuffer = []
+    fs.appendFileSync(this.transcriptPath, content, 'utf-8')
   }
 
   /** 生成 session ID：session-<timestamp4>-<random4> */

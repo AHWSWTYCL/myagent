@@ -90,7 +90,7 @@ import {
   cleanOldResults,
 } from './utils/backgroundStorage.js'
 import { bgManager } from './utils/backgroundManager.js'
-import { TranscriptRecorder, loadLatestCheckpoint } from './utils/transcript.js'
+import { SessionManager } from './session/SessionManager.js'
 import type { ChatMessage } from './tui/types.js'
 import { sessionState } from './state/sessionState.js'
 import { setModeChangeHandler } from './state/onChangeAppState.js'
@@ -178,8 +178,9 @@ cleanOldResults()
 export const MAX_TURNS = 1000
 let initialTuiMessages: ChatMessage[] = []
 
-// ── Transcript Recorder ──────────────────────────────────────────────
-const transcriptRecorder = new TranscriptRecorder()
+// ── Transcript Recorder & Session Manager ──────────────────────────
+const sessionManager = SessionManager.getInstance()
+const transcriptRecorder = sessionManager.getRecorder()
 
 // 检查 --continue / -c 标志，从上一个 session 恢复会话
 // 注意：npm run agent -c 会被 npm 自身拦截（-c 是 npm 的配置标志），
@@ -187,11 +188,10 @@ const transcriptRecorder = new TranscriptRecorder()
 // 环境变量 MYAGENT_CONTINUE=1 可作为备选（适用于 docker/CI 等场景）。
 const shouldContinue = process.argv.includes('--continue') || process.argv.includes('-c') || process.env.MYAGENT_CONTINUE === '1'
 if (shouldContinue) {
-  const checkpoint = loadLatestCheckpoint()
+  const checkpoint = SessionManager.loadLatestCheckpoint()
   if (checkpoint) {
-    sessionState.hydrate(checkpoint.messages, checkpoint.sessionId)
+    sessionManager.restoreFromCheckpoint(checkpoint)
     console.log(`[continue] Loaded ${checkpoint.messages.length} messages from ${checkpoint.sessionId}`)
-    // 将恢复的消息转换为 ChatMessage[] 供 TUI 显示历史
     initialTuiMessages = convertMessagesForTui(checkpoint.messages)
   } else {
     console.log('[continue] No previous session found, starting fresh')
@@ -260,13 +260,11 @@ function extractTextFromContent(content: string | Anthropic.ContentBlockParam[])
     .join('\n')
 }
 
-transcriptRecorder.initSession(sessionState.continuedFromSession)
+sessionManager.start(sessionState.continuedFromSession)
 
 // ── -c 恢复后立即保存初始 checkpoint ──────────────────────────────
-// 防止用户在不发消息的情况下退出，导致新会话没有 checkpoint，
-// 下次 -c 会跳过新会话、又加载旧会话的 checkpoint。
 if (shouldContinue && sessionState.messages.length > 0) {
-  transcriptRecorder.recordCheckpoint(sessionState.messages)
+  sessionManager.recordCheckpoint(sessionState.messages)
 }
 
 // ── 启动完成，清理初始化阶段的 Attachment 噪声 ──────────────────────────
@@ -279,7 +277,7 @@ attachmentQueue.clear()
 //   - SIGTERM      → kill 命令或进程管理器终止
 // 三方汇合确保 .closed 标记一定写入，下次 -c 才能恢复。
 function cleanupTranscript(): void {
-  try { transcriptRecorder.closeSession() } catch { /* ignore */ }
+  try { sessionManager.close() } catch { /* ignore */ }
 }
 process.on('beforeExit', cleanupTranscript)
 process.on('SIGINT', () => { cleanupTranscript(); Mailbox.stopWatching('main'); process.exit(0) })
@@ -487,6 +485,7 @@ commandRegistry.register(new ModelCommand(qs => bridge.askChoice(qs)))
 commandRegistry.register(new AdvisorCommand(qs => bridge.askChoice(qs)))
 commandRegistry.register(new GoalCommand())
 commandRegistry.register(new (await import('./commands/teamcommand.js')).TeamCommand(enqueueUserMessage))
+commandRegistry.register(new (await import('./commands/sessioncommand.js')).SessionCommand())
 const commandParser = new CommandParser(commandRegistry)
 
 // advisor 不可用时预先裁剪 stable text，模块级缓存（advisor 可用性运行时不变化）
@@ -537,9 +536,15 @@ export async function compactIfNeeded(): Promise<void> {
     bridge.emitCompacting('start', `${tokenCount.toLocaleString()} tokens`)
     const compacted = await compactMessages(client, modelConfig.getCurrent(), sessionState.messages)
     sessionState.replaceMessages(compacted)
+    // Post-compact: 注入当前状态上下文，帮助模型恢复认知
+    const ctxNote = buildPostCompactContext()
+    if (ctxNote) {
+      sessionState.appendMessage({ role: 'user', content: ctxNote })
+    }
     sessionState.setUsage(null)
     bridge.emitUsageReset()
     bridge.emitCompacting('done', `${tokenCount.toLocaleString()} tokens → ${sessionState.messages.length} 条消息`)
+    sessionManager.recordCompaction()
     transcriptRecorder.recordCompact(tokenCount, sessionState.messages.length)
   } else if (tokenCount >= MICRO_COMPACT_TOKEN_THRESHOLD) {
     const freed = microcompactMessages(sessionState.messages)
@@ -549,6 +554,22 @@ export async function compactIfNeeded(): Promise<void> {
       bridge.emitCompacting('micro', `释放约 ${freed.toLocaleString()} tokens`)
     }
   }
+}
+
+/**
+ * 构建 post-compact 上下文提示。
+ * 在 compact 后注入，告诉模型当前启用的 skills 和 mode。
+ */
+function buildPostCompactContext(): string {
+  const parts: string[] = ['[System State Changes]']
+
+  const mode = appStateStore.getState().mode
+  if (mode === 'plan') {
+    parts.push('你仍处于 Plan Mode — 只能探索和计划，不能修改代码。')
+  }
+
+  if (parts.length === 1) return ''
+  return parts.join('\n')
 }
 
 /**
@@ -611,6 +632,7 @@ export {
   permissionHook,
   autoPermissionAgent,
   sessionState,
+  sessionManager,
   transcriptRecorder,
   agentTool,
   skillManager,
