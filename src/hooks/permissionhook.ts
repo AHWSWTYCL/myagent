@@ -100,14 +100,42 @@ function cleanExpiredCache(cache: Map<string, number>): void {
   }
 }
 
-// ── PermissionHook ────────────────────────────────────────────────────────────
+// ── Plan mode 下允许的工具（只读探索 + 计划 + 用户交互 + 团队协作）─────────
+const PLAN_MODE_SAFE_TOOLS = new Set([
+  'read_file',
+  'list_dir',
+  'grep',
+  'glob',
+  'web_search',
+  'web_fetch',
+  'ask_user',
+  'ask_user_choice',
+  'memory',
+  'use_skill',
+  'invoke_skill',
+  'todo_plan',
+  'todo_update',
+  'enter_plan_mode',
+  'exit_plan_mode',
+  'task',
+  'skill_write',
+  'agent',
+  'send_mail',
+  'check_mail',
+  'create_team',
+  'schedule_task',
+  'start_teammate',
+  'git_worktree',
+  'weather__get_weather',
+  'weather__list_cities',
+])
 export class PermissionHook implements Hook {
   name = 'PermissionHook'
 
   // Map<key, expiryTimestamp>
   private sessionAllowed: Map<string, number> = new Map()
   private lastCleanup = 0
-  private autoMode = false
+  private mode: 'default' | 'auto' | 'plan' = 'auto'
   private autoAgent: AutoPermissionAgent | null = null
   private config: PermissionsConfig
   private toolRegistrar: ToolRegistrar
@@ -120,13 +148,17 @@ export class PermissionHook implements Hook {
     this.toolRegistrar = toolRegistrar
   }
 
-  setAutoMode(enabled: boolean, agent?: AutoPermissionAgent) {
-    this.autoMode = enabled
-    if (agent) this.autoAgent = agent
+  setMode(mode: 'default' | 'auto' | 'plan', agent?: AutoPermissionAgent | null) {
+    this.mode = mode
+    if (agent !== undefined) this.autoAgent = agent
   }
 
   get isAutoMode() {
-    return this.autoMode
+    return this.mode === 'auto'
+  }
+
+  get isPlanMode() {
+    return this.mode === 'plan'
   }
 
   async onToolCall(ctx: HookContext): Promise<HookResult> {
@@ -160,7 +192,16 @@ export class PermissionHook implements Hook {
       }
     }
 
-    // ── 3. session 缓存命中（检查过期时间），直接放行 ────────────────────────
+    // ── 3. plan mode 检查：只允许只读/探索/计划类工具 ─────────────────────
+    if (this.mode === 'plan') {
+      if (!PLAN_MODE_SAFE_TOOLS.has(ctx.toolName)) {
+        return { action: 'block', reason: `Plan mode: tool "${ctx.toolName}" is not allowed. Only exploration and planning tools are permitted.` }
+      }
+      // 即使是安全工具，在 plan mode 下静默放行（不弹窗问用户）
+      return { action: 'continue' }
+    }
+
+    // ── 4. session 缓存命中（检查过期时间），直接放行 ────────────────────────
     const expiry = this.sessionAllowed.get(key)
     if (expiry !== undefined && now < expiry) {
       return { action: 'continue' }
@@ -193,7 +234,7 @@ export class PermissionHook implements Hook {
     // ── 5. auto mode：交给 AI agent 决策 ─────────────────────────────────────
     // 注意：auto mode 下 haiku 说了算，拒绝时直接 block，不回退问用户。
     // 用户如果不想让 AI 决策，可以关闭 auto mode（Shift+Tab 切换）。
-    if (this.autoMode && this.autoAgent) {
+    if (this.mode === 'auto' && this.autoAgent) {
       const answer = await this.autoAgent.decide(prompt)
       if (answer === 'no') {
         return { action: 'block', reason: 'Auto mode denied' }

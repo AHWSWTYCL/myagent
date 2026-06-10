@@ -93,7 +93,7 @@ import { bgManager } from './utils/backgroundManager.js'
 import { TranscriptRecorder, loadLatestCheckpoint } from './utils/transcript.js'
 import type { ChatMessage } from './tui/types.js'
 import { sessionState } from './state/sessionState.js'
-import { setAutoModeChangeHandler } from './state/onChangeAppState.js'
+import { setModeChangeHandler } from './state/onChangeAppState.js'
 import { AppStateProvider, appStateStore } from './state/AppStateProvider.js'
 
 // ── Init skills ───────────────────────────────────────────────────────────────
@@ -126,6 +126,21 @@ toolRegistrar.registerTool(new (await import('./tools/createteamtool.js')).Creat
 toolRegistrar.registerTool(new (await import('./tools/sendmailtool.js')).SendMailTool('main'))
 toolRegistrar.registerTool(new (await import('./tools/checkmailtool.js')).CheckMailTool('main'))
 toolRegistrar.registerTool(new (await import('./tools/gitworktreetool.js')).GitWorktreeTool())
+
+const enterPlanModeTool = new (await import('./tools/EnterPlanModeTool.js')).EnterPlanModeTool()
+const exitPlanModeTool = new (await import('./tools/ExitPlanModeTool.js')).ExitPlanModeTool()
+// 注入 bridge 回调，确保状态写入走 bridge 单一入口
+enterPlanModeTool.inject(() => {
+  const prev = bridge.mode
+  bridge.enterPlanMode()
+  return prev
+})
+exitPlanModeTool.inject(() => {
+  bridge.exitPlanMode()
+  return bridge.mode
+})
+toolRegistrar.registerTool(enterPlanModeTool)
+toolRegistrar.registerTool(exitPlanModeTool)
 
 // ── Init agent registry & unified agent tool ─────────────────────────────────
 const { AgentRegistry } = await import('./agents/registry.js')
@@ -301,10 +316,10 @@ hookManager.register(permissionHook)
 hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))
 hookManager.register(new GoalHook(agentTool, enqueueUserMessage, bridge))
 
-// 初始时立即同步 auto mode 状态（默认开启），无需等待 toggle 事件
-permissionHook.setAutoMode(bridge.autoMode, autoPermissionAgent)
-setAutoModeChangeHandler(enabled => {
-  permissionHook.setAutoMode(enabled, autoPermissionAgent)
+// 初始时立即同步 mode 状态（默认 auto），无需等待 toggle 事件
+permissionHook.setMode(bridge.mode, bridge.mode === 'auto' ? autoPermissionAgent : null)
+setModeChangeHandler(mode => {
+  permissionHook.setMode(mode, mode === 'auto' ? autoPermissionAgent : null)
 })
 
 // ── Todo Manager → Bridge ─────────────────────────────────────────────────

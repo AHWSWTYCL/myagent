@@ -154,7 +154,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const [promptText, setPromptText] = useState('')
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
-  const autoMode = useAppState(s => s.autoMode)
+  const agentMode = useAppState(s => s.mode)
   // Ctrl+O toggles full output for every tool message in the chat.
   const [expandAll, setExpandAll] = useState(false)
   // Ctrl+L toggles MCP stdio log display
@@ -461,14 +461,17 @@ ${memory}` }])
     showHint('TTS stopped.')
   })
 
-  // Shift+Tab: toggle auto permission mode
-  // 选 Shift+Tab 而非 Ctrl+A，因为 ink-text-input 自身已过滤 Shift+Tab，
-  // 不会在输入框里误插字符，无需 hack。
+  // Shift+Tab: cycle agent mode (default → auto → plan → default)
   useInput((_input, key) => {
     if (appMode === 'teammateView') return
     if (!key.tab || !key.shift) return
-    const next = bridge.toggleAutoMode()
-    showHint(next ? 'Auto mode ON — permissions handled by AI agent.' : 'Auto mode OFF — manual permission prompts restored.')
+    const next = bridge.cycleMode()
+    const labels: Record<string, string> = {
+      default: 'Default mode — manual permission prompts.',
+      auto: 'Auto mode ON — permissions handled by AI agent.',
+      plan: 'Plan mode ON — exploration and planning only, no code changes.',
+    }
+    showHint(labels[next] || `Mode: ${next}`)
   })
 
   // Ctrl+O: toggle expanded view of all tool outputs (Claude Code parity).
@@ -1471,7 +1474,7 @@ ${memory}` }])
       <Footer
         isProcessing={isProcessing}
         hasSuggestions={hasSuggestions}
-        autoMode={autoMode}
+        mode={agentMode}
         expanded={expandAll}
         ctxPercent={ctx.pct}
         ctxText={ctx.text}

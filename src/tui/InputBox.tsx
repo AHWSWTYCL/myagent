@@ -133,7 +133,7 @@ export function InputBox(props: InputBoxProps) {
 interface FooterProps {
   isProcessing: boolean
   hasSuggestions: boolean
-  autoMode: boolean
+  mode: 'default' | 'auto' | 'plan'
   expanded: boolean
   ctxPercent: number | null
   ctxText: string | null
@@ -161,7 +161,7 @@ export function buildCtx(usage: { inputTokens: number; outputTokens: number; cac
 export function Footer({
   isProcessing,
   hasSuggestions,
-  autoMode,
+  mode,
   expanded,
   ctxPercent,
   ctxText,
@@ -211,9 +211,15 @@ export function Footer({
               <Text color="gray" dimColor>  ·  </Text>
             </>
           ) : null}
-          {autoMode ? (
+          {mode === 'auto' ? (
             <>
               <Text color="green" bold>AUTO</Text>
+              <Text color="gray" dimColor>  ·  </Text>
+            </>
+          ) : null}
+          {mode === 'plan' ? (
+            <>
+              <Text color="yellow" bold>PLAN</Text>
               <Text color="gray" dimColor>  ·  </Text>
             </>
           ) : null}

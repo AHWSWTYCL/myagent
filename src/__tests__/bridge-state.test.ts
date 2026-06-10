@@ -4,13 +4,42 @@ import { getDefaultAppState } from '../state/appState.js'
 import { TuiBridge } from '../tui/bridge.js'
 
 describe('TuiBridge AppState adapter', () => {
-  it('toggles auto mode in shared state', () => {
+  it('cycles mode in shared state (default → auto → plan)', () => {
     const store = createStore(getDefaultAppState())
     const bridge = new TuiBridge(store)
 
-    expect(bridge.autoMode).toBe(true)
-    expect(bridge.toggleAutoMode()).toBe(false)
-    expect(store.getState().autoMode).toBe(false)
+    // Default is 'auto'
+    expect(bridge.mode).toBe('auto')
+    expect(bridge.isAutoMode).toBe(true)
+
+    // auto → plan
+    expect(bridge.cycleMode()).toBe('plan')
+    expect(store.getState().mode).toBe('plan')
+    expect(store.getState().planPreviousMode).toBe('auto')
+
+    // plan → default
+    expect(bridge.cycleMode()).toBe('default')
+    expect(store.getState().mode).toBe('default')
+    expect(store.getState().planPreviousMode).toBeNull()
+
+    // default → auto
+    expect(bridge.cycleMode()).toBe('auto')
+    expect(store.getState().mode).toBe('auto')
+  })
+
+  it('enterPlanMode and exitPlanMode preserve previous mode', () => {
+    const store = createStore(getDefaultAppState())
+    const bridge = new TuiBridge(store)
+
+    // Start from auto
+    expect(bridge.enterPlanMode()).toBe('plan')
+    expect(store.getState().mode).toBe('plan')
+    expect(store.getState().planPreviousMode).toBe('auto')
+
+    // Exit restores to auto
+    expect(bridge.exitPlanMode()).toBe('auto')
+    expect(store.getState().mode).toBe('auto')
+    expect(store.getState().planPreviousMode).toBeNull()
   })
 
   it('tracks background count without going below zero', () => {

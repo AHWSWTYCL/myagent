@@ -36,6 +36,11 @@ import {
   extractBgDescription,
   summarizeConclusion,
 } from './bootstrap.js'
+import { appStateStore } from './state/appState.js'
+import { PlanModeAttachment } from './attachment/planMode.js'
+
+// ── Plan mode: 控制 prompt 注入频率（每 5 次 query 注入完整版）──────
+const PLAN_MODE_FULL_PROMPT_INTERVAL = 5
 
 // ── Agent turn state ──────────────────────────────────────────────────────────
 let currentTurnTail: Promise<void> = Promise.resolve()
@@ -119,7 +124,28 @@ export async function runTurn(
       signal,
       backgroundSignal,
       drainQueue: () => drainQueue(),
-      drainAttachments: () => attachmentQueue.formatDrain(),
+      drainAttachments: () => {
+        // ── Plan mode: 每次 LLM API 调用结束后，递增计数并注入 prompt ──
+        // 注意：这里的"每次"指 runAgentLoopStream 内部 for 循环的每次迭代，
+        // 即每次 LLM API 调用 = 1 次 drainAttachments 调用。
+        const currentMode = appStateStore.getState().mode
+        if (currentMode === 'plan') {
+          let count = appStateStore.getState().planQueryCount
+          count++
+          appStateStore.setState(prev => ({ ...prev, planQueryCount: count }))
+          // count=1 表示刚进入 plan mode，EnterPlanModeTool 已注入 FULL version，
+          // 此处跳过避免同轮重复。后续按周期：每 5 次 LLM 调用注入 FULL。
+          if (count === 1) {
+            // 防御性日志：如果 EnterPlanModeTool 因故未 enqueue FULL，这里静默失效
+            process.stderr.write(`[planMode] count=1 skip (relying on EnterPlanModeTool FULL)\n`)
+          }
+          if (count > 1) {
+            const isFullPrompt = count % PLAN_MODE_FULL_PROMPT_INTERVAL === 0
+            attachmentQueue.enqueue(new PlanModeAttachment(isFullPrompt))
+          }
+        }
+        return attachmentQueue.formatDrain()
+      },
       drainMailbox: () => drainMailbox(mailboxAgentId),
       onLLMRequest: (model, turn, msgs) => {
         transcriptRecorder.recordLLMRequest(model, turn, msgs)

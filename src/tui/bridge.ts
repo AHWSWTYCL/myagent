@@ -31,19 +31,72 @@ export class TuiBridge extends EventEmitter {
     super()
   }
 
-  get autoMode() {
-    return this.store.getState().autoMode
+  get mode() {
+    return this.store.getState().mode
+  }
+
+  get isAutoMode() {
+    return this.store.getState().mode === 'auto'
   }
 
   get backgroundCount() {
     return this.store.getState().backgroundCount
   }
 
-  toggleAutoMode() {
-    const next = !this.store.getState().autoMode
-    this.store.setState(prev => ({ ...prev, autoMode: next }))
-    this.emit('autoModeChange', next)
+  /** Shift+Tab 三态循环：default → auto → plan → default
+   *
+   * 注意：plan → default 是用户主动操作，直接退出无需确认。
+   * LLM 退出 plan mode 必须走 ExitPlanModeTool 的两阶段确认流程（先询问用户是否接受计划）。
+   * 两个退出路径互不干扰：用户用 Shift+Tab 强制退出，LLM 用工具确认后退出。 */
+  cycleMode(): string {
+    const current = this.store.getState().mode
+    const cycle: Record<string, string> = { default: 'auto', auto: 'plan', plan: 'default' }
+    const next = cycle[current] || 'auto'
+    this.store.setState(prev => {
+      const updates: Partial<typeof prev> = { mode: next as typeof prev['mode'] }
+      // 进入 plan mode 时记录 previous mode
+      if (next === 'plan') {
+        updates.planPreviousMode = current === 'plan' ? prev.planPreviousMode : (current as 'default' | 'auto')
+        updates.planQueryCount = 0
+      }
+      // 退出 plan mode 时清除 previous mode
+      if (current === 'plan' && next !== 'plan') {
+        updates.planPreviousMode = null
+        updates.planQueryCount = 0
+      }
+      return { ...prev, ...updates }
+    })
+    this.emit('modeChange', next)
     return next
+  }
+
+  /** 通过工具进入 plan mode，记住当前 mode */
+  enterPlanMode(): string {
+    const current = this.store.getState().mode
+    if (current === 'plan') return 'plan'
+    this.store.setState(prev => ({
+      ...prev,
+      mode: 'plan',
+      planPreviousMode: current as 'default' | 'auto',
+      planQueryCount: 0,
+    }))
+    this.emit('modeChange', 'plan')
+    return 'plan'
+  }
+
+  /** 退出 plan mode，恢复到之前的 mode */
+  exitPlanMode(): string {
+    const current = this.store.getState().mode
+    if (current !== 'plan') return current
+    const prev = this.store.getState().planPreviousMode || 'default'
+    this.store.setState(s => ({
+      ...s,
+      mode: prev,
+      planPreviousMode: null,
+      planQueryCount: 0,
+    }))
+    this.emit('modeChange', prev)
+    return prev
   }
 
   /** 后台任务启动时调用，更新计数。 */

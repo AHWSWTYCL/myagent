@@ -155,8 +155,8 @@ if (teammateOpts) {
   console.error = originalConsoleError
 
   // 启用 auto mode — debug 模式无 TUI，不能做交互式授权
-  if (!bridge.autoMode) {
-    bridge.toggleAutoMode()
+  if (!bridge.isAutoMode) {
+    bridge.cycleMode()
     if (debugOpts.autoYes) {
       logProgress.start('Auto mode enabled')
     } else {

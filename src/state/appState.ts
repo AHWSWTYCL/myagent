@@ -8,8 +8,12 @@ import { onChangeAppState } from './onChangeAppState.js'
 
 export type CompactingState = 'idle' | 'running' | 'micro'
 
+/** Agent 交互模式 */
+export type AgentMode = 'default' | 'auto' | 'plan'
+
 export interface AppState {
-  autoMode: boolean
+  /** 当前交互模式：default(手动确认) | auto(AI 自动授权) | plan(只读探索计划) */
+  mode: AgentMode
   backgroundCount: number
   status: string
   usage: UsageStats | null
@@ -19,13 +23,17 @@ export interface AppState {
   todoPlan: TodoPlanSnapshot | null
   teammateTasks: TeammateTaskInfo[]
   isProcessing: boolean
+  /** 进入 plan mode 前的 mode，退出时恢复 */
+  planPreviousMode: 'default' | 'auto' | null
+  /** plan mode 下的 query 计数，用于控制 prompt 注入频率 */
+  planQueryCount: number
 }
 
 export type AppStateStore = Store<AppState>
 
 export function getDefaultAppState(): AppState {
   return {
-    autoMode: true,
+    mode: 'auto',
     backgroundCount: 0,
     status: '',
     usage: null,
@@ -35,6 +43,8 @@ export function getDefaultAppState(): AppState {
     todoPlan: null,
     teammateTasks: [],
     isProcessing: false,
+    planPreviousMode: null,
+    planQueryCount: 0,
   }
 }
 

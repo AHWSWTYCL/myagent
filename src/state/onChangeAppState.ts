@@ -1,20 +1,20 @@
-import type { AppState } from './appState.js'
+import type { AgentMode, AppState } from './appState.js'
 
 type AppStateChange = {
   newState: AppState
   oldState: AppState
 }
 
-type AutoModeHandler = (enabled: boolean) => void
+type ModeChangeHandler = (mode: AgentMode) => void
 
-let autoModeHandler: AutoModeHandler | undefined
+let modeChangeHandler: ModeChangeHandler | undefined
 
-export function setAutoModeChangeHandler(handler: AutoModeHandler | undefined): void {
-  autoModeHandler = handler
+export function setModeChangeHandler(handler: ModeChangeHandler | undefined): void {
+  modeChangeHandler = handler
 }
 
 export function onChangeAppState({ newState, oldState }: AppStateChange): void {
-  if (newState.autoMode !== oldState.autoMode) {
-    autoModeHandler?.(newState.autoMode)
+  if (newState.mode !== oldState.mode) {
+    modeChangeHandler?.(newState.mode)
   }
 }
