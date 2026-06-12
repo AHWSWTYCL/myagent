@@ -257,9 +257,14 @@ export async function runAgentLoopStream(
           cumUsage.outputTokens += event.usage.output_tokens
         }
       }
-    } catch (_err) {
+    } catch (err) {
       // MessageStream 的 asyncIterator 在 abort 时会 reject 所有 pending read。
       // 捕获异常并将 streamAborted 置 true，走 abort 清理路径而非向上抛。
+      const msg = err instanceof Error ? err.message : String(err)
+      process.stderr.write(`[queryLoop] stream error at turn ${turn}: ${msg}\n`)
+      if (err instanceof Anthropic.APIError) {
+        process.stderr.write(`[queryLoop] API error status=${err.status} type=${err.type}\n`)
+      }
       streamAborted = true
     }
 
