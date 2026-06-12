@@ -67,6 +67,7 @@ jobs:
           MYAGENT_ISSUE_TITLE: ${{ github.event.issue.title }}
           MYAGENT_COMMENT_USER: ${{ github.event.comment.user.login }}
           MYAGENT_COMMENT_BODY: ${{ github.event.comment.body }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           npx tsx ../.myagent/src/agent.ts --debug \
             "处理 GitHub issue #$MYAGENT_ISSUE_NUMBER: $MYAGENT_ISSUE_TITLE\

@@ -297,6 +297,7 @@ jobs:
           MYAGENT_ISSUE_TITLE: \${{ github.event.issue.title }}
           MYAGENT_COMMENT_USER: \${{ github.event.comment.user.login }}
           MYAGENT_COMMENT_BODY: \${{ github.event.comment.body }}
+          ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           npx tsx ../.myagent/src/agent.ts --debug \\
             "处理 GitHub issue #\$MYAGENT_ISSUE_NUMBER: \$MYAGENT_ISSUE_TITLE\\
@@ -454,6 +455,14 @@ export class GitHubBotCommand extends Command {
     }
     console.log('')
 
+    // ── 提示设置 ANTHROPIC_API_KEY ───────────────────────────────
+    console.log('━━━ 配置 LLM API Key ━━━')
+    console.log('')
+    console.log('Bot 需要 ANTHROPIC_API_KEY 才能调用 LLM。请手动设置:')
+    console.log(`  gh secret set ANTHROPIC_API_KEY --repo ${myagentRepo}`)
+    console.log('  或 GitHub → Settings → Secrets → Actions → New secret')
+    console.log('')
+
     // ── ⑥ 安装 App（自动打开安装页）───────────────────────────────
     // 直达安装页，不用跳 App 设置再找 Install 按钮
     const installUrl = `https://github.com/apps/${appSlug}/installations/new`
@@ -537,7 +546,7 @@ export class GitHubBotCommand extends Command {
     }
     try {
       const secrets = JSON.parse(gh('secret list --json name'))
-      for (const s of ['MYAGENT_APP_ID', 'MYAGENT_PRIVATE_KEY', 'MYAGENT_REPO']) {
+      for (const s of ['MYAGENT_APP_ID', 'MYAGENT_PRIVATE_KEY', 'MYAGENT_REPO', 'ANTHROPIC_API_KEY']) {
         const found = (secrets as Array<{name: string}>).some(x => x.name === s)
         console.log(`  Secret ${s}: ${found ? '✓' : '✗ 未设置'}`)
       }
