@@ -1,6 +1,7 @@
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import * as path from 'path'
+import { buildGitHubBotPrompt, isGitHubBotMode } from './github-bot-prompt.js'
 
 /**
  * 构建完整 system prompt。
@@ -15,6 +16,12 @@ export function getSystemPrompt(agentSection?: string): string {
   ).trim()
 
   const parts: string[] = [basePrompt]
+
+  // GitHub Bot 模式：注入 bot 专用 prompt
+  if (isGitHubBotMode()) {
+    parts.push('')
+    parts.push(buildGitHubBotPrompt())
+  }
 
   if (agentSection) {
     parts.push('')

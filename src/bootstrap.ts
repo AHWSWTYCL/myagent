@@ -486,6 +486,7 @@ commandRegistry.register(new AdvisorCommand(qs => bridge.askChoice(qs)))
 commandRegistry.register(new GoalCommand())
 commandRegistry.register(new (await import('./commands/teamcommand.js')).TeamCommand(enqueueUserMessage))
 commandRegistry.register(new (await import('./commands/sessioncommand.js')).SessionCommand())
+commandRegistry.register(new (await import('./commands/githubbotcommand.js')).GitHubBotCommand(prompt => bridge.askQuestion(prompt)))
 const commandParser = new CommandParser(commandRegistry)
 
 // advisor 不可用时预先裁剪 stable text，模块级缓存（advisor 可用性运行时不变化）
