@@ -206,3 +206,9 @@ src/
 ---
 
 > 项目受 Claude Code 启发，代码结构参考了其核心设计思路，但做了大量简化和面向学习的改动。
+
+---
+
+## GitHub Bot
+
+本项目支持通过 GitHub Actions + @myagent 自动修复 issue 并提 PR。详见 .github/workflows/myagent-bot.yml
