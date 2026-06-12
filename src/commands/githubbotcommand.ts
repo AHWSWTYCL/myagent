@@ -228,25 +228,25 @@ export function buildWorkflowYaml(myagentRepo: string): string {
   if (!slug.includes('/')) slug = myagentRepo
 
   return `\
-# myagent GitHub Bot — 自动修复 issue 并提 PR
+# myagent GitHub Bot — 自动修复 issue + PR Review
 # 由 /github-bot actions 自动生成
 name: myagent bot
-
-concurrency:
-  group: myagent-\${{ github.event.issue.number }}
-  cancel-in-progress: true
 
 on:
   issue_comment:
     types: [created]
 
 jobs:
+  # ── Issue 修复 ────────────────────────────────────────────────────
   bot:
     if: |
       contains(github.event.comment.body, '@myagent') &&
       !github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: myagent-issue-\${{ github.event.issue.number }}
+      cancel-in-progress: true
 
     steps:
       - uses: actions/checkout@v4
@@ -303,6 +303,65 @@ jobs:
           npx tsx ../.myagent/src/agent.ts --debug \\
             "处理 GitHub issue #\$MYAGENT_ISSUE_NUMBER: \$MYAGENT_ISSUE_TITLE\\
             触发用户: @\$MYAGENT_COMMENT_USER" \\
+            --auto-yes \\
+            --wait-for-bg 300 \\
+            --timeout 1500
+
+  # ── PR Review ─────────────────────────────────────────────────────
+  pr-review:
+    if: |
+      contains(github.event.comment.body, '@myagent review') &&
+      github.event.issue.pull_request != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: myagent-pr-\${{ github.event.issue.number }}
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: repo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: \${{ secrets.MYAGENT_REPO }}
+          path: .myagent
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache myagent node_modules
+        uses: actions/cache@v4
+        with:
+          path: .myagent/node_modules
+          key: \${{ runner.os }}-myagent-\${{ hashFiles('.myagent/package-lock.json') }}
+
+      - name: Install myagent dependencies
+        run: cd .myagent && npm ci
+
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: \${{ secrets.MYAGENT_APP_ID }}
+          private-key: \${{ secrets.MYAGENT_PRIVATE_KEY }}
+
+      - name: Run myagent PR review
+        working-directory: repo
+        env:
+          GITHUB_TOKEN: \${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: \${{ github.repository }}
+          MYAGENT_PR_NUMBER: \${{ github.event.issue.number }}
+          MYAGENT_COMMENT_USER: \${{ github.event.comment.user.login }}
+          MYAGENT_COMMENT_BODY: \${{ github.event.comment.body }}
+          ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: \${{ secrets.ANTHROPIC_BASE_URL }}
+        run: |
+          npx tsx ../.myagent/src/agent.ts --debug \\
+            "Review PR #\$MYAGENT_PR_NUMBER，触发用户: @\$MYAGENT_COMMENT_USER" \\
             --auto-yes \\
             --wait-for-bg 300 \\
             --timeout 1500

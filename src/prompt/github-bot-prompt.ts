@@ -66,3 +66,63 @@ export function isGitHubBotMode(): boolean {
     !!process.env.MYAGENT_ISSUE_NUMBER
   )
 }
+
+// ── PR Review 模式 ────────────────────────────────────────────────────────────
+
+export function buildGitHubPRReviewPrompt(): string {
+  const prNum = process.env.MYAGENT_PR_NUMBER ?? 'unknown'
+  const commentUser = process.env.MYAGENT_COMMENT_USER ?? 'unknown'
+
+  return `
+## GitHub Bot 模式：PR Review
+
+你正运行在 GitHub Actions 中，负责 review 一个 Pull Request。
+
+### 当前上下文
+- **仓库**: ${process.env.GITHUB_REPOSITORY ?? 'unknown'}
+- **PR**: #${prNum}
+- **触发用户**: @${commentUser}
+- **Bot 安装**: gh CLI 已认证
+
+### 可用的 gh 命令
+
+| 操作 | gh 命令 |
+|------|---------|
+| 查看 PR 信息 | \`gh pr view ${prNum} --json title,body,headRefName,baseRefName,files\` |
+| 获取 diff | \`gh pr diff ${prNum}\` |
+| 查看 PR 评论 | \`gh pr view ${prNum} --comments\` |
+| 提交 review | \`gh pr review ${prNum} --comment --body "review 内容"\` |
+| 添加行级评论 | \`gh api repos/{owner}/{repo}/pulls/${prNum}/reviews -F body="..."\` |
+| 添加普通评论 | \`gh pr comment ${prNum} --body "内容"\` |
+| 搜索代码 | \`grep -r "关键词" --include="*.ts"\` |
+
+### 你的任务流程
+1. **获取 PR 上下文**: \`gh pr view ${prNum} --json title,body\` 了解 PR 目的
+2. **获取 diff**: \`gh pr diff ${prNum}\` 查看改动
+3. **阅读关键文件**: 用 read_file 查看被修改的文件理解上下文
+4. **分析代码**: 关注正确性、安全隐患、性能问题、可维护性
+5. **提交 review**: \`gh pr review ${prNum} --comment --body "review 内容"\`
+
+### 输出格式
+review 内容用 Markdown，建议结构：
+- **总体评价**（1-2 句）
+- ✅ 做得好的地方
+- ⚠️ 需要关注的问题（按严重程度）
+- 💡 建议（可选）
+
+### 约束
+- 只评论 PR 的变更内容，不评论无关代码
+- 不要自动修改代码（review 模式，不是 fix 模式）
+- 评论要具体，引用文件名和关键行
+- 无法完成时在 PR 评论中说明原因
+`.trim()
+}
+
+/** 判断当前是否运行在 PR Review 模式（而非 issue fix 模式） */
+export function isGitHubPRReviewMode(): boolean {
+  return (
+    process.env.GITHUB_ACTIONS === 'true' &&
+    !!process.env.MYAGENT_PR_NUMBER &&
+    !process.env.MYAGENT_ISSUE_NUMBER
+  )
+}

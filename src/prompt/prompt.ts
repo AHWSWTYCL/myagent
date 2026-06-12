@@ -1,7 +1,7 @@
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import * as path from 'path'
-import { buildGitHubBotPrompt, isGitHubBotMode } from './github-bot-prompt.js'
+import { buildGitHubBotPrompt, isGitHubBotMode, buildGitHubPRReviewPrompt, isGitHubPRReviewMode } from './github-bot-prompt.js'
 
 /**
  * 构建完整 system prompt。
@@ -21,6 +21,12 @@ export function getSystemPrompt(agentSection?: string): string {
   if (isGitHubBotMode()) {
     parts.push('')
     parts.push(buildGitHubBotPrompt())
+  }
+
+  // PR Review 模式：注入 review prompt（与 issue 修复互斥）
+  if (isGitHubPRReviewMode()) {
+    parts.push('')
+    parts.push(buildGitHubPRReviewPrompt())
   }
 
   if (agentSection) {
