@@ -454,19 +454,27 @@ export class GitHubBotCommand extends Command {
     }
     console.log('')
 
-    // ── ⑥ 安装 App ─────────────────────────────────────────────────
-    const installUrl = `https://github.com/settings/apps/${appSlug}/installations`
+    // ── ⑥ 安装 App（自动打开安装页）───────────────────────────────
+    // 直达安装页，不用跳 App 设置再找 Install 按钮
+    const installUrl = `https://github.com/apps/${appSlug}/installations/new`
     openUrl(installUrl)
 
-    console.log('━━━ 安装 App 到仓库 ━━━')
-    console.log(`  ${installUrl}`)
-    console.log('  选择你的仓库 → Install')
     console.log('')
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-    console.log('✅ GitHub App 配置完成！')
+    console.log('╔══════════════════════════════════════════════════════════════╗')
+    console.log('║  ⚠️  最后一步：安装 App 到仓库（必须！）                    ║')
+    console.log('╠══════════════════════════════════════════════════════════════╣')
+    console.log('║                                                            ║')
+    console.log(`║  📦 仓库: ${owner}/${repo}`.padEnd(62) + '║')
+    console.log('║                                                            ║')
+    console.log('║  浏览器已打开安装页面，请完成以下操作：                      ║')
+    console.log('║  ① 选择你的仓库 → Install                                  ║')
+    console.log('║  ② 不安装 = Bot 无法工作                                   ║')
+    console.log('║                                                            ║')
+    console.log(`║  如未自动打开: ${installUrl}`.padEnd(62) + '║')
+    console.log('║                                                            ║')
+    console.log('╚══════════════════════════════════════════════════════════════╝')
     console.log('')
-    console.log('下一步: /github-bot actions')
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    console.log('✅ GitHub App 创建完成！下一步: /github-bot actions')
   }
 
   // ══════════════════════════════════════════════════════════════════════
