@@ -25,6 +25,7 @@ import {
   ttsService,
   modelConfig,
   mcpManager,
+  lspManager,
   turnState,
   MAX_TURNS,
   escapeForTag,
@@ -108,6 +109,9 @@ export async function runTurn(
 
     const buildSystem = (): Anthropic.TextBlockParam[] => systemSegments ?? buildSystemSegments(relevantMemory)
 
+    // 预拉取 VSCode 诊断（fire-and-forget，不阻塞 turn 启动）
+    mcpManager.fetchVSCodeDiagnostics().catch(() => {})
+
     // Accumulate text across inner turns for memory extraction (one pass per user input, not per inner turn)
     let fullAssistantText = ''
     // Track the latest stop_reason per LLM round for transcript
@@ -126,18 +130,12 @@ export async function runTurn(
       backgroundSignal,
       drainQueue: () => drainQueue(),
       drainAttachments: () => {
-        // ── Plan mode: 每次 LLM API 调用结束后，递增计数并注入 prompt ──
-        // 注意：这里的"每次"指 runAgentLoopStream 内部 for 循环的每次迭代，
-        // 即每次 LLM API 调用 = 1 次 drainAttachments 调用。
         const currentMode = appStateStore.getState().mode
         if (currentMode === 'plan') {
           let count = appStateStore.getState().planQueryCount
           count++
           appStateStore.setState(prev => ({ ...prev, planQueryCount: count }))
-          // count=1 表示刚进入 plan mode，EnterPlanModeTool 已注入 FULL version，
-          // 此处跳过避免同轮重复。后续按周期：每 5 次 LLM 调用注入 FULL。
           if (count === 1) {
-            // 防御性日志：如果 EnterPlanModeTool 因故未 enqueue FULL，这里静默失效
             process.stderr.write(`[planMode] count=1 skip (relying on EnterPlanModeTool FULL)\n`)
           }
           if (count > 1) {
@@ -145,7 +143,31 @@ export async function runTurn(
             attachmentQueue.enqueue(new PlanModeAttachment(isFullPrompt))
           }
         }
-        return attachmentQueue.formatDrain()
+
+        // LSP 诊断注入
+        const diags = lspManager?.getDiagnostics()
+        let result = attachmentQueue.formatDrain()
+        if (diags) {
+          const diagBlock = `[lsp] diagnostics:\n${diags}`
+          result = result ? `${result}\n${diagBlock}` : `[System State Changes]\n${diagBlock}`
+        }
+        // VSCode 诊断注入
+        const vscodeDiags = mcpManager.getVSCodeDiagnostics()
+        if (vscodeDiags) {
+          const diagBlock = `[vscode] diagnostics:\n${vscodeDiags}`
+          result = result ? `${result}\n${diagBlock}` : `[System State Changes]\n${diagBlock}`
+        }
+        // IDE 选中注入：用户在 VSCode 中选中的代码自动附带为上下文
+        const ideSelection = mcpManager.getIDESelection()
+        if (ideSelection) {
+          const displayPath = ideSelection.filePath
+          const lineRange = ideSelection.startLine === ideSelection.endLine
+            ? `line ${ideSelection.startLine}`
+            : `lines ${ideSelection.startLine} to ${ideSelection.endLine}`
+          const selBlock = `[ide_selection] The user selected ${lineRange} from ${displayPath}:\n${ideSelection.text}`
+          result = result ? `${result}\n${selBlock}` : `[System State Changes]\n${selBlock}`
+        }
+        return result
       },
       drainMailbox: () => drainMailbox(mailboxAgentId),
       onLLMRequest: (model, turn, msgs) => {

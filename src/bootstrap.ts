@@ -79,6 +79,9 @@ import { ttsService } from './voice/tts.js'
 import { SchedulerCommand } from './scheduler/schedulercommand.js'
 import { Scheduler } from './scheduler/scheduler.js'
 import { MCPManager } from './mcp/mcpmanager.js'
+import { createLSPServerManager } from './lsp/LSPServerManager.js'
+import { setLSPManager } from './lsp/index.js'
+import { LSPTool } from './tools/lsptool.js'
 import { handleMCPCommand } from './commands/mcpcommand.js'
 import { todoManager } from './todos/todomanager.js'
 import { attachmentQueue } from './attachment/queue.js'
@@ -163,6 +166,18 @@ const client = createClient()
 // 当前 runTurn 的 AbortSignal（供 AgentTool 传递给 sub-agent 内部循环，由 turn.ts 写入）
 export const turnState = {
   currentAbortSignal: undefined as AbortSignal | undefined,
+}
+
+// ── LSP Manager ──────────────────────────────────────────────────────────────
+// 必须在 toolRegistrar 被框架快照之前注册，位置先于 MCP
+const lspManager = createLSPServerManager()
+setLSPManager(lspManager)  // 注入给 EditTool/WriteTool 使用
+const lspTool = new LSPTool(lspManager)
+if (LSPTool.isServerAvailable()) {
+  toolRegistrar.registerTool(lspTool)
+  console.log('[lsp] typescript-language-server detected, LSP Tool registered')
+} else {
+  console.log('[lsp] typescript-language-server not available, LSP Tool skipped')
 }
 
 // ── MCP Manager ───────────────────────────────────────────────────────────────
@@ -280,8 +295,8 @@ function cleanupTranscript(): void {
   try { sessionManager.close() } catch { /* ignore */ }
 }
 process.on('beforeExit', cleanupTranscript)
-process.on('SIGINT', () => { cleanupTranscript(); Mailbox.stopWatching('main'); process.exit(0) })
-process.on('SIGTERM', () => { cleanupTranscript(); Mailbox.stopWatching('main'); process.exit(0) })
+process.on('SIGINT', () => { cleanupTranscript(); lspManager.shutdown().catch(() => {}); Mailbox.stopWatching('main'); process.exit(0) })
+process.on('SIGTERM', () => { cleanupTranscript(); lspManager.shutdown().catch(() => {}); Mailbox.stopWatching('main'); process.exit(0) })
 
 // AgentTool 需要 client / executeTool / emitLine / transcriptRecorder —— 这些此时才有，在这里注入
 import type { BackgroundAgentResult } from './tools/agenttool.js'
@@ -644,6 +659,8 @@ export {
   ttsService,
   modelConfig,
   mcpManager,
+  lspManager,
+  lspTool,
   commandParser,
   commandRegistry,
   initialTuiMessages,

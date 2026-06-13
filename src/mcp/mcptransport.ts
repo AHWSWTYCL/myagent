@@ -267,15 +267,42 @@ export class SSETransport implements MCPTransport {
         throw new Error(`SSE connection failed: ${response.status} ${response.statusText}`)
       }
 
-      this._connected = true
-
-      // 解析 SSE event stream
       const reader = response.body?.getReader()
       if (!reader) {
         throw new Error('SSE response body is not readable')
       }
 
-      this.readSSEStream(reader)
+      // 使用异步生成器统一解析 SSE 事件流。
+      // 先从生成器获取首个事件：必须是 endpoint 事件，以获取 POST 地址。
+      // 否则 connect() 返回后 send() 会因 sessionUrl 为 null 而 fallback 到错误 URL。
+      const events = this.parseSSEEvents(reader)
+
+      // 等待首个 endpoint 事件
+      const first = await events.next()
+      if (first.done) {
+        throw new Error('SSE stream ended before receiving endpoint event')
+      }
+      // 首个事件必须是 endpoint（VSCode 等 MCP Server 的标准行为）
+      if (first.value.event === 'endpoint') {
+        this.dispatchEvent(first.value)
+      }
+
+      // 如果第一个事件不是 endpoint（某些非标实现），再读一个试试
+      if (!this.sessionUrl) {
+        const second = await events.next()
+        if (!second.done && second.value.event === 'endpoint') {
+          this.dispatchEvent(second.value)
+        }
+      }
+
+      if (!this.sessionUrl) {
+        throw new Error('SSE stream did not send an endpoint event')
+      }
+
+      this._connected = true
+
+      // 后台持续消费后续 SSE 事件
+      this.consumeSSEEvents(events)
     } catch (err: any) {
       if (err.name === 'AbortError') {
         this._onError?.(new Error(`SSE connection timeout after ${this.connectTimeout}ms`))
@@ -289,8 +316,9 @@ export class SSETransport implements MCPTransport {
 
   async disconnect(): Promise<void> {
     this._connected = false
+    // abort() 标记 signal.aborted=true，consumeSSEEvents 的 finally 会检查此标记
+    // 跳过 _onClose 触发（由本方法统一触发），避免重复
     this.abortController?.abort()
-    this.abortController = null
     this.sessionUrl = null
     this._onClose?.()
   }
@@ -325,8 +353,10 @@ export class SSETransport implements MCPTransport {
     }
   }
 
-  /** 逐行读取 SSE event stream */
-  private async readSSEStream(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  /** 异步生成器：逐事件产出 SSE 事件流 */
+  private async *parseSSEEvents(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+  ): AsyncGenerator<{ event: string; data: string }> {
     const decoder = new TextDecoder()
     let buffer = ''
     let currentEvent = ''
@@ -339,7 +369,6 @@ export class SSETransport implements MCPTransport {
 
         buffer += decoder.decode(value, { stream: true })
 
-        // 按行处理
         while (true) {
           const nlIndex = buffer.indexOf('\n')
           if (nlIndex === -1) break
@@ -350,7 +379,7 @@ export class SSETransport implements MCPTransport {
           // 空行 = 事件结束
           if (line === '') {
             if (currentData) {
-              this.dispatchSSEEvent(currentEvent, currentData.trim())
+              yield { event: currentEvent || '', data: currentData.trim() }
             }
             currentEvent = ''
             currentData = ''
@@ -369,40 +398,60 @@ export class SSETransport implements MCPTransport {
             continue
           }
 
-          // 忽略其他字段
+          // 忽略其他字段（如 id、retry）
         }
       }
 
       // 处理最后一块数据
       if (currentData) {
-        this.dispatchSSEEvent(currentEvent, currentData.trim())
+        yield { event: currentEvent || '', data: currentData.trim() }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+  }
+
+  /** 后台消费 SSE 事件生成器，分发到 dispatchEvent */
+  private async consumeSSEEvents(
+    events: AsyncGenerator<{ event: string; data: string }>,
+  ): Promise<void> {
+    try {
+      for await (const ev of events) {
+        this.dispatchEvent(ev)
       }
     } catch (err: any) {
-      // 连接关闭或出错
       if (!this.abortController?.signal.aborted) {
         this._onError?.(err instanceof Error ? err : new Error(String(err)))
       }
     } finally {
-      reader.releaseLock()
-      this._connected = false
-      this._onClose?.()
+      // 非主动断开（如网络中断、服务端关闭）时才触发 onClose
+      // disconnect() 本身由外部显式调用，不应在此重复触发
+      if (!this.abortController?.signal.aborted) {
+        this._connected = false
+        this._onClose?.()
+      }
     }
   }
 
-  /** 分发 SSE 事件 */
-  private dispatchSSEEvent(event: string, data: string): void {
-    if (event === 'endpoint') {
-      // 保存 session endpoint URL 用于后续 POST
-      this.sessionUrl = data
+  /** 分发单个 SSE 事件 */
+  private dispatchEvent(ev: { event: string; data: string }): void {
+    if (ev.event === 'endpoint') {
+      // 规范化 sessionUrl：处理相对路径
+      try {
+        this.sessionUrl = new URL(ev.data, this.url).toString()
+      } catch {
+        this._onError?.(new Error(`Invalid endpoint URL from SSE: ${ev.data}`))
+      }
       return
     }
 
-    if (event === 'message' || !event) {
-      this._onMessage?.(data)
+    // message 或无 event 字段 → JSON-RPC 消息
+    if (ev.event === 'message' || !ev.event) {
+      this._onMessage?.(ev.data)
       return
     }
 
-    // 其他事件类型作为消息传递
-    this._onMessage?.(data)
+    // 其他事件类型也作为消息传递
+    this._onMessage?.(ev.data)
   }
 }

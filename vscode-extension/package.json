@@ -1,0 +1,41 @@
+{
+  "name": "myagent",
+  "displayName": "myagent",
+  "description": "MCP Server that exposes VSCode LSP and IDE context to myagent",
+  "version": "0.1.0",
+  "publisher": "myagent",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "myagent-lsp-sidebar",
+          "title": "myagent",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "myagent-lsp-sidebar": [
+        {
+          "id": "myagent-lsp-status",
+          "name": "Server Status"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

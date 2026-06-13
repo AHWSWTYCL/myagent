@@ -36,6 +36,7 @@ export type StatusChangeCallback = (infos: MCPServerInfo[]) => void
 
 const DEFAULT_CONFIG_PATH = path.join(os.homedir(), '.myagent', 'mcp-servers.json')
 const ENV_CONFIG_PATH = process.env.MYAGENT_MCP_CONFIG
+const VSCode_PORT_FILE = path.join(os.homedir(), '.myagent', 'vscode-mcp.json')
 
 function getConfigPath(): string {
   return ENV_CONFIG_PATH || DEFAULT_CONFIG_PATH
@@ -52,6 +53,17 @@ export class MCPManager {
   private registrar: ToolRegistrar | null = null
   /** 已注册的工具名集合（用于冲突检测） */
   private registeredNames = new Set<string>()
+
+  /** VSCode 诊断缓存：每次 turn 前异步拉取，drainAttachments 同步读取 */
+  private vscodeDiagsCache: string | null = null
+
+  /** IDE 选中缓存：每次 turn 前异步拉取 getSelection，drainAttachments 同步读取 */
+  private ideSelectionCache: {
+    text: string
+    filePath: string
+    startLine: number
+    endLine: number
+  } | null = null
 
   /**
    * 设置 ToolRegistrar 引用。
@@ -115,6 +127,11 @@ export class MCPManager {
         }
         if (server.transport === 'sse' && !server.url) {
           console.warn(`[mcp] WARN: server "${name}" has no url, skipping`)
+          continue
+        }
+        // 检测 VSCode 插件是否激活（通过端口文件）
+        if (server.name === 'vscode' && !fs.existsSync(VSCode_PORT_FILE)) {
+          console.log('[mcp] VSCode plugin not active, skipping vscode server')
           continue
         }
         servers.push(server)
@@ -319,6 +336,78 @@ export class MCPManager {
    */
   onStatusChange(callback: StatusChangeCallback): void {
     this.statusListeners.push(callback)
+  }
+
+  /**
+   * 拉取 VSCode 插件的最新诊断信息和选中状态，写入缓存。
+   * 每次 turn 开始前调用（fire-and-forget）。
+   */
+  async fetchVSCodeDiagnostics(): Promise<void> {
+    const server = this.servers.get('vscode')
+    if (!server || server.status !== 'connected') {
+      this.vscodeDiagsCache = null
+      this.ideSelectionCache = null
+      return
+    }
+
+    // 诊断拉取
+    try {
+      const raw = await server.callTool('getDiagnostics', {})
+      if (raw.startsWith('Error:')) {
+        this.vscodeDiagsCache = null
+      } else {
+        const parsed = JSON.parse(raw)
+        if (parsed.summary?.errors + parsed.summary?.warnings + parsed.summary?.hints === 0) {
+          this.vscodeDiagsCache = null
+        } else {
+          this.vscodeDiagsCache = raw
+        }
+      }
+    } catch {
+      this.vscodeDiagsCache = null
+    }
+
+    // 选中内容拉取（与诊断并行，但此处顺序调用避免额外复杂度）
+    try {
+      const raw = await server.callTool('getSelection', {})
+      if (raw.startsWith('Error:') || raw === 'No active editor') {
+        this.ideSelectionCache = null
+        return
+      }
+      const parsed = JSON.parse(raw)
+      if (!parsed.text || parsed.text.length === 0) {
+        this.ideSelectionCache = null // 空选中 = 用户取消了选择
+        return
+      }
+      this.ideSelectionCache = {
+        text: parsed.text,
+        filePath: parsed.filePath,
+        startLine: parsed.startLine,
+        endLine: parsed.endLine,
+      }
+    } catch {
+      this.ideSelectionCache = null
+    }
+  }
+
+  /**
+   * 获取缓存的 VSCode 诊断信息（同步，供 drainAttachments 使用）。
+   */
+  getVSCodeDiagnostics(): string | null {
+    return this.vscodeDiagsCache
+  }
+
+  /**
+   * 获取缓存的 IDE 选中状态（同步，供 drainAttachments 使用）。
+   * 返回 null 表示无选中或选中已被清除。
+   */
+  getIDESelection(): {
+    text: string
+    filePath: string
+    startLine: number
+    endLine: number
+  } | null {
+    return this.ideSelectionCache
   }
 
   // ── 内部辅助 ────────────────────────────────────────────────────────────────

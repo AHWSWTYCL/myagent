@@ -4,6 +4,7 @@ import os from 'os'
 import { cwd } from 'process'
 import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from "./tool";
+import { getLSPManager } from '../lsp/index.js'
 
 // 系统敏感路径前缀——写这些路径直接阻断
 const SENSITIVE_PATH_PREFIXES = [
@@ -91,6 +92,14 @@ export class WriteTool extends Tool {
 
         try {
             fs.writeFileSync(resolvedPath, content);
+
+            // LSP 文件同步
+            const lsp = getLSPManager()
+            if (lsp) {
+              lsp.changeFile(resolvedPath, content).catch(() => {})
+              lsp.saveFile(resolvedPath).catch(() => {})
+            }
+
             return JSON.stringify({ success: true, message: `Wrote ${content.length} bytes to ${resolvedPath}` });
         } catch (err) {
             return JSON.stringify({ success: false, message: `Error writing file at ${resolvedPath}: ${err}` });

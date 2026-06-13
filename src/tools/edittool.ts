@@ -4,6 +4,7 @@ import { structuredPatch } from 'diff'
 import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from './tool'
 import { fileStateCache } from '../utils/fileStateCache.js'
+import { getLSPManager } from '../lsp/index.js'
 
 // ── 导出类型供 TUI / LoggerHook 使用 ─────────────────────────────────────
 
@@ -323,6 +324,13 @@ export class EditTool extends Tool {
       })
     } catch {
       // 缓存更新失败不影响功能
+    }
+
+    // ── 10.5. LSP 文件同步 ────────────────────────────────────────────
+    const lsp = getLSPManager()
+    if (lsp) {
+      lsp.changeFile(resolvedPath, updated).catch(() => {})
+      lsp.saveFile(resolvedPath).catch(() => {})
     }
 
     // ── 11. 计算 diff 并返回结构化结果 ────────────────────────────────
