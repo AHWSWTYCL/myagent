@@ -10,6 +10,7 @@ import * as vscode from 'vscode'
 import { createTransport, type MCPTransport } from './transport'
 import { createMCPServer } from './server'
 import { MyAgentSidebarProvider } from './sidebar'
+import { cleanupTempFiles, getDiffSession, removeDiffSession, activeProposedPaths, proposedChangeLines } from './tools'
 
 let transport: MCPTransport | null = null
 let statusBar: vscode.StatusBarItem | null = null
@@ -54,12 +55,53 @@ export async function activate(context: vscode.ExtensionContext) {
       vscode.commands.registerCommand('myagent-lsp.copyConfig', () => {
         const config = JSON.stringify({
           mcpServers: {
-            vscode: { url: `http://localhost:${transport!.port}/sse` }
+            vscode: { url: `ws://localhost:${transport!.port}` }
           }
         }, null, 2)
         vscode.env.clipboard.writeText(config)
         vscode.window.showInformationMessage('MCP config copied to clipboard! Paste into ~/.myagent/mcp-servers.json')
       })
+    )
+
+    // 交互式 diff Accept/Reject 命令（供 CodeLens 调用）
+    context.subscriptions.push(
+      vscode.commands.registerCommand('myagent.diffAccept', (path: string) => {
+        const cb = getDiffSession(path)
+        if (cb) { removeDiffSession(path); cb('accepted') }
+      })
+    )
+    context.subscriptions.push(
+      vscode.commands.registerCommand('myagent.diffReject', (path: string) => {
+        const cb = getDiffSession(path)
+        if (cb) { removeDiffSession(path); cb('rejected') }
+      })
+    )
+
+    // 测试 CodeLens：验证 CodeLens 机制是否工作 → 改为全局 diff CodeLens
+    context.subscriptions.push(
+      vscode.languages.registerCodeLensProvider(
+        { scheme: 'file' },
+        {
+          provideCodeLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
+            const path = doc.uri.fsPath
+            if (!activeProposedPaths.has(path)) return []
+            const changeLine = proposedChangeLines.get(path) ?? 0
+            const range = new vscode.Range(changeLine, 0, changeLine, 0)
+            return [
+              new vscode.CodeLens(range, {
+                title: '$(check) Accept',
+                command: 'myagent.diffAccept',
+                arguments: [path],
+              }),
+              new vscode.CodeLens(range, {
+                title: '$(x) Reject',
+                command: 'myagent.diffReject',
+                arguments: [path],
+              }),
+            ]
+          }
+        }
+      )
     )
 
     outputChannel.appendLine(
@@ -90,6 +132,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
   outputChannel?.appendLine('[myagent] deactivating...')
+  cleanupTempFiles(true) // 强制清理所有 diff 临时文件
   transport?.stop().catch(() => {})
   transport = null
   statusBar?.dispose()
