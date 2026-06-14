@@ -35,6 +35,7 @@
     "@types/node": "^25.7.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
     "eslint": "^10.3.0",
     "globals": "^17.6.0",
     "tsx": "^4.21.0",

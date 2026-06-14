@@ -3,3 +3,9 @@ function bar(): void {
 }
 
 bar();
+
+function test(): void {
+  console.log("test method called");
+}
+
+test();

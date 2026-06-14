@@ -265,18 +265,9 @@ await mcpManager.startAll()
   if (editTool) editTool.onBeforeEdit = onBeforeEdit
   if (writeTool) writeTool.onBeforeEdit = onBeforeEdit
 
-  // ── Post-edit diff 通知（fire-and-forget） ──────────────────────────
-  const notifyDiff = (filePath: string, oldContent: string, newContent: string) => {
-    mcpManager.callServerTool('vscode', 'showDiff', { filePath, oldContent, newContent }).catch((err: any) => {
-      // 静默失败但记录原因（VSCode 未连接时常见）
-      if (err?.message && !err.message.includes('not connected')) {
-        originalConsoleError(`[diff] VSCode showDiff failed: ${err.message}`)
-      }
-    })
-  }
-
-  if (editTool) editTool.onFileChanged = notifyDiff
-  if (writeTool) writeTool.onFileChanged = notifyDiff
+  // ── Post-edit diff 通知 ────────────────────────────────────────────
+  // 已移除：auto mode 不需要 diff，manual mode 通过 showDiffInteractive
+  // 已展示变更。onFileChanged 回调不再连接。
 }
 
 // 清理超过 24 小时的过期后台结果文件
