@@ -514,7 +514,7 @@ async function executeShowDiffInteractive(args) {
     // ── 注册到全局 CodeLens（供 extension.ts 中的全局 Provider 查询）─
     exports.activeProposedPaths.add(proposedPath);
     exports.proposedChangeLines.set(proposedPath, changeLine);
-    // ── 打开 diff 视图 ──────────────────────────────────────────────────
+    // ── 打开 diff 视图（供审阅参考，在 Active 列）─────────────────────
     // 左侧：真实文件（只读），右侧：proposed 临时文件（可编辑）
     const leftUri = vscode.Uri.file(filePath);
     const rightUri = vscode.Uri.file(proposedPath);
@@ -523,19 +523,26 @@ async function executeShowDiffInteractive(args) {
         await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title);
     }
     catch (err) {
-        // 清理临时文件
+        // 清理
         try {
             fs.unlinkSync(proposedPath);
         }
         catch { /* ignore */ }
+        exports.activeProposedPaths.delete(proposedPath);
+        exports.proposedChangeLines.delete(proposedPath);
         return JSON.stringify({ action: 'error', error: `Failed to open diff: ${err.message}` });
     }
-    // ── 同时打开 proposed 文件作为普通编辑器（供 CodeLens 显示）─────
+    // ── 打开 proposed 文件作为主编辑器（CodeLens Accept/Reject 在此显示）─
+    // ViewColumn.Two + preview: false 确保：
+    //   - 不与 diff 视图（Active 列）冲突
+    //   - tab 不会被其他 preview 替换
+    //   - CodeLens 可见（scheme: 'file'，不是 vscode-diff）
     try {
-        await vscode.window.showTextDocument(rightUri, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+        const proposedDoc = await vscode.workspace.openTextDocument(rightUri);
+        await vscode.window.showTextDocument(proposedDoc, { preview: false, viewColumn: vscode.ViewColumn.Two });
     }
     catch {
-        // 打开失败不影响 diff 展示
+        // 打开失败：diff 视图仍可用，用户可关闭 tab 来 accept
     }
     // ── 清理函数：精准关闭此次 diff 对应的 tab ─────────────────────────
     let settled = false;
@@ -562,6 +569,11 @@ async function executeShowDiffInteractive(args) {
         exports.activeProposedPaths.delete(proposedPath);
         exports.proposedChangeLines.delete(proposedPath);
         await closeDiffTab();
+        // 重新打开原始文件，让 IDE 焦点回到修改后的文件
+        try {
+            await vscode.window.showTextDocument(vscode.Uri.file(filePath), { preview: false });
+        }
+        catch { /* ignore */ }
         try {
             fs.unlinkSync(proposedPath);
         }

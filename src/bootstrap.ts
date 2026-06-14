@@ -236,8 +236,15 @@ await mcpManager.startAll()
         resultStr = await resultPromise
       }
 
-      // 解析 VSCode 返回的 JSON
-      const parsed = JSON.parse(resultStr)
+      // 解析 VSCode 返回的 JSON（带容错防护，防止非标准响应导致静默 skip）
+      let parsed: { action?: string; newContent?: string; reason?: string; error?: string }
+      try {
+        parsed = JSON.parse(resultStr)
+      } catch (parseErr: any) {
+        // JSON 解析失败 → 安全地拒绝写入（而非静默 skip）
+        bridge.emitMessage('system', `⚠️ VSCode 审批响应解析失败 (${parseErr.message})，拒绝写入`)
+        return { action: 'rejected' }
+      }
       const action = parsed.action as string
 
       if (action === 'accepted') return { action: 'accepted' }
