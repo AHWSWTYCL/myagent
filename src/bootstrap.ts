@@ -186,6 +186,99 @@ mcpManager.setRegistrar(toolRegistrar)
 mcpManager.onStatusChange((infos) => bridge.emitMcpStatus(infos))
 await mcpManager.startAll()
 
+// ── 注入 VSCode diff 回调 ─────────────────────────────────────────────────
+// 编辑/写入文件后，自动通知 VSCode 展示 diff（fire-and-forget）
+{
+  const editTool = toolRegistrar.getTool('edit_file') as import('./tools/edittool.js').EditTool | undefined
+  const writeTool = toolRegistrar.getTool('write_file') as import('./tools/writetool.js').WriteTool | undefined
+
+  // ── 交互式 pre-edit diff（阻塞等待用户操作） ──────────────────────
+  // auto mode → skip；manual mode → 等待用户 Accept/Reject/Modify
+  const INTERACTIVE_DIFF_TIMEOUT = 3 * 60 * 1000 // 3 min（比 VSCode 侧的 2 min 多 1 min 缓冲）
+
+  const onBeforeEdit = async (
+    filePath: string,
+    oldContent: string,
+    newContent: string,
+    signal?: AbortSignal,
+  ): Promise<{ action: 'skip' | 'accepted' | 'rejected' | 'modified'; newContent?: string }> => {
+    // 动态读取当前 mode（不是快照）
+    if (bridge.mode === 'auto') {
+      return { action: 'skip' }
+    }
+
+    // 构建支持 AbortSignal 的等待
+    try {
+      const resultPromise = mcpManager.callServerTool(
+        'vscode',
+        'showDiffInteractive',
+        { filePath, newContent },
+        INTERACTIVE_DIFF_TIMEOUT,
+      )
+
+      let resultStr: string
+      if (signal) {
+        resultStr = await Promise.race([
+          resultPromise,
+          new Promise<string>((_, reject) => {
+            const onAbort = () => {
+              signal.removeEventListener('abort', onAbort)
+              reject(new Error('Aborted'))
+            }
+            if (signal.aborted) {
+              reject(new Error('Aborted'))
+              return
+            }
+            signal.addEventListener('abort', onAbort, { once: true })
+          }),
+        ])
+      } else {
+        resultStr = await resultPromise
+      }
+
+      // 解析 VSCode 返回的 JSON
+      const parsed = JSON.parse(resultStr)
+      const action = parsed.action as string
+
+      if (action === 'accepted') return { action: 'accepted' }
+      if (action === 'rejected') return { action: 'rejected' }
+      if (action === 'modified' && typeof parsed.newContent === 'string') {
+        return { action: 'modified', newContent: parsed.newContent }
+      }
+      if (action === 'skip') return { action: 'skip' }
+
+      // 无法识别的响应 → 为了安全，reject
+      return { action: 'rejected' }
+    } catch (err: any) {
+      // VSCode 未连接、超时、或用户 Esc → reject
+      if (err.message === 'Aborted' || signal?.aborted) {
+        bridge.emitMessage('system', '⚠️ 审批已取消')
+        return { action: 'rejected' }
+      }
+      // VSCode 不可用 → 跳过审批，但不静默：让用户知道发生了什么
+      const reason = err.message || String(err)
+      bridge.emitMessage('system', `⚠️ VSCode 审批不可用 (${reason})，跳过审批直接写入`)
+      return { action: 'skip' }
+    }
+  }
+
+  if (editTool) editTool.onBeforeEdit = onBeforeEdit
+  if (writeTool) writeTool.onBeforeEdit = onBeforeEdit
+
+  // ── Post-edit diff 通知（fire-and-forget） ──────────────────────────
+  const notifyDiff = (filePath: string, oldContent: string, newContent: string) => {
+    mcpManager.callServerTool('vscode', 'showDiff', { filePath, oldContent, newContent }).catch((err: any) => {
+      // 静默失败但记录原因（VSCode 未连接时常见）
+      if (err?.message && !err.message.includes('not connected')) {
+        originalConsoleError(`[diff] VSCode showDiff failed: ${err.message}`)
+      }
+    })
+  }
+
+  if (editTool) editTool.onFileChanged = notifyDiff
+  if (writeTool) writeTool.onFileChanged = notifyDiff
+}
+
 // 清理超过 24 小时的过期后台结果文件
 cleanOldResults()
 
@@ -328,6 +421,12 @@ agentTool.setExecutionContext({
 const hookManager = new HookManager()
 hookManager.register(new LoggerHook(bridge))
 const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt), toolRegistrar)
+// 注入 VSCode 连接状态检查器：只有 mcpManager 中 vscode server 真实连接时才跳过 TUI 授权
+permissionHook.setVSCodeChecker(() => {
+  const infos = mcpManager.getServerInfos()
+  const vscode = infos.find(i => i.name === 'vscode')
+  return vscode?.status === 'connected'
+})
 const autoPermissionAgent = new AutoPermissionAgent(client)
 hookManager.register(permissionHook)
 hookManager.register(new RetrospectiveHook(client, skillManager, bridge, 30))

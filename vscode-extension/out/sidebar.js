@@ -57,7 +57,7 @@ class MyAgentSidebarProvider {
         const items = [];
         // 状态行
         const status = new vscode.TreeItem(`$(circle-filled) myagent v${this._version} — port ${this.port}`, vscode.TreeItemCollapsibleState.None);
-        status.tooltip = `Listening on http://localhost:${this.port}`;
+        status.tooltip = `Listening on ws://localhost:${this.port}`;
         items.push(status);
         // 配置提示
         const configHint = new vscode.TreeItem(`$(json) ~/.myagent/mcp-servers.json`, vscode.TreeItemCollapsibleState.None);
@@ -68,7 +68,7 @@ class MyAgentSidebarProvider {
             '{',
             '  "mcpServers": {',
             `    "vscode": {`,
-            `      "url": "http://localhost:${this.port}/sse"`,
+            `      "url": "ws://localhost:${this.port}"`,
             '    }',
             '  }',
             '}',
@@ -79,7 +79,7 @@ class MyAgentSidebarProvider {
         };
         items.push(configHint);
         // 工具列表
-        const tools = new vscode.TreeItem(`$(tools) 6 MCP Tools`, vscode.TreeItemCollapsibleState.Collapsed);
+        const tools = new vscode.TreeItem(`$(tools) 8 MCP Tools`, vscode.TreeItemCollapsibleState.Collapsed);
         items.push(tools);
         return items;
     }
@@ -91,6 +91,8 @@ class MyAgentSidebarProvider {
             { label: 'openFile', description: 'IDE — open file' },
             { label: 'getDiagnostics', description: 'IDE — errors/warnings' },
             { label: 'executeCode', description: 'IDE — run command' },
+            { label: 'showDiff', description: 'IDE — show file diff' },
+            { label: 'showDiffInteractive', description: 'IDE — interactive diff' },
         ].map(t => {
             const item = new vscode.TreeItem(t.label, vscode.TreeItemCollapsibleState.None);
             item.description = t.description;

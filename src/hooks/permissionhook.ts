@@ -53,6 +53,10 @@ function matchesRule(rule: PermissionRule, toolName: string, subject: string): b
   }
 }
 
+// ── VSCode 扩展环境检测 ──────────────────────────────────────────────────────
+const FILE_EDIT_TOOLS = new Set(['write_file', 'edit_file'])
+const VSCODE_TOOLS_PREFIX = 'vscode__'
+
 // ── 智能缓存 key 生成 ──────────────────────────────────────────────────────────
 // 同类操作共享同一个缓存 key，避免反复授权。
 // 例如：bash:npm install → 匹配 npm install express / npm install -D typescript
@@ -139,6 +143,7 @@ export class PermissionHook implements Hook {
   private autoAgent: AutoPermissionAgent | null = null
   private config: PermissionsConfig
   private toolRegistrar: ToolRegistrar
+  private vscodeChecker: (() => boolean) | null = null
 
   constructor(
     private askPermission: (prompt: string) => Promise<PermissionAnswer>,
@@ -151,6 +156,11 @@ export class PermissionHook implements Hook {
   setMode(mode: 'default' | 'auto' | 'plan', agent?: AutoPermissionAgent | null) {
     this.mode = mode
     if (agent !== undefined) this.autoAgent = agent
+  }
+
+  /** 注入 VSCode 连接状态检查器。由 bootstrap.ts 在 mcpManager 就绪后调用。 */
+  setVSCodeChecker(fn: () => boolean) {
+    this.vscodeChecker = fn
   }
 
   get isAutoMode() {
@@ -207,7 +217,18 @@ export class PermissionHook implements Hook {
       return { action: 'continue' }
     }
 
-    // ── 4. 工具自身的权限检查 ────────────────────────────────────────────────
+    // ── 5. VSCode 扩展环境：文件编辑和 VSCode 工具跳过 TUI 授权 ──────────
+    // VSCode 扩展已有 diff 审批机制（onBeforeEdit → showDiffInteractive），
+    // 无需在 TUI 重复询问。VSCode 内部工具（vscode__*）由扩展自身管理。
+    //
+    // ⚠️ FILE_EDIT_TOOLS 必须与 bootstrap.ts 中注入 onBeforeEdit 的工具集
+    // 保持一致。此处只绕过 TUI 弹窗，tool.checkPermission（Step 6）仍生效。
+    // auto mode 下此处提前放行也可减少一次 auto agent 调用。
+    if (this.vscodeChecker?.() && (FILE_EDIT_TOOLS.has(ctx.toolName) || ctx.toolName.startsWith(VSCODE_TOOLS_PREFIX))) {
+      return { action: 'continue' }
+    }
+
+    // ── 6. 工具自身的权限检查 ────────────────────────────────────────────────
     const tool = this.toolRegistrar.getTool(ctx.toolName)
     if (tool) {
       const toolResult = await tool.checkPermission(args)
@@ -231,7 +252,7 @@ export class PermissionHook implements Hook {
         ? `Write file: ${args.path}`
         : `${ctx.toolName}: ${JSON.stringify(args)}`
 
-    // ── 5. auto mode：交给 AI agent 决策 ─────────────────────────────────────
+    // ── 7. auto mode：交给 AI agent 决策 ─────────────────────────────────────
     // 注意：auto mode 下 haiku 说了算，拒绝时直接 block，不回退问用户。
     // 用户如果不想让 AI 决策，可以关闭 auto mode（Shift+Tab 切换）。
     if (this.mode === 'auto' && this.autoAgent) {
@@ -244,7 +265,7 @@ export class PermissionHook implements Hook {
       return { action: 'continue' }
     }
 
-    // ── 6. 手动模式：询问用户 ─────────────────────────────────────────────────
+    // ── 8. 手动模式：询问用户 ─────────────────────────────────────────────────
     const answer = await this.askPermission(prompt)
     if (answer === 'yes') {
       return { action: 'continue' }

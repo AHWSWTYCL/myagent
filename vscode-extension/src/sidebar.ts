@@ -32,7 +32,7 @@ export class MyAgentSidebarProvider implements vscode.TreeDataProvider<vscode.Tr
       `$(circle-filled) myagent v${this._version} — port ${this.port}`,
       vscode.TreeItemCollapsibleState.None,
     )
-    status.tooltip = `Listening on http://localhost:${this.port}`
+    status.tooltip = `Listening on ws://localhost:${this.port}`
     items.push(status)
 
     // 配置提示
@@ -47,7 +47,7 @@ export class MyAgentSidebarProvider implements vscode.TreeDataProvider<vscode.Tr
       '{',
       '  "mcpServers": {',
       `    "vscode": {`,
-      `      "url": "http://localhost:${this.port}/sse"`,
+      `      "url": "ws://localhost:${this.port}"`,
       '    }',
       '  }',
       '}',
@@ -60,7 +60,7 @@ export class MyAgentSidebarProvider implements vscode.TreeDataProvider<vscode.Tr
 
     // 工具列表
     const tools = new vscode.TreeItem(
-      `$(tools) 6 MCP Tools`,
+      `$(tools) 8 MCP Tools`,
       vscode.TreeItemCollapsibleState.Collapsed,
     )
     items.push(tools)
@@ -76,6 +76,8 @@ export class MyAgentSidebarProvider implements vscode.TreeDataProvider<vscode.Tr
       { label: 'openFile', description: 'IDE — open file' },
       { label: 'getDiagnostics', description: 'IDE — errors/warnings' },
       { label: 'executeCode', description: 'IDE — run command' },
+      { label: 'showDiff', description: 'IDE — show file diff' },
+      { label: 'showDiffInteractive', description: 'IDE — interactive diff' },
     ].map(t => {
       const item = new vscode.TreeItem(t.label, vscode.TreeItemCollapsibleState.None)
       item.description = t.description

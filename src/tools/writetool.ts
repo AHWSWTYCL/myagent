@@ -5,6 +5,7 @@ import { cwd } from 'process'
 import { z } from 'zod'
 import { Tool, type ToolRenderHeader } from "./tool";
 import { getLSPManager } from '../lsp/index.js'
+import { fileStateCache } from '../utils/fileStateCache.js'
 
 // 系统敏感路径前缀——写这些路径直接阻断
 const SENSITIVE_PATH_PREFIXES = [
@@ -21,6 +22,20 @@ const SENSITIVE_PATH_PREFIXES = [
 ]
 
 export class WriteTool extends Tool {
+
+    /**
+     * 写入完成后的回调。bootstrap.ts 注入，用于通知 VSCode 展示 diff。
+     * fire-and-forget — 不阻塞 execute() 返回。
+     */
+    onFileChanged?: (filePath: string, oldContent: string, newContent: string) => void
+
+    /**
+     * 写入前的交互式审批回调。bootstrap.ts 注入。
+     * 在 auto mode 下返回 { action: 'skip' }，manual mode 下等待用户操作。
+     */
+    onBeforeEdit?: (
+        filePath: string, oldContent: string, newContent: string, signal?: AbortSignal
+    ) => Promise<{ action: 'skip' | 'accepted' | 'rejected' | 'modified'; newContent?: string }>
 
     get name(): string {
         return 'write_file';
@@ -80,9 +95,9 @@ export class WriteTool extends Tool {
         }
     }
 
-    async execute(args: any): Promise<string> {
+    async execute(args: any, signal?: AbortSignal): Promise<string> {
         const filePath = args.path;
-        const content = args.content;
+        let content = args.content;
 
         const resolvedPath = path.resolve(filePath);
         const workDir = cwd();
@@ -90,14 +105,47 @@ export class WriteTool extends Tool {
             return JSON.stringify({ success: false, message: `Path ${filePath} is outside the working directory` });
         }
 
+        // 写前读取旧内容（用于 diff 回调）
+        let oldContent = ''
+        try {
+            oldContent = fs.readFileSync(resolvedPath, 'utf-8')
+        } catch {
+            // 文件不存在（新建），oldContent 保持 ''
+        }
+
+        // ── 交互式审批（VSCode 可用时阻塞等待用户操作）─────────────────
+        if (this.onBeforeEdit) {
+            const result = await this.onBeforeEdit(resolvedPath, oldContent, content, signal)
+            if (result.action === 'rejected') {
+                return JSON.stringify({ success: false, message: 'Write rejected by user' })
+            }
+            if (result.action === 'modified' && result.newContent !== undefined) {
+                content = result.newContent
+            }
+            // 'accepted' 或 'skip'：继续执行
+        }
+
         try {
             fs.writeFileSync(resolvedPath, content);
+
+            // 更新文件缓存（供后续 edit_file 使用）
+            try {
+              fileStateCache.set(resolvedPath, {
+                content,
+                timestamp: fs.statSync(resolvedPath).mtimeMs,
+              })
+            } catch { /* ignore */ }
 
             // LSP 文件同步
             const lsp = getLSPManager()
             if (lsp) {
               lsp.changeFile(resolvedPath, content).catch(() => {})
               lsp.saveFile(resolvedPath).catch(() => {})
+            }
+
+            // 通知 VSCode 展示 diff（fire-and-forget）
+            if (this.onFileChanged) {
+              this.onFileChanged(resolvedPath, oldContent, content)
             }
 
             return JSON.stringify({ success: true, message: `Wrote ${content.length} bytes to ${resolvedPath}` });

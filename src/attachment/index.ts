@@ -8,3 +8,4 @@ export {
 export { SkillAttachment } from './skill.js'
 export { AgentAttachment } from './agent.js'
 export { PlanModeAttachment } from './planMode.js'
+export { IDEDiagnosticsAttachment, IDESelectionAttachment } from './ide.js'

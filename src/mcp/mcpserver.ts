@@ -5,7 +5,7 @@
  * 通过 Transport 层收发 JSON-RPC 消息，使用请求 ID 匹配响应。
  */
 
-import { MCPTransport, StdioTransport, SSETransport } from './mcptransport.js'
+import { MCPTransport, StdioTransport, SSETransport, WSIDETransport } from './mcptransport.js'
 import {
   MCPTool, MCPResource, MCPPrompt,
   MCPInitializeResult,
@@ -25,7 +25,7 @@ export interface MCPServerConfig {
   /** Server 唯一标识名，用于生成工具名前缀 */
   name: string
   /** 传输方式 */
-  transport: 'stdio' | 'sse'
+  transport: 'stdio' | 'sse' | 'ws'
   /** stdio 模式：启动命令 */
   command?: string
   /** stdio 模式：命令参数 */
@@ -180,8 +180,9 @@ export class MCPServer {
   /**
    * 调用 MCP 工具。
    * 返回结果字符串（与 myagent Tool.execute() 规范一致），失败也返回错误字符串。
+   * @param timeout 可选超时（毫秒），不传使用构造函数中配置的 toolCallTimeout（默认 30s）
    */
-  async callTool(toolName: string, args: Record<string, unknown>): Promise<string> {
+  async callTool(toolName: string, args: Record<string, unknown>, timeout?: number): Promise<string> {
     if (this._status !== 'connected') {
       return `Error: MCP server "${this.name}" is disconnected`
     }
@@ -190,7 +191,7 @@ export class MCPServer {
       const result = await this.request<{ content: Array<{ type: string; text?: string }> }>(
         METHOD_TOOLS_CALL,
         { name: toolName, arguments: args },
-        this.toolCallTimeout,
+        timeout ?? this.toolCallTimeout,
       )
 
       if (!result.content || !Array.isArray(result.content)) {
@@ -273,6 +274,13 @@ export class MCPServer {
       return new SSETransport({
         url: this.config.url,
         headers: this.config.headers,
+      })
+    }
+
+    if (this.config.transport === 'ws') {
+      if (!this.config.url) throw new Error('WebSocket transport requires a url')
+      return new WSIDETransport({
+        url: this.config.url,
       })
     }
 

@@ -1,11 +1,16 @@
 /**
  * MCP 传输层抽象
  *
- * 定义 MCPTransport 接口，提供 StdioTransport（子进程）和 SSETransport（HTTP SSE）两种实现。
+ * 定义 MCPTransport 接口，提供三种实现：
+ *   StdioTransport — 子进程 stdio
+ *   SSETransport   — HTTP SSE（用于远程 MCP Server）
+ *   WSIDETransport — WebSocket（用于 VSCode IDE 连接）
+ *
  * 所有异常通过回调传递，不抛异常到上层。
  */
 
 import { spawn, ChildProcess } from 'child_process'
+import WebSocket from 'ws'
 
 // ── stdio 日志收集 ────────────────────────────────────────────────────────────
 
@@ -435,6 +440,9 @@ export class SSETransport implements MCPTransport {
 
   /** 分发单个 SSE 事件 */
   private dispatchEvent(ev: { event: string; data: string }): void {
+    // 忽略心跳事件（保持连接存活，不传递到上层）
+    if (ev.event === 'heartbeat') return
+
     if (ev.event === 'endpoint') {
       // 规范化 sessionUrl：处理相对路径
       try {
@@ -453,5 +461,103 @@ export class SSETransport implements MCPTransport {
 
     // 其他事件类型也作为消息传递
     this._onMessage?.(ev.data)
+  }
+}
+
+// ── WebSocket 传输 ───────────────────────────────────────────────────────────
+
+export interface WSIDETransportOptions {
+  /** WebSocket URL，如 ws://localhost:16888 */
+  url: string
+  /** 连接超时（毫秒），默认 10_000 */
+  connectTimeout?: number
+}
+
+/**
+ * 通过 WebSocket 连接 MCP Server（用于 VSCode IDE 集成）。
+ *
+ * ws 库自带 ping/pong 保活（默认每 30s），无需应用层心跳。
+ * 双向全双工通信，比 SSE + POST 更简洁高效。
+ */
+export class WSIDETransport implements MCPTransport {
+  private url: string
+  private connectTimeout: number
+  private ws: WebSocket | null = null
+  private _onMessage: ((data: string) => void) | null = null
+  private _onError: ((err: Error) => void) | null = null
+  private _onClose: (() => void) | null = null
+  private _connected = false
+
+  constructor(options: WSIDETransportOptions) {
+    this.url = options.url
+    this.connectTimeout = options.connectTimeout ?? 10_000
+  }
+
+  onMessage(cb: (data: string) => void): void { this._onMessage = cb }
+  onError(cb: (err: Error) => void): void { this._onError = cb }
+  onClose(cb: () => void): void { this._onClose = cb }
+
+  isConnected(): boolean { return this._connected }
+
+  async connect(): Promise<void> {
+    if (this._connected) return
+
+    return new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(this.url)
+      this.ws = ws
+
+      const timeout = setTimeout(() => {
+        ws.close()
+        reject(new Error(`WebSocket connection timeout after ${this.connectTimeout}ms`))
+      }, this.connectTimeout)
+
+      ws.on('open', () => {
+        clearTimeout(timeout)
+        this._connected = true
+        resolve()
+      })
+
+      ws.on('message', (data: WebSocket.Data) => {
+        this._onMessage?.(data.toString())
+      })
+
+      ws.on('close', (code: number, reason: Buffer) => {
+        clearTimeout(timeout)
+        this._connected = false
+        this._onClose?.()
+      })
+
+      ws.on('error', (err: Error) => {
+        clearTimeout(timeout)
+        this._connected = false
+        // 连接阶段错误 → reject；运行时错误 → 回调
+        if (!this._connected) {
+          reject(err)
+        } else {
+          this._onError?.(err)
+        }
+      })
+    })
+  }
+
+  async disconnect(): Promise<void> {
+    this._connected = false
+    if (this.ws) {
+      this.ws.close(1000, 'client disconnect')
+      this.ws = null
+    }
+    this._onClose?.()
+  }
+
+  async send(message: string): Promise<void> {
+    if (!this.ws || !this._connected) {
+      throw new Error('WebSocket transport not connected')
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.ws!.send(message, (err) => {
+        if (err) reject(err)
+        else resolve()
+      })
+    })
   }
 }

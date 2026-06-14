@@ -1,14 +1,14 @@
 /**
- * transport.ts — HTTP + SSE transport for VSCode MCP Server
+ * transport.ts — WebSocket transport for VSCode MCP Server
  *
- * VSCode 插件内嵌 HTTP Server，提供:
- *   GET  /sse     → SSE event stream（myagent 通过 SSETransport 连接）
- *   POST /message → JSON-RPC 请求处理
+ * VSCode 插件内嵌 WebSocket Server，提供:
+ *   ws://localhost:16888 → JSON-RPC 双向通信
  *
- * 端口策略: 固定端口 16888，写入 ~/.myagent/vscode-mcp.json 供 myagent 发现
+ * WebSocket 自带 ping/pong 保活（ws 库默认每 30s），无需应用层心跳。
+ * 端口写入 ~/.myagent/vscode-mcp.json 供 myagent 发现。
  */
 
-import * as http from 'http'
+import { WebSocketServer, WebSocket } from 'ws'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -49,9 +49,9 @@ function removePortFile(): void {
 // ── 工厂函数 ──────────────────────────────────────────────────────────────────
 
 export function createTransport(): MCPTransport {
-  let server: http.Server | null = null
+  let wss: WebSocketServer | null = null
   let _port = 0
-  let sseClients: http.ServerResponse[] = []
+  let _currentClient: WebSocket | null = null
   let callbacks: TransportCallbacks | null = null
 
   return {
@@ -60,114 +60,94 @@ export function createTransport(): MCPTransport {
     async start(cbs: TransportCallbacks) {
       callbacks = cbs
 
-      server = http.createServer((req, res) => {
-        // CORS for local development
-        res.setHeader('Access-Control-Allow-Origin', '*')
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+      wss = new WebSocketServer({ port: 16888, host: 'localhost' })
 
-        if (req.method === 'OPTIONS') {
-          res.writeHead(204)
-          res.end()
-          return
+      wss.on('listening', () => {
+        _port = 16888
+        writePortFile(_port)
+        console.log(`[myagent] WebSocket MCP Server listening on ws://localhost:${_port}`)
+      })
+
+      wss.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          console.error(`[myagent] Port 16888 is in use. Is another VSCode instance running?`)
+        } else {
+          console.error(`[myagent] WebSocket server error: ${err.message}`)
         }
+      })
 
-        // GET /sse → SSE stream
-        if (req.url === '/sse' && req.method === 'GET') {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',  // disable nginx buffering
-          })
-
-          // 立即发送 endpoint 事件，告诉 myagent POST 地址
-          res.write(`event: endpoint\ndata: http://localhost:${_port}/message\n\n`)
-
-          // 追踪连接，用于 clean shutdown
-          sseClients.push(res)
-          req.on('close', () => {
-            sseClients = sseClients.filter(c => c !== res)
-          })
-
-          return
+      wss.on('connection', (ws: WebSocket) => {
+        // 只允许一个客户端连接；新连接踢掉旧连接
+        if (_currentClient) {
+          console.log('[myagent] New client connected, closing old connection')
+          try { _currentClient.close(1000, 'new client connected') } catch { /* ignore */ }
         }
+        _currentClient = ws
+        console.log('[myagent] MCP client connected')
 
-        // POST /message → JSON-RPC
-        if (req.url === '/message' && req.method === 'POST') {
-          let body = ''
-          req.on('data', (chunk: Buffer) => {
-            body += chunk.toString('utf-8')
-          })
-          req.on('end', async () => {
-            try {
-              const result = await callbacks!.onRequest(body)
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(result)
-            } catch (err: any) {
-              res.writeHead(400, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({
+        ws.on('message', async (data: Buffer) => {
+          try {
+            const response = await callbacks!.onRequest(data.toString())
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(response)
+            }
+          } catch (err: any) {
+            console.error(`[myagent] Request handling error: ${err.message}`)
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
                 jsonrpc: '2.0',
                 id: null,
                 error: { code: -32700, message: `Parse error: ${err.message}` },
               }))
             }
-          })
-          return
-        }
-
-        // 404
-        res.writeHead(404, { 'Content-Type': 'text/plain' })
-        res.end('Not Found')
-      })
-
-      // 动态端口
-      await new Promise<void>((resolve, reject) => {
-        server!.on('error', (err: NodeJS.ErrnoException) => {
-          if (err.code === 'EADDRINUSE') {
-            reject(new Error(`Port 16888 is in use. Is another VSCode instance running?`))
-          } else {
-            reject(err)
           }
         })
-        server!.listen(16888, 'localhost', () => {
-          _port = 16888
-          writePortFile(_port)
-          console.log(`[myagent] MCP Server listening on http://localhost:${_port}`)
-          resolve()
+
+        ws.on('close', (code, reason) => {
+          console.log(`[myagent] MCP client disconnected (code=${code}, reason=${reason?.toString() || 'none'})`)
+          if (_currentClient === ws) {
+            _currentClient = null
+          }
+          callbacks?.onClose()
         })
+
+        ws.on('error', (err) => {
+          console.error(`[myagent] WebSocket client error: ${err.message}`)
+        })
+      })
+
+      // 等待 server 启动
+      await new Promise<void>((resolve, reject) => {
+        if (wss!.address()) {
+          resolve()
+          return
+        }
+        wss!.once('listening', () => resolve())
+        wss!.once('error', (err) => reject(err))
       })
     },
 
     async stop() {
-      removePortFile()
-
-      // 关闭所有 SSE 连接
-      for (const client of sseClients) {
-        try { client.end() } catch { /* ignore */ }
+      // 关闭当前客户端连接
+      if (_currentClient) {
+        try { _currentClient.close(1000, 'server shutting down') } catch { /* ignore */ }
+        _currentClient = null
       }
-      sseClients = []
 
-      // 关闭 HTTP server — 需要追踪并强制关闭活跃 socket
+      // 关闭 WebSocket server
+      const server = wss
       if (server) {
-        const sockets = new Set<import('net').Socket>()
-        server.on('connection', (socket) => sockets.add(socket))
-        server.on('request', (_req, res) => {
-          res.on('close', () => {
-            if (res.socket) sockets.delete(res.socket)
-          })
-        })
-
         await new Promise<void>((resolve) => {
-          server!.close(() => resolve())
-          // 强制关闭活跃连接
-          for (const socket of sockets) {
-            socket.destroy()
+          server.close(() => resolve())
+          // 强制关闭所有连接
+          for (const client of server.clients) {
+            client.terminate()
           }
         })
-        server = null
+        wss = null
       }
 
+      removePortFile()
       _port = 0
       callbacks = null
     },

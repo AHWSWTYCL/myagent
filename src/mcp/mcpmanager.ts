@@ -26,7 +26,7 @@ export interface MCPServerInfo {
   toolCount: number
   resourceCount: number
   promptCount: number
-  transport: 'stdio' | 'sse'
+  transport: 'stdio' | 'sse' | 'ws'
   error?: string
 }
 
@@ -48,6 +48,15 @@ export class MCPManager {
   private servers = new Map<string, MCPServer>()
   private mcpTools: Tool[] = []       // 当前所有 MCP 来源的 Tool
   private statusListeners: StatusChangeCallback[] = []
+
+  /** 自动重连定时器（按 server 名） */
+  private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** 自动重连退避延迟（毫秒），成功连接后重置 */
+  private reconnectDelays = new Map<string, number>()
+  /** 主动断开的 server 集合（不自动重连） */
+  private intentionalDisconnects = new Set<string>()
+  private readonly INITIAL_RECONNECT_DELAY = 1_000
+  private readonly MAX_RECONNECT_DELAY = 30_000
 
   /** ToolRegistrar 引用（后置注入，解决循环依赖） */
   private registrar: ToolRegistrar | null = null
@@ -114,7 +123,7 @@ export class MCPManager {
         const c = cfg as Record<string, any>
         const server: MCPServerConfig = {
           name: name.toLowerCase().replace(/[\s_]+/g, '-'),
-          transport: c.url ? 'sse' : 'stdio',
+          transport: c.url ? (c.url.startsWith('ws://') || c.url.startsWith('wss://') ? 'ws' : 'sse') : 'stdio',
           command: c.command,
           args: c.args,
           env: c.env,
@@ -143,7 +152,7 @@ export class MCPManager {
       for (const item of parsed.servers) {
         const server: MCPServerConfig = {
           name: (item.name ?? '').toLowerCase().replace(/[\s_]+/g, '-'),
-          transport: item.transport ?? (item.url ? 'sse' : 'stdio'),
+          transport: item.transport ?? (item.url ? (item.url.startsWith('ws://') || item.url.startsWith('wss://') ? 'ws' : 'sse') : 'stdio'),
           command: item.command,
           args: item.args,
           env: item.env,
@@ -211,6 +220,10 @@ export class MCPManager {
 
     const server = new MCPServer(config)
     this.servers.set(config.name, server)
+    // 新连接 → 清除主动断开标记和重连状态
+    this.intentionalDisconnects.delete(config.name)
+    this.cancelReconnect(config.name)
+    this.reconnectDelays.delete(config.name)
 
     // 状态变化监听
     server.onStatusChange(() => this.notifyStatusChange())
@@ -256,6 +269,14 @@ export class MCPManager {
    * 优雅关闭所有 Server。
    */
   async shutdownAll(): Promise<void> {
+    // 取消所有重连定时器
+    for (const [name, timer] of this.reconnectTimers) {
+      clearTimeout(timer)
+    }
+    this.reconnectTimers.clear()
+    this.reconnectDelays.clear()
+    this.intentionalDisconnects.clear()
+
     const tasks: Promise<void>[] = []
     for (const [name, server] of this.servers) {
       tasks.push(
@@ -294,15 +315,69 @@ export class MCPManager {
   }
 
   /**
-   * 断开指定 Server。
+   * 断开指定 Server（主动断开，不自动重连）。
    */
   async disconnect(name: string): Promise<void> {
     const server = this.servers.get(name)
     if (!server) return
 
+    this.intentionalDisconnects.add(name)
+    this.cancelReconnect(name)
     this.removeServerTools(name)
     await server.disconnect()
     this.notifyStatusChange()
+  }
+
+  /**
+   * 调度自动重连（指数退避）。
+   * 已有的重连定时器会被取消，用新的延迟重新调度。
+   */
+  private scheduleReconnect(name: string): void {
+    // 已有定时器则跳过（不重复调度）
+    if (this.reconnectTimers.has(name)) return
+
+    const currentDelay = this.reconnectDelays.get(name) ?? this.INITIAL_RECONNECT_DELAY
+    const nextDelay = Math.min(currentDelay * 2, this.MAX_RECONNECT_DELAY)
+    this.reconnectDelays.set(name, nextDelay)
+
+    console.log(`[mcp] Server "${name}" disconnected, retrying in ${Math.round(currentDelay / 1000)}s...`)
+
+    const timer = setTimeout(async () => {
+      this.reconnectTimers.delete(name)
+      try {
+        const server = this.servers.get(name)
+        if (!server) return
+
+        // 移除旧工具（重连成功后会重新注册）
+        this.removeServerTools(name)
+        await server.reconnect()
+
+        if (server.status === 'connected') {
+          // 重连成功 → 重置退避延迟
+          this.reconnectDelays.delete(name)
+          const tools = wrapAllFromServer(server)
+          this.registerTools(name, tools)
+          console.log(`[mcp] Server "${name}" reconnected`)
+        }
+      } catch (err: any) {
+        console.warn(`[mcp] Server "${name}" reconnect failed: ${err.message}`)
+      }
+      // notifyStatusChange 会由 server 的状态回调触发，不在此调用
+    }, currentDelay)
+
+    this.reconnectTimers.set(name, timer)
+  }
+
+  /**
+   * 取消指定 server 的自动重连定时器。
+   */
+  private cancelReconnect(name: string): void {
+    const timer = this.reconnectTimers.get(name)
+    if (timer) {
+      clearTimeout(timer)
+      this.reconnectTimers.delete(name)
+    }
+    this.reconnectDelays.delete(name)
   }
 
   /**
@@ -398,8 +473,78 @@ export class MCPManager {
   }
 
   /**
+   * 获取并消费缓存的 VSCode 诊断信息（同步，供 drainAttachments 使用）。
+   * 去重规则：基于 errors/warnings/hints 计数 + 文件名列表生成签名，
+   * 相同签名跳过。诊断变化时返回新的 JSON 并更新签名。
+   */
+  getVSCodeDiagnosticsAndClear(): string | null {
+    const raw = this.vscodeDiagsCache
+    if (!raw) return null
+
+    // 生成稳定签名（忽略时间戳等变化字段）
+    let sig: string
+    try {
+      const parsed = JSON.parse(raw)
+      const s = parsed.summary ?? {}
+      const files = (parsed.files as Array<{ file: string }> | undefined) ?? []
+      sig = `${s.errors ?? 0}:${s.warnings ?? 0}:${s.hints ?? 0}:${files.map(f => f.file).sort().join(',')}`
+    } catch {
+      sig = raw
+    }
+
+    if (sig === this.lastInjectedDiagnosticsSig) {
+      this.vscodeDiagsCache = null // 消费（即使跳过也清除缓存，避免内存泄漏）
+      return null
+    }
+
+    this.lastInjectedDiagnosticsSig = sig
+    this.vscodeDiagsCache = null // 消费后清除
+    return raw
+  }
+
+  /**
+   * 上次已注入 LLM 上下文的诊断签名（用于去重）。
+   * 基于诊断摘要（errors/warnings/hints 计数 + 文件名列表），
+   * 同一诊断快照不重复注入。
+   */
+  private lastInjectedDiagnosticsSig: string | null = null
+
+  /**
+   * 上次已注入 LLM 上下文的选中摘要（用于去重）。
+   * key = `${filePath}:${startLine}:${endLine}:${text}`
+   * Claude Code 风格：push 模型下 selection 只在变化时通知；
+   * poll 模型下使用内容签名去重，防止同一选中重复注入。
+   */
+  private lastInjectedSelectionSig: string | null = null
+
+  /**
+   * 获取并消费缓存的 IDE 选中状态（同步，供 drainAttachments 使用）。
+   * 去重规则：如果当前选中与上次注入 LLM 的选中完全一致（内容 + 位置），
+   * 返回 null。否则记录签名并返回选中数据。
+   */
+  getIDESelectionAndClear(): {
+    text: string
+    filePath: string
+    startLine: number
+    endLine: number
+  } | null {
+    const sel = this.ideSelectionCache
+    if (!sel) return null
+
+    const sig = `${sel.filePath}:${sel.startLine}:${sel.endLine}:${sel.text}`
+    if (sig === this.lastInjectedSelectionSig) {
+      return null // 与上次相同，跳过
+    }
+
+    this.lastInjectedSelectionSig = sig
+    this.ideSelectionCache = null // 消费后清除
+    return sel
+  }
+
+  /**
    * 获取缓存的 IDE 选中状态（同步，供 drainAttachments 使用）。
-   * 返回 null 表示无选中或选中已被清除。
+   * ⚠️ 不带去重，消费后不自动清除。仅用于需要主动轮询的场景。
+   * 推荐使用 getIDESelectionAndClear() 代替本方法。
    */
   getIDESelection(): {
     text: string
@@ -410,12 +555,32 @@ export class MCPManager {
     return this.ideSelectionCache
   }
 
+  /**
+   * 调用指定 MCP Server 的工具（fire-and-forget 友好，不抛异常）。
+   * 返回工具调用的结果字符串，失败返回错误字符串。
+   * @param timeout 可选超时（毫秒），用于长时间等待的工具（如交互式 diff）
+   */
+  async callServerTool(serverName: string, toolName: string, args: Record<string, unknown>, timeout?: number): Promise<string> {
+    const server = this.servers.get(serverName)
+    if (!server || server.status !== 'connected') {
+      return `Error: MCP server "${serverName}" not connected`
+    }
+    return server.callTool(toolName, args, timeout)
+  }
+
   // ── 内部辅助 ────────────────────────────────────────────────────────────────
 
   private notifyStatusChange(): void {
     const infos = this.getServerInfos()
     for (const cb of this.statusListeners) {
       try { cb(infos) } catch { /* ignore callback errors */ }
+    }
+
+    // 自动重连：检测断开的 server（非主动断开）
+    for (const [name, server] of this.servers) {
+      if (server.status === 'disconnected' && !this.intentionalDisconnects.has(name)) {
+        this.scheduleReconnect(name)
+      }
     }
   }
 

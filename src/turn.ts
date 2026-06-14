@@ -40,6 +40,7 @@ import {
 } from './bootstrap.js'
 import { appStateStore } from './state/appState.js'
 import { PlanModeAttachment } from './attachment/planMode.js'
+import { IDEDiagnosticsAttachment, IDESelectionAttachment } from './attachment/ide.js'
 
 // ── Plan mode: 控制 prompt 注入频率（每 5 次 query 注入完整版）──────
 const PLAN_MODE_FULL_PROMPT_INTERVAL = 5
@@ -144,28 +145,29 @@ export async function runTurn(
           }
         }
 
-        // LSP 诊断注入
-        const diags = lspManager?.getDiagnostics()
+        // VSCode 诊断 → Attachment（带去重）
+        const vscodeDiags = mcpManager.getVSCodeDiagnosticsAndClear()
+        if (vscodeDiags) {
+          attachmentQueue.enqueue(new IDEDiagnosticsAttachment(vscodeDiags))
+        }
+
+        // IDE 选中 → Attachment（带去重）
+        const ideSelection = mcpManager.getIDESelectionAndClear()
+        if (ideSelection) {
+          attachmentQueue.enqueue(new IDESelectionAttachment(
+            ideSelection.filePath,
+            ideSelection.startLine,
+            ideSelection.endLine,
+            ideSelection.text,
+          ))
+        }
+
+        // 统一 drain：队列中的 Attachment + LSP 诊断（LSP 暂保持裸文本）
         let result = attachmentQueue.formatDrain()
+        const diags = lspManager?.getDiagnostics()
         if (diags) {
           const diagBlock = `[lsp] diagnostics:\n${diags}`
           result = result ? `${result}\n${diagBlock}` : `[System State Changes]\n${diagBlock}`
-        }
-        // VSCode 诊断注入
-        const vscodeDiags = mcpManager.getVSCodeDiagnostics()
-        if (vscodeDiags) {
-          const diagBlock = `[vscode] diagnostics:\n${vscodeDiags}`
-          result = result ? `${result}\n${diagBlock}` : `[System State Changes]\n${diagBlock}`
-        }
-        // IDE 选中注入：用户在 VSCode 中选中的代码自动附带为上下文
-        const ideSelection = mcpManager.getIDESelection()
-        if (ideSelection) {
-          const displayPath = ideSelection.filePath
-          const lineRange = ideSelection.startLine === ideSelection.endLine
-            ? `line ${ideSelection.startLine}`
-            : `lines ${ideSelection.startLine} to ${ideSelection.endLine}`
-          const selBlock = `[ide_selection] The user selected ${lineRange} from ${displayPath}:\n${ideSelection.text}`
-          result = result ? `${result}\n${selBlock}` : `[System State Changes]\n${selBlock}`
         }
         return result
       },

@@ -184,6 +184,21 @@ function computeDiff(filePath: string, originalContent: string, updated: string)
 
 export class EditTool extends Tool {
 
+  /**
+   * 编辑完成后的回调。bootstrap.ts 注入，用于通知 VSCode 展示 diff。
+   * fire-and-forget — 不阻塞 execute() 返回。
+   */
+  onFileChanged?: (filePath: string, oldContent: string, newContent: string) => void
+
+  /**
+   * 写入前的交互式审批回调。bootstrap.ts 注入。
+   * 在 auto mode 下返回 { action: 'skip' }，manual mode 下等待用户操作。
+   * @param signal agent 的中止信号，用户按 Esc 时 abort → 应返回 rejected
+   */
+  onBeforeEdit?: (
+    filePath: string, oldContent: string, newContent: string, signal?: AbortSignal
+  ) => Promise<{ action: 'skip' | 'accepted' | 'rejected' | 'modified'; newContent?: string }>
+
   get name(): string {
     return 'edit_file'
   }
@@ -223,7 +238,7 @@ export class EditTool extends Tool {
     return []
   }
 
-  async execute(args: any): Promise<string> {
+  async execute(args: any, signal?: AbortSignal): Promise<string> {
     const filePath = args.file_path ?? args.path
     const oldString = args.old_string
     const newString = args.new_string
@@ -309,6 +324,48 @@ export class EditTool extends Tool {
       return `Error: No changes made. old_string and new_string are the same?`
     }
 
+    // ── 8.5. 交互式审批（VSCode 可用时阻塞等待用户操作）─────────────
+    if (this.onBeforeEdit) {
+      const result = await this.onBeforeEdit(resolvedPath, currentContent, updated, signal)
+      if (result.action === 'rejected') {
+        return 'Edit rejected by user'
+      }
+      if (result.action === 'modified' && result.newContent !== undefined) {
+        // 用户在 diff 中修改了内容，使用修改后的版本覆盖
+        const userMod = result.newContent
+        if (userMod !== updated) {
+          // 重新计算 diff（用修改后的内容）
+          const diffData = computeDiff(filePath, currentContent, userMod)
+          // 写修改后的内容
+          try {
+            fs.writeFileSync(resolvedPath, userMod, 'utf-8')
+          } catch (err: any) {
+            return `Error writing file: ${err.message ?? err}`
+          }
+          // 更新缓存
+          try {
+            fileStateCache.set(resolvedPath, {
+              content: userMod,
+              timestamp: fs.statSync(resolvedPath).mtimeMs,
+            })
+          } catch { /* ignore */ }
+          // LSP 同步
+          const lsp = getLSPManager()
+          if (lsp) {
+            lsp.changeFile(resolvedPath, userMod).catch(() => {})
+            lsp.saveFile(resolvedPath).catch(() => {})
+          }
+          // Post-edit diff 通知
+          if (this.onFileChanged) {
+            this.onFileChanged(resolvedPath, currentContent, userMod)
+          }
+          const summary = `Edited ${filePath} (${diffData.additions} added, ${diffData.removals} removed)${replaceAll ? ' [replace all]' : ''} [user modified]`
+          return JSON.stringify({ summary, diff: diffData })
+        }
+      }
+      // 'accepted' 或 'skip'：继续执行原有逻辑
+    }
+
     // ── 9. 写文件 ──────────────────────────────────────────────────────
     try {
       fs.writeFileSync(resolvedPath, updated, 'utf-8')
@@ -335,6 +392,12 @@ export class EditTool extends Tool {
 
     // ── 11. 计算 diff 并返回结构化结果 ────────────────────────────────
     const diffData = computeDiff(filePath, currentContent, updated)
+
+    // ── 11.5. 通知 VSCode 展示 diff（fire-and-forget） ─────────────
+    if (this.onFileChanged) {
+      this.onFileChanged(resolvedPath, currentContent, updated)
+    }
+
     const summary = `Edited ${filePath} (${diffData.additions} added, ${diffData.removals} removed)${replaceAll ? ' [replace all]' : ''}`
     return JSON.stringify({ summary, diff: diffData })
   }
