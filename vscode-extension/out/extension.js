@@ -43,6 +43,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
+const fs = __importStar(require("fs"));
 const transport_1 = require("./transport");
 const server_1 = require("./server");
 const sidebar_1 = require("./sidebar");
@@ -67,7 +68,7 @@ async function activate(context) {
         // 状态栏（左下角，和 Debug/Problems 同排）
         statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 30);
         statusBar.text = `$(robot) myagent v${version}`;
-        statusBar.tooltip = `MyAgent MCP Server running on port ${transport.port}\nConfigure in ~/.myagent/mcp-servers.json:\n{"vscode": {"url": "http://localhost:${transport.port}/sse"}}`;
+        statusBar.tooltip = `MyAgent MCP Server running on port ${transport.port}\nConfigure in ~/.myagent/mcp-servers.json:\n{"vscode": {"url": "ws://localhost:${transport.port}"}}`;
         statusBar.show();
         // 活动栏 Sidebar（左侧图标列，和 Debug 并列）
         sidebarProvider = new sidebar_1.MyAgentSidebarProvider();
@@ -85,38 +86,49 @@ async function activate(context) {
             vscode.window.showInformationMessage('MCP config copied to clipboard! Paste into ~/.myagent/mcp-servers.json');
         }));
         // 交互式 diff Accept/Reject 命令（供 CodeLens 调用）
-        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffAccept', (path) => {
-            const cb = (0, tools_1.getDiffSession)(path);
+        // 参数 tabName 直接定位 session，无需反查（O(1)）
+        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffAccept', (tabName) => {
+            const cb = (0, tools_1.getDiffSession)(tabName);
             if (cb) {
-                (0, tools_1.removeDiffSession)(path);
+                (0, tools_1.removeDiffSession)(tabName);
                 cb('accepted');
             }
         }));
-        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffReject', (path) => {
-            const cb = (0, tools_1.getDiffSession)(path);
+        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffReject', (tabName) => {
+            const cb = (0, tools_1.getDiffSession)(tabName);
             if (cb) {
-                (0, tools_1.removeDiffSession)(path);
+                (0, tools_1.removeDiffSession)(tabName);
                 cb('rejected');
             }
         }));
-        // 测试 CodeLens：验证 CodeLens 机制是否工作 → 改为全局 diff CodeLens
+        // 关闭所有活跃 diff（新 prompt 提交时 myagent 主进程调用）
+        context.subscriptions.push(vscode.commands.registerCommand('myagent.closeAllDiffTabs', () => {
+            (0, tools_1.closeAllDiffTabs)();
+        }));
+        // 全局 diff CodeLens：在 proposed 文件上显示 Accept/Reject 按钮
         context.subscriptions.push(vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
             provideCodeLenses(doc) {
-                const path = doc.uri.fsPath;
-                if (!tools_1.activeProposedPaths.has(path))
+                let path = doc.uri.fsPath;
+                try {
+                    path = fs.realpathSync(path);
+                }
+                catch { /* ignore */ }
+                // 直接查 tabName，传 tabName 给命令（O(1)）
+                const tabEntry = [...tools_1.activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === path);
+                if (!tabEntry)
                     return [];
-                const changeLine = tools_1.proposedChangeLines.get(path) ?? 0;
+                const [tabName, { changeLine }] = tabEntry;
                 const range = new vscode.Range(changeLine, 0, changeLine, 0);
                 return [
                     new vscode.CodeLens(range, {
                         title: '$(check) Accept',
                         command: 'myagent.diffAccept',
-                        arguments: [path],
+                        arguments: [tabName],
                     }),
                     new vscode.CodeLens(range, {
                         title: '$(x) Reject',
                         command: 'myagent.diffReject',
-                        arguments: [path],
+                        arguments: [tabName],
                     }),
                 ];
             }

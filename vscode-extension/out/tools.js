@@ -47,12 +47,13 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.proposedChangeLines = exports.activeProposedPaths = void 0;
+exports.activeDiffTabs = void 0;
 exports.getToolDefinitions = getToolDefinitions;
 exports.executeToolAsync = executeToolAsync;
 exports.cleanupTempFiles = cleanupTempFiles;
 exports.getDiffSession = getDiffSession;
 exports.removeDiffSession = removeDiffSession;
+exports.closeAllDiffTabs = closeAllDiffTabs;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
@@ -150,6 +151,26 @@ function getToolDefinitions() {
                 required: ['filePath', 'newContent'],
             },
         },
+        {
+            name: 'closeFile',
+            description: 'Close a file tab in the IDE. ' +
+                'Accepts a filePath and closes all tabs (diff views and regular editors) ' +
+                'that reference that file. Safe to call on files that are not open.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    filePath: { type: 'string', description: 'Absolute or relative file path to close' },
+                },
+                required: ['filePath'],
+            },
+        },
+        {
+            name: 'closeAllDiffTabs',
+            description: 'Close all active diff review tabs. ' +
+                'Rejects all pending interactive diffs and cleans up temp files. ' +
+                'Called when a new prompt is submitted to clear stale diff views.',
+            inputSchema: { type: 'object', properties: {}, required: [] },
+        },
     ];
 }
 // ── 工具执行路由 ──────────────────────────────────────────────────────────────
@@ -163,6 +184,8 @@ async function executeToolAsync(name, args) {
         case 'executeCode': return await executeCode(args);
         case 'showDiff': return await executeShowDiff(args);
         case 'showDiffInteractive': return await executeShowDiffInteractive(args);
+        case 'closeFile': return await executeCloseFile(args);
+        case 'closeAllDiffTabs': return executeCloseAllDiffTabs();
         default: return `Error: Unknown tool "${name}"`;
     }
 }
@@ -275,7 +298,7 @@ async function executeCode(args) {
     const timeout = args.timeout ?? 30_000;
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     return new Promise((resolve) => {
-        const child = cp.exec(command, { cwd, timeout, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+        cp.exec(command, { cwd, timeout, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
             if (error && !stdout && !stderr) {
                 resolve(JSON.stringify({ exitCode: error.code ?? 1, stdout: '', stderr: error.message }));
                 return;
@@ -447,19 +470,74 @@ function gitShowHead(filePath) {
     });
 }
 // ── 交互式 Diff（阻塞等待用户操作）──────────────────────────────────────────
+//
+// 设计：与 Claude Code 一致，用唯一 tab 名称标识每个 diff 视图。
+// Accept/Reject/关闭时按 tab.label 精确匹配，避免跨平台路径规范化问题。
 /** 交互式 diff 的超时时间（毫秒），超时后自动 reject。 */
 const INTERACTIVE_DIFF_TIMEOUT = 2 * 60 * 1000; // 2 min
-/** 全局 diff session 映射，key 为 proposedPath */
+/** diff session 回调，key 为 tabName */
 const diffSessions = new Map();
-/** 活跃的 proposed 文件路径 Set（供全局 CodeLensProvider 查询） */
-exports.activeProposedPaths = new Set();
-/** proposed 文件 → 第一个变更行号 映射 */
-exports.proposedChangeLines = new Map();
-function getDiffSession(path) {
-    return diffSessions.get(path);
+/**
+ * 活跃 diff tab 元数据。
+ * tabName → { proposedPath, changeLine }
+ * 供 CodeLens provider（extension.ts）和 close 逻辑使用。
+ */
+exports.activeDiffTabs = new Map();
+function getDiffSession(tabName) {
+    return diffSessions.get(tabName);
 }
-function removeDiffSession(path) {
-    diffSessions.delete(path);
+function removeDiffSession(tabName) {
+    diffSessions.delete(tabName);
+}
+/** 关闭所有活跃 diff tab（新请求到来时调用） */
+function closeAllDiffTabs() {
+    // 先 reject 所有 session，触发各自 Promise resolve
+    for (const [tabName, cb] of diffSessions) {
+        try {
+            cb('rejected');
+        }
+        catch { /* ignore */ }
+    }
+    diffSessions.clear();
+    // 关闭所有关联 tab
+    for (const [tabName, { proposedPath }] of exports.activeDiffTabs) {
+        closeTabByName(tabName, proposedPath).catch(() => { });
+        try {
+            fs.unlinkSync(proposedPath);
+        }
+        catch { /* ignore */ }
+    }
+    exports.activeDiffTabs.clear();
+}
+/** 生成唯一 tab 名称，对齐 Claude Code 风格 */
+function makeTabName(originalBasename) {
+    const random = Math.random().toString(36).slice(2, 8);
+    return `✻ [myagent] ${originalBasename} (${random})`;
+}
+/** 按 tab 名称关闭对应的 tab（diff 视图 + proposed 编辑器） */
+async function closeTabByName(tabName, proposedPath) {
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            // diff 视图：按 tab.label 精确匹配
+            if (tab.label === tabName) {
+                try {
+                    await vscode.window.tabGroups.close(tab);
+                }
+                catch { /* already closed */ }
+                continue;
+            }
+            // proposed 文件编辑器：按 URI 路径匹配
+            // TabInputTextDiff 使用 modified，TabInputText 使用 uri
+            const input = tab.input;
+            const tabPath = input?.uri?.fsPath ?? input?.modified?.fsPath;
+            if (tabPath === proposedPath) {
+                try {
+                    await vscode.window.tabGroups.close(tab);
+                }
+                catch { /* already closed */ }
+            }
+        }
+    }
 }
 /** 计算第一个变更行的行号（0-based） */
 function firstChangedLine(oldContent, newContent) {
@@ -470,106 +548,65 @@ function firstChangedLine(oldContent, newContent) {
         if (oldLines[i] !== newLines[i])
             return i;
     }
-    // 一个文件比另一个长，第一个额外行就是变更点
     return minLen;
 }
 async function executeShowDiffInteractive(args) {
-    // ── 首先清理过期临时文件（防止崩溃残留）──────────────────────────
     cleanupTempFiles();
     const filePath = resolvePath(args.filePath);
     const newContent = args.newContent;
-    // ── 二进制文件跳过 ──────────────────────────────────────────────────
     const ext = path.extname(filePath).toLowerCase();
     if (BINARY_EXTENSIONS.has(ext)) {
         return JSON.stringify({ action: 'skip', reason: `Binary file (${ext})` });
     }
-    // ── 读取磁盘上的真实文件作为左侧（旧内容） ─────────────────────────
     let oldContent;
     try {
         oldContent = fs.readFileSync(filePath, 'utf-8');
     }
     catch {
-        // 新文件，旧内容为空
         oldContent = '';
     }
-    const basename = path.basename(filePath);
-    // ── 检查是否有差异 ──────────────────────────────────────────────────
     if (oldContent === newContent) {
         return JSON.stringify({ action: 'skip', reason: 'No changes' });
     }
-    // ── 计算第一个变更行号（用于 CodeLens 定位）───────────────────────
+    const basename = path.basename(filePath);
     const changeLine = firstChangedLine(oldContent, newContent);
-    // ── 写右侧临时文件（proposed content，可编辑）──────────────────────
+    // ── 写右侧临时文件（proposed content）──────────────────────────────
     const tmpDir = os.tmpdir();
     const random = Math.random().toString(36).slice(2, 8);
     const proposedName = `.myagent-proposed-${Date.now()}-${random}-${basename}`;
     let proposedPath = path.join(tmpDir, proposedName);
     fs.writeFileSync(proposedPath, newContent, 'utf-8');
-    // macOS: normalize /var → /private/var 避免路径比较失败
     try {
         proposedPath = fs.realpathSync(proposedPath);
     }
     catch { /* ignore */ }
     _tempFiles.push({ path: proposedPath, createdAt: Date.now() });
-    // ── 注册到全局 CodeLens（供 extension.ts 中的全局 Provider 查询）─
-    exports.activeProposedPaths.add(proposedPath);
-    exports.proposedChangeLines.set(proposedPath, changeLine);
-    // ── 打开 diff 视图（供审阅参考，在 Active 列）─────────────────────
-    // 左侧：真实文件（只读），右侧：proposed 临时文件（可编辑）
+    // ── 生成唯一 tab 名称并注册元数据 ──────────────────────────────────
+    const tabName = makeTabName(basename);
+    exports.activeDiffTabs.set(tabName, { proposedPath, changeLine });
+    // ── 打开 diff 视图 ──────────────────────────────────────────────────
     const leftUri = vscode.Uri.file(filePath);
     const rightUri = vscode.Uri.file(proposedPath);
-    const title = `✻ Review: ${basename}`;
     try {
-        await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title);
+        await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, tabName);
     }
     catch (err) {
-        // 清理
         try {
             fs.unlinkSync(proposedPath);
         }
         catch { /* ignore */ }
-        exports.activeProposedPaths.delete(proposedPath);
-        exports.proposedChangeLines.delete(proposedPath);
+        exports.activeDiffTabs.delete(tabName);
         return JSON.stringify({ action: 'error', error: `Failed to open diff: ${err.message}` });
     }
-    // ── 打开 proposed 文件作为主编辑器（CodeLens Accept/Reject 在此显示）─
-    // ViewColumn.Two + preview: false 确保：
-    //   - 不与 diff 视图（Active 列）冲突
-    //   - tab 不会被其他 preview 替换
-    //   - CodeLens 可见（scheme: 'file'，不是 vscode-diff）
-    try {
-        const proposedDoc = await vscode.workspace.openTextDocument(rightUri);
-        await vscode.window.showTextDocument(proposedDoc, { preview: false, viewColumn: vscode.ViewColumn.Two });
-    }
-    catch {
-        // 打开失败：diff 视图仍可用，用户可关闭 tab 来 accept
-    }
-    // ── 清理函数：精准关闭此次 diff 对应的 tab ─────────────────────────
+    // ── settled / cleanup ────────────────────────────────────────────────
     let settled = false;
-    const closeDiffTab = async () => {
-        // 通过文件名匹配关闭 diff tab 和 proposed 编辑器 tab
-        const targetName = path.basename(proposedPath);
-        for (const group of vscode.window.tabGroups.all) {
-            for (const tab of group.tabs) {
-                const label = tab.label ?? '';
-                if (label.includes(targetName)) {
-                    try {
-                        await vscode.window.tabGroups.close(tab);
-                    }
-                    catch { /* tab already closed */ }
-                }
-            }
-        }
-    };
     const cleanup = async () => {
         if (settled)
             return;
         settled = true;
-        removeDiffSession(proposedPath);
-        exports.activeProposedPaths.delete(proposedPath);
-        exports.proposedChangeLines.delete(proposedPath);
-        await closeDiffTab();
-        // 重新打开原始文件，让 IDE 焦点回到修改后的文件
+        removeDiffSession(tabName);
+        exports.activeDiffTabs.delete(tabName);
+        await closeTabByName(tabName, proposedPath);
         try {
             await vscode.window.showTextDocument(vscode.Uri.file(filePath), { preview: false });
         }
@@ -579,13 +616,12 @@ async function executeShowDiffInteractive(args) {
         }
         catch { /* ignore */ }
     };
-    // ── 等待用户操作：按钮点击、保存、关闭 tab、或超时 ─────────────────
+    // ── 等待用户操作 ────────────────────────────────────────────────────
     return new Promise((resolve) => {
         let disposables = [];
         const done = async (result) => {
             for (const d of disposables)
                 d.dispose();
-            // Auto-apply：Accept 时写入真实文件
             const action = result.action;
             if (action === 'accepted') {
                 try {
@@ -594,10 +630,10 @@ async function executeShowDiffInteractive(args) {
                 catch { /* ignore */ }
             }
             else if (action === 'modified') {
-                const modifiedContent = result.newContent;
-                if (modifiedContent !== undefined) {
+                const mc = result.newContent;
+                if (mc !== undefined) {
                     try {
-                        fs.writeFileSync(filePath, modifiedContent, 'utf-8');
+                        fs.writeFileSync(filePath, mc, 'utf-8');
                     }
                     catch { /* ignore */ }
                 }
@@ -605,13 +641,13 @@ async function executeShowDiffInteractive(args) {
             await cleanup();
             resolve(JSON.stringify(result));
         };
-        // ── 注册 diff session（供 CodeLens 命令回调）────────────────────
-        diffSessions.set(proposedPath, (action) => {
+        // CodeLens Accept/Reject 回调
+        diffSessions.set(tabName, (action) => {
             if (settled)
                 return;
             done({ action });
         });
-        // ── 保存监听：用户编辑右侧并保存 → modified ─────────────────────
+        // 保存监听
         const saveListener = vscode.workspace.onDidSaveTextDocument(doc => {
             if (settled || doc.uri.fsPath !== proposedPath)
                 return;
@@ -620,29 +656,25 @@ async function executeShowDiffInteractive(args) {
                 done({ action: 'modified', newContent: modifiedContent });
             }
             catch (err) {
-                done({ action: 'error', error: `Failed to read modified content: ${err.message}` });
+                done({ action: 'error', error: `Failed to read: ${err.message}` });
             }
         });
-        // ── 关闭监听：用户关闭 diff 标签页 → accepted ────────────────────
-        // 使用 tabGroups.onDidChangeTabs：tab 关闭时触发，比 onDidCloseTextDocument 更可靠
+        // ── 关闭监听：按 tab.label 精确匹配（Claude Code 风格）─────────
         const tabListener = vscode.window.tabGroups.onDidChangeTabs(e => {
             if (settled)
                 return;
             for (const closed of e.closed) {
-                const input = closed.input;
-                if (input?.modified?.fsPath === proposedPath ||
-                    input?.original?.fsPath === proposedPath ||
-                    input?.uri?.fsPath === proposedPath) {
+                if (closed.label === tabName ||
+                    closed.input?.uri?.fsPath === proposedPath) {
                     done({ action: 'accepted' });
                     return;
                 }
             }
         });
-        // ── 超时：auto-reject ─────────────────────────────────────────────
+        // 超时
         const timer = setTimeout(() => {
-            if (!settled) {
+            if (!settled)
                 done({ action: 'rejected', reason: 'Timeout' });
-            }
         }, INTERACTIVE_DIFF_TIMEOUT);
         disposables = [
             saveListener,
@@ -650,5 +682,41 @@ async function executeShowDiffInteractive(args) {
             { dispose: () => clearTimeout(timer) },
         ];
     });
+}
+// ── closeFile 工具：按文件路径关闭 IDE 标签页 ──────────────────────────────
+async function executeCloseFile(args) {
+    const targetPath = resolvePath(args.filePath);
+    const targetBasename = path.basename(targetPath);
+    let closed = 0;
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            let match = false;
+            // 按 label 模糊匹配（覆盖 "✻ Review: foo.ts (abc123)" 等 diff 视图）
+            if (tab.label.includes(targetBasename)) {
+                match = true;
+            }
+            // 按 input URI 精确匹配（普通编辑器 tab）
+            if (!match) {
+                const input = tab.input;
+                const uris = [input?.original?.fsPath, input?.modified?.fsPath, input?.uri?.fsPath];
+                if (uris.some(u => u === targetPath)) {
+                    match = true;
+                }
+            }
+            if (match) {
+                try {
+                    await vscode.window.tabGroups.close(tab);
+                    closed++;
+                }
+                catch { /* ignore */ }
+            }
+        }
+    }
+    return JSON.stringify({ closed, filePath: targetPath });
+}
+// ── closeAllDiffTabs 工具 ─────────────────────────────────────────────────
+function executeCloseAllDiffTabs() {
+    closeAllDiffTabs();
+    return JSON.stringify({ closed: true });
 }
 //# sourceMappingURL=tools.js.map

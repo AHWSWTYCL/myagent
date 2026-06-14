@@ -7,10 +7,11 @@
  */
 
 import * as vscode from 'vscode'
+import * as fs from 'fs'
 import { createTransport, type MCPTransport } from './transport'
 import { createMCPServer } from './server'
 import { MyAgentSidebarProvider } from './sidebar'
-import { cleanupTempFiles, getDiffSession, removeDiffSession, activeProposedPaths, proposedChangeLines } from './tools'
+import { cleanupTempFiles, getDiffSession, removeDiffSession, activeDiffTabs, closeAllDiffTabs } from './tools'
 
 let transport: MCPTransport | null = null
 let statusBar: vscode.StatusBarItem | null = null
@@ -39,7 +40,7 @@ export async function activate(context: vscode.ExtensionContext) {
       30,
     )
     statusBar.text = `$(robot) myagent v${version}`
-    statusBar.tooltip = `MyAgent MCP Server running on port ${transport.port}\nConfigure in ~/.myagent/mcp-servers.json:\n{"vscode": {"url": "http://localhost:${transport.port}/sse"}}`
+    statusBar.tooltip = `MyAgent MCP Server running on port ${transport.port}\nConfigure in ~/.myagent/mcp-servers.json:\n{"vscode": {"url": "ws://localhost:${transport.port}"}}`
     statusBar.show()
 
     // 活动栏 Sidebar（左侧图标列，和 Debug 并列）
@@ -64,39 +65,50 @@ export async function activate(context: vscode.ExtensionContext) {
     )
 
     // 交互式 diff Accept/Reject 命令（供 CodeLens 调用）
+    // 参数 tabName 直接定位 session，无需反查（O(1)）
     context.subscriptions.push(
-      vscode.commands.registerCommand('myagent.diffAccept', (path: string) => {
-        const cb = getDiffSession(path)
-        if (cb) { removeDiffSession(path); cb('accepted') }
+      vscode.commands.registerCommand('myagent.diffAccept', (tabName: string) => {
+        const cb = getDiffSession(tabName)
+        if (cb) { removeDiffSession(tabName); cb('accepted') }
       })
     )
     context.subscriptions.push(
-      vscode.commands.registerCommand('myagent.diffReject', (path: string) => {
-        const cb = getDiffSession(path)
-        if (cb) { removeDiffSession(path); cb('rejected') }
+      vscode.commands.registerCommand('myagent.diffReject', (tabName: string) => {
+        const cb = getDiffSession(tabName)
+        if (cb) { removeDiffSession(tabName); cb('rejected') }
       })
     )
 
-    // 测试 CodeLens：验证 CodeLens 机制是否工作 → 改为全局 diff CodeLens
+    // 关闭所有活跃 diff（新 prompt 提交时 myagent 主进程调用）
+    context.subscriptions.push(
+      vscode.commands.registerCommand('myagent.closeAllDiffTabs', () => {
+        closeAllDiffTabs()
+      })
+    )
+
+    // 全局 diff CodeLens：在 proposed 文件上显示 Accept/Reject 按钮
     context.subscriptions.push(
       vscode.languages.registerCodeLensProvider(
         { scheme: 'file' },
         {
           provideCodeLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
-            const path = doc.uri.fsPath
-            if (!activeProposedPaths.has(path)) return []
-            const changeLine = proposedChangeLines.get(path) ?? 0
+            let path = doc.uri.fsPath
+            try { path = fs.realpathSync(path) } catch { /* ignore */ }
+            // 直接查 tabName，传 tabName 给命令（O(1)）
+            const tabEntry = [...activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === path)
+            if (!tabEntry) return []
+            const [tabName, { changeLine }] = tabEntry
             const range = new vscode.Range(changeLine, 0, changeLine, 0)
             return [
               new vscode.CodeLens(range, {
                 title: '$(check) Accept',
                 command: 'myagent.diffAccept',
-                arguments: [path],
+                arguments: [tabName],
               }),
               new vscode.CodeLens(range, {
                 title: '$(x) Reject',
                 command: 'myagent.diffReject',
-                arguments: [path],
+                arguments: [tabName],
               }),
             ]
           }

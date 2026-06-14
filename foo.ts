@@ -1,10 +1,3 @@
-function bar(): void {
-  console.log("hello test888");
+function foobar(): void {
+  console.log("hello foobar");
 }
-
-function test(): void {
-  console.log("hello test");
-}
-
-bar();
-test();
