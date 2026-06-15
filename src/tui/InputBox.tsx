@@ -110,27 +110,62 @@ export function InputBox(props: InputBoxProps) {
         </Box>
       </Box>
 
-      {suggestions.length > 0 ? (
-        <Box flexDirection="column" marginTop={0} marginLeft={2}>
-          {suggestions.map((s, i) => {
-            const isSelected = i === selectedSuggestionIndex
-            return (
-              <Box key={s.name} flexDirection="column">
+      {suggestions.length > 0 ? (() => {
+          const MAX_VISIBLE = 10
+          const total = suggestions.length
+          const sel = selectedSuggestionIndex
+
+          // Compute visible window: keep selection near the center
+          let startIdx: number
+          let endIdx: number
+          if (total <= MAX_VISIBLE) {
+            startIdx = 0
+            endIdx = total
+          } else {
+            const half = Math.floor(MAX_VISIBLE / 2)
+            startIdx = Math.max(0, sel - half)
+            endIdx = Math.min(total, startIdx + MAX_VISIBLE)
+            if (endIdx - startIdx < MAX_VISIBLE) {
+              startIdx = Math.max(0, endIdx - MAX_VISIBLE)
+            }
+          }
+
+          const hiddenAbove = startIdx
+          const hiddenBelow = total - endIdx
+
+          return (
+            <Box flexDirection="column" marginTop={0} marginLeft={2}>
+              {hiddenAbove > 0 ? (
                 <Box>
-                  <Text color={isSelected ? 'cyan' : 'gray'}>{isSelected ? '❯ ' : '  '}</Text>
-                  <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>/{s.name}</Text>
-                  <Text color="gray" dimColor>{'  '}{s.description}</Text>
+                  <Text color="gray" dimColor>  ↑ {hiddenAbove} more…</Text>
                 </Box>
-                {isSelected && s.usage ? (
-                  <Box paddingLeft={4}>
-                    <Text color="gray" dimColor>usage: {s.usage}</Text>
+              ) : null}
+              {suggestions.slice(startIdx, endIdx).map((s, i) => {
+                const globalIdx = startIdx + i
+                const isSelected = globalIdx === selectedSuggestionIndex
+                return (
+                  <Box key={s.name} flexDirection="column">
+                    <Box>
+                      <Text color={isSelected ? 'cyan' : 'gray'}>{isSelected ? '❯ ' : '  '}</Text>
+                      <Text color={isSelected ? 'cyan' : 'white'} bold={isSelected}>/{s.name}</Text>
+                      <Text color="gray" dimColor>{'  '}{s.description}</Text>
+                    </Box>
+                    {isSelected && s.usage ? (
+                      <Box paddingLeft={4}>
+                        <Text color="gray" dimColor>usage: {s.usage}</Text>
+                      </Box>
+                    ) : null}
                   </Box>
-                ) : null}
-              </Box>
-            )
-          })}
-        </Box>
-      ) : null}
+                )
+              })}
+              {hiddenBelow > 0 ? (
+                <Box>
+                  <Text color="gray" dimColor>  ↓ {hiddenBelow} more…</Text>
+                </Box>
+              ) : null}
+            </Box>
+          )
+        })() : null}
     </Box>
   )
 }
