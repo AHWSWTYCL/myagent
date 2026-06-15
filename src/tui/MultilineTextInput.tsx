@@ -82,9 +82,9 @@ export function MultilineTextInput({
       return
     }
 
-    // Ctrl+Enter / Alt+Enter / literal \n: insert newline at cursor position
+    // Ctrl+Enter / Alt+Enter / Shift+Enter / literal \n: insert newline at cursor position
     // (for terminals that do distinguish modified Enter)
-    if ((key.return && (key.ctrl || key.meta)) || input === '\n') {
+    if ((key.return && (key.ctrl || key.meta || key.shift)) || input === '\n') {
       const nextValue =
         value.slice(0, cursorOffset) +
         '\n' +

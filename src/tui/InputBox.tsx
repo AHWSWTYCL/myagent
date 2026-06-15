@@ -175,7 +175,7 @@ export function Footer({
     ? '↑↓ navigate · tab/→ accept · esc close · enter run'
     : isProcessing
       ? 'esc interrupt · ctrl+e stop tts · ctrl+b background · / commands · @ files'
-      : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · \\ then enter newline · ctrl+o ${expanded ? 'collapse' : 'expand'} · ctrl+l logs`
+      : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · shift+enter newline · ctrl+o ${expanded ? 'collapse' : 'expand'} · ctrl+l logs`
 
   // Only show sub-agent summary in Footer when >=2 parallel agents.
   // With a single agent, the tool card header (e.g. "⏺ Task(explore)") is sufficient.
