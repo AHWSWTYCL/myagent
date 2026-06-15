@@ -15,13 +15,49 @@
     "commands": [
       {
         "command": "myagent.diffAccept",
-        "title": "Accept Changes"
+        "title": "Accept Changes",
+        "icon": "$(check)"
       },
       {
         "command": "myagent.diffReject",
-        "title": "Reject Changes"
+        "title": "Reject Changes",
+        "icon": "$(close)"
+      },
+      {
+        "command": "myagent.diffPrev",
+        "title": "Previous Change",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "myagent.diffNext",
+        "title": "Next Change",
+        "icon": "$(arrow-down)"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "myagent.diffPrev",
+          "when": "myagent.diffActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "myagent.diffNext",
+          "when": "myagent.diffActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "myagent.diffAccept",
+          "when": "myagent.diffActive",
+          "group": "navigation@3"
+        },
+        {
+          "command": "myagent.diffReject",
+          "when": "myagent.diffActive",
+          "group": "navigation@4"
+        }
+      ]
+    },
     "viewsContainers": {
       "activitybar": [
         {

@@ -487,10 +487,10 @@ const diffSessions = new Map<string, (action: string) => void>()
 
 /**
  * 活跃 diff tab 元数据。
- * tabName → { proposedPath, changeLine }
- * 供 CodeLens provider（extension.ts）和 close 逻辑使用。
+ * tabName → { proposedPath }
+ * 供 editor/title 按钮（extension.ts）和 close 逻辑使用。
  */
-export const activeDiffTabs = new Map<string, { proposedPath: string; changeLine: number }>()
+export const activeDiffTabs = new Map<string, { proposedPath: string }>()
 
 export function getDiffSession(tabName: string): ((action: string) => void) | undefined {
   return diffSessions.get(tabName)
@@ -541,16 +541,6 @@ async function closeTabByName(tabName: string, proposedPath: string): Promise<vo
   }
 }
 
-/** 计算第一个变更行的行号（0-based） */
-function firstChangedLine(oldContent: string, newContent: string): number {
-  const oldLines = oldContent.split('\n')
-  const newLines = newContent.split('\n')
-  const minLen = Math.min(oldLines.length, newLines.length)
-  for (let i = 0; i < minLen; i++) {
-    if (oldLines[i] !== newLines[i]) return i
-  }
-  return minLen
-}
 
 async function executeShowDiffInteractive(args: Record<string, unknown>): Promise<string> {
   cleanupTempFiles()
@@ -571,7 +561,6 @@ async function executeShowDiffInteractive(args: Record<string, unknown>): Promis
   }
 
   const basename = path.basename(filePath)
-  const changeLine = firstChangedLine(oldContent, newContent)
 
   // ── 写右侧临时文件（proposed content）──────────────────────────────
   const tmpDir = os.tmpdir()
@@ -584,7 +573,7 @@ async function executeShowDiffInteractive(args: Record<string, unknown>): Promis
 
   // ── 生成唯一 tab 名称并注册元数据 ──────────────────────────────────
   const tabName = makeTabName(basename)
-  activeDiffTabs.set(tabName, { proposedPath, changeLine })
+  activeDiffTabs.set(tabName, { proposedPath })
 
   // ── 打开 diff 视图 ──────────────────────────────────────────────────
   const leftUri = vscode.Uri.file(filePath)

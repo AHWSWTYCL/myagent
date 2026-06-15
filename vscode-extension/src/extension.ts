@@ -64,18 +64,62 @@ export async function activate(context: vscode.ExtensionContext) {
       })
     )
 
-    // 交互式 diff Accept/Reject 命令（供 CodeLens 调用）
-    // 参数 tabName 直接定位 session，无需反查（O(1)）
+    // 辅助：根据当前 active editor 更新 context key
+    const updateDiffContext = () => {
+      const activeUri = vscode.window.activeTextEditor?.document.uri.fsPath
+      let resolved: string | undefined
+      try { resolved = activeUri ? fs.realpathSync(activeUri) : undefined } catch { resolved = activeUri }
+      const isActive = resolved
+        ? [...activeDiffTabs.values()].some(v => v.proposedPath === resolved)
+        : false
+      vscode.commands.executeCommand('setContext', 'myagent.diffActive', isActive)
+    }
+
     context.subscriptions.push(
-      vscode.commands.registerCommand('myagent.diffAccept', (tabName: string) => {
-        const cb = getDiffSession(tabName)
-        if (cb) { removeDiffSession(tabName); cb('accepted') }
+      vscode.window.onDidChangeActiveTextEditor(() => updateDiffContext())
+    )
+
+    // 交互式 diff Accept/Reject 命令（editor/title 按钮调用）
+    context.subscriptions.push(
+      vscode.commands.registerCommand('myagent.diffAccept', () => {
+        const activeUri = vscode.window.activeTextEditor?.document.uri.fsPath
+        let resolved: string | undefined
+        try { resolved = activeUri ? fs.realpathSync(activeUri) : undefined } catch { resolved = activeUri }
+        const tabEntry = resolved
+          ? [...activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === resolved)
+          : undefined
+        if (tabEntry) {
+          const [tabName, ] = tabEntry
+          const cb = getDiffSession(tabName)
+          if (cb) { removeDiffSession(tabName); cb('accepted') }
+        }
       })
     )
     context.subscriptions.push(
-      vscode.commands.registerCommand('myagent.diffReject', (tabName: string) => {
-        const cb = getDiffSession(tabName)
-        if (cb) { removeDiffSession(tabName); cb('rejected') }
+      vscode.commands.registerCommand('myagent.diffReject', () => {
+        const activeUri = vscode.window.activeTextEditor?.document.uri.fsPath
+        let resolved: string | undefined
+        try { resolved = activeUri ? fs.realpathSync(activeUri) : undefined } catch { resolved = activeUri }
+        const tabEntry = resolved
+          ? [...activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === resolved)
+          : undefined
+        if (tabEntry) {
+          const [tabName, ] = tabEntry
+          const cb = getDiffSession(tabName)
+          if (cb) { removeDiffSession(tabName); cb('rejected') }
+        }
+      })
+    )
+
+    // Prev/Next：复用 VS Code 内建 diff 导航
+    context.subscriptions.push(
+      vscode.commands.registerCommand('myagent.diffPrev', () => {
+        vscode.commands.executeCommand('workbench.action.compareEditor.previousChange')
+      })
+    )
+    context.subscriptions.push(
+      vscode.commands.registerCommand('myagent.diffNext', () => {
+        vscode.commands.executeCommand('workbench.action.compareEditor.nextChange')
       })
     )
 
@@ -83,37 +127,8 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       vscode.commands.registerCommand('myagent.closeAllDiffTabs', () => {
         closeAllDiffTabs()
+        updateDiffContext()
       })
-    )
-
-    // 全局 diff CodeLens：在 proposed 文件上显示 Accept/Reject 按钮
-    context.subscriptions.push(
-      vscode.languages.registerCodeLensProvider(
-        { scheme: 'file' },
-        {
-          provideCodeLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
-            let path = doc.uri.fsPath
-            try { path = fs.realpathSync(path) } catch { /* ignore */ }
-            // 直接查 tabName，传 tabName 给命令（O(1)）
-            const tabEntry = [...activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === path)
-            if (!tabEntry) return []
-            const [tabName, { changeLine }] = tabEntry
-            const range = new vscode.Range(changeLine, 0, changeLine, 0)
-            return [
-              new vscode.CodeLens(range, {
-                title: '$(check) Accept',
-                command: 'myagent.diffAccept',
-                arguments: [tabName],
-              }),
-              new vscode.CodeLens(range, {
-                title: '$(x) Reject',
-                command: 'myagent.diffReject',
-                arguments: [tabName],
-              }),
-            ]
-          }
-        }
-      )
     )
 
     outputChannel.appendLine(
