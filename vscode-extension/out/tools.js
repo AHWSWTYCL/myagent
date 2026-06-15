@@ -479,8 +479,8 @@ const INTERACTIVE_DIFF_TIMEOUT = 2 * 60 * 1000; // 2 min
 const diffSessions = new Map();
 /**
  * 活跃 diff tab 元数据。
- * tabName → { proposedPath, changeLine }
- * 供 CodeLens provider（extension.ts）和 close 逻辑使用。
+ * tabName → { proposedPath }
+ * 供 editor/title 按钮（extension.ts）和 close 逻辑使用。
  */
 exports.activeDiffTabs = new Map();
 function getDiffSession(tabName) {
@@ -539,17 +539,6 @@ async function closeTabByName(tabName, proposedPath) {
         }
     }
 }
-/** 计算第一个变更行的行号（0-based） */
-function firstChangedLine(oldContent, newContent) {
-    const oldLines = oldContent.split('\n');
-    const newLines = newContent.split('\n');
-    const minLen = Math.min(oldLines.length, newLines.length);
-    for (let i = 0; i < minLen; i++) {
-        if (oldLines[i] !== newLines[i])
-            return i;
-    }
-    return minLen;
-}
 async function executeShowDiffInteractive(args) {
     cleanupTempFiles();
     const filePath = resolvePath(args.filePath);
@@ -569,7 +558,6 @@ async function executeShowDiffInteractive(args) {
         return JSON.stringify({ action: 'skip', reason: 'No changes' });
     }
     const basename = path.basename(filePath);
-    const changeLine = firstChangedLine(oldContent, newContent);
     // ── 写右侧临时文件（proposed content）──────────────────────────────
     const tmpDir = os.tmpdir();
     const random = Math.random().toString(36).slice(2, 8);
@@ -583,7 +571,7 @@ async function executeShowDiffInteractive(args) {
     _tempFiles.push({ path: proposedPath, createdAt: Date.now() });
     // ── 生成唯一 tab 名称并注册元数据 ──────────────────────────────────
     const tabName = makeTabName(basename);
-    exports.activeDiffTabs.set(tabName, { proposedPath, changeLine });
+    exports.activeDiffTabs.set(tabName, { proposedPath });
     // ── 打开 diff 视图 ──────────────────────────────────────────────────
     const leftUri = vscode.Uri.file(filePath);
     const rightUri = vscode.Uri.file(proposedPath);

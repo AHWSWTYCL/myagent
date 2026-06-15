@@ -85,53 +85,76 @@ async function activate(context) {
             vscode.env.clipboard.writeText(config);
             vscode.window.showInformationMessage('MCP config copied to clipboard! Paste into ~/.myagent/mcp-servers.json');
         }));
-        // 交互式 diff Accept/Reject 命令（供 CodeLens 调用）
-        // 参数 tabName 直接定位 session，无需反查（O(1)）
-        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffAccept', (tabName) => {
-            const cb = (0, tools_1.getDiffSession)(tabName);
-            if (cb) {
-                (0, tools_1.removeDiffSession)(tabName);
-                cb('accepted');
+        // 辅助：根据当前 active editor 更新 context key
+        const updateDiffContext = () => {
+            const activeUri = vscode.window.activeTextEditor?.document.uri.fsPath;
+            let resolved;
+            try {
+                resolved = activeUri ? fs.realpathSync(activeUri) : undefined;
+            }
+            catch {
+                resolved = activeUri;
+            }
+            const isActive = resolved
+                ? [...tools_1.activeDiffTabs.values()].some(v => v.proposedPath === resolved)
+                : false;
+            vscode.commands.executeCommand('setContext', 'myagent.diffActive', isActive);
+        };
+        context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => updateDiffContext()));
+        // 交互式 diff Accept/Reject 命令（editor/title 按钮调用）
+        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffAccept', () => {
+            const activeUri = vscode.window.activeTextEditor?.document.uri.fsPath;
+            let resolved;
+            try {
+                resolved = activeUri ? fs.realpathSync(activeUri) : undefined;
+            }
+            catch {
+                resolved = activeUri;
+            }
+            const tabEntry = resolved
+                ? [...tools_1.activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === resolved)
+                : undefined;
+            if (tabEntry) {
+                const [tabName,] = tabEntry;
+                const cb = (0, tools_1.getDiffSession)(tabName);
+                if (cb) {
+                    (0, tools_1.removeDiffSession)(tabName);
+                    cb('accepted');
+                }
             }
         }));
-        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffReject', (tabName) => {
-            const cb = (0, tools_1.getDiffSession)(tabName);
-            if (cb) {
-                (0, tools_1.removeDiffSession)(tabName);
-                cb('rejected');
+        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffReject', () => {
+            const activeUri = vscode.window.activeTextEditor?.document.uri.fsPath;
+            let resolved;
+            try {
+                resolved = activeUri ? fs.realpathSync(activeUri) : undefined;
             }
+            catch {
+                resolved = activeUri;
+            }
+            const tabEntry = resolved
+                ? [...tools_1.activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === resolved)
+                : undefined;
+            if (tabEntry) {
+                const [tabName,] = tabEntry;
+                const cb = (0, tools_1.getDiffSession)(tabName);
+                if (cb) {
+                    (0, tools_1.removeDiffSession)(tabName);
+                    cb('rejected');
+                }
+            }
+        }));
+        // Prev/Next：复用 VS Code 内建 diff 导航
+        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffPrev', () => {
+            vscode.commands.executeCommand('workbench.action.compareEditor.previousChange');
+        }));
+        context.subscriptions.push(vscode.commands.registerCommand('myagent.diffNext', () => {
+            vscode.commands.executeCommand('workbench.action.compareEditor.nextChange');
         }));
         // 关闭所有活跃 diff（新 prompt 提交时 myagent 主进程调用）
         context.subscriptions.push(vscode.commands.registerCommand('myagent.closeAllDiffTabs', () => {
             (0, tools_1.closeAllDiffTabs)();
-        }));
-        // 全局 diff CodeLens：在 proposed 文件上显示 Accept/Reject 按钮
-        context.subscriptions.push(vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
-            provideCodeLenses(doc) {
-                let path = doc.uri.fsPath;
-                try {
-                    path = fs.realpathSync(path);
-                }
-                catch { /* ignore */ }
-                // 直接查 tabName，传 tabName 给命令（O(1)）
-                const tabEntry = [...tools_1.activeDiffTabs.entries()].find(([_, v]) => v.proposedPath === path);
-                if (!tabEntry)
-                    return [];
-                const [tabName, { changeLine }] = tabEntry;
-                const range = new vscode.Range(changeLine, 0, changeLine, 0);
-                return [
-                    new vscode.CodeLens(range, {
-                        title: '$(check) Accept',
-                        command: 'myagent.diffAccept',
-                        arguments: [tabName],
-                    }),
-                    new vscode.CodeLens(range, {
-                        title: '$(x) Reject',
-                        command: 'myagent.diffReject',
-                        arguments: [tabName],
-                    }),
-                ];
-            }
+            updateDiffContext();
         }));
         outputChannel.appendLine(`[myagent] MCP Server started on http://localhost:${transport.port}`);
         outputChannel.appendLine(`[myagent] Port info written to ~/.myagent/vscode-mcp.json`);
