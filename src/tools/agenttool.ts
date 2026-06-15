@@ -127,16 +127,10 @@ export class AgentTool extends Tool {
   get description(): string {
     if (!this.isCacheValid()) this.invalidateCache()
     if (this._descCache) return this._descCache
-    const lines = [
-      'Spawn a sub-agent to handle a self-contained task.',
-      'Pick `agent` from the registered list. Each agent has its own description, allowed tools and input schema; the union of input fields is exposed below — pass only what the chosen agent expects.',
-      '',
-      'Available agents:',
-    ]
-    for (const a of this.registry.list()) {
-      lines.push(`- **${a.name}** — ${a.description.replace(/\s+/g, ' ').trim()}`)
-    }
-    this._descCache = lines.join('\n')
+    // system prompt 中已有完整 agent 描述（describeForPrompt），此处只需列出 agent 名
+    // 供 LLM 做参数匹配，不重复大段描述
+    const names = this.registry.list().map(a => a.name).join(', ')
+    this._descCache = `Spawn a sub-agent. Pick \`agent\` from: ${names}. See system prompt for each agent's capabilities.`
     return this._descCache
   }
 
@@ -184,7 +178,8 @@ export class AgentTool extends Tool {
       if (!a.inputSchema) continue
       for (const [k, v] of Object.entries(a.inputSchema.properties)) {
         if (k in properties) continue
-        properties[k] = v
+        // 只保留 type 信息，去掉 description — LLM 从 system prompt 已知各 agent 能力
+        properties[k] = { type: v.type }
       }
     }
     this._schemaCache = {

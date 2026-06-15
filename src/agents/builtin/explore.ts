@@ -28,6 +28,7 @@ export const exploreAgent: AgentDefinition = {
     'Used before planning to give the planner accurate context.',
   systemPrompt: SYSTEM,
   tools: ['read_file', 'list_dir', 'bash'],
+  model: 'deepseek-v4-flash',
   maxTurns: 10,
   formatUserMessage: args =>
     `请调研代码库，为以下任务提供上下文报告：\n\n${args.task}`,

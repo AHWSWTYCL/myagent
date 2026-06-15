@@ -101,9 +101,10 @@ export async function runAgent(
   // 否则会用 Claude 模型名去请求 DeepSeek API，导致静默失败。
   const useAdvisorClient = def.name === 'advisor' && ctx.advisorClient
   const client = useAdvisorClient ? (ctx.advisorClient ?? ctx.client) : ctx.client
-  const model = useAdvisorClient
-    ? (typeof def.model === 'function' ? def.model() : (def.model ?? modelConfig.getCurrent()))
-    : modelConfig.getCurrent()
+  // def.model 对所有 agent 生效：静态字符串直接用，函数动态求值，undefined 回退到主配置
+  const model = typeof def.model === 'function'
+    ? def.model()
+    : (def.model ?? modelConfig.getCurrent())
 
   // ── teammate 邮箱信号 + keepAlive ───────────────────────────────────
   // 邮件消费策略：LLM 通过 check_mail(mode=pop) 独占消费，drainMailbox 不预 pop。

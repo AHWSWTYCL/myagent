@@ -624,20 +624,23 @@ function getStableText(agentSection: string | undefined): string {
  * Only the stable segment carries cache_control. The dynamic segment is appended
  * uncached so flipping memory/skills doesn't invalidate the cache.
  */
-export function buildSystemSegments(memoryFragment: string): Anthropic.TextBlockParam[] {
+/**
+ * Build the system prompt segments.
+ *
+ * memory 不再放在 system 中（会破坏 DeepSeek 的 prefix-based KV cache），
+ * 改为在 runTurn() 中作为第一条 user message 注入。
+ * skills fragment 变化频率低，保留在 dynamic segment。
+ */
+export function buildSystemSegments(): Anthropic.TextBlockParam[] {
   const agentSection = agentRegistry.describeForPrompt() || undefined
   const stableText = getStableText(agentSection)
-
-  const dynamicParts: string[] = []
-  if (memoryFragment) dynamicParts.push(`## 相关记忆\n${memoryFragment}`)
-  const skillFragment = skillManager.buildPromptFragment()
-  if (skillFragment) dynamicParts.push(skillFragment.trimStart())
 
   const segments: Anthropic.TextBlockParam[] = [
     { type: 'text', text: stableText, cache_control: { type: 'ephemeral' } },
   ]
-  if (dynamicParts.length > 0) {
-    segments.push({ type: 'text', text: dynamicParts.join('\n\n') })
+  const skillFragment = skillManager.buildPromptFragment()
+  if (skillFragment) {
+    segments.push({ type: 'text', text: skillFragment.trimStart() })
   }
   return segments
 }

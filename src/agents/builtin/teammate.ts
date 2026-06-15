@@ -100,6 +100,7 @@ export const teammateAgent: AgentDefinition = {
   },
   // 工作工具由调用方通过 tools 字段传入；mail 工具走 extraTools 注入（绑定 selfId）
   tools: [],
+  model: 'deepseek-v4-flash',
   // maxTurns 在 runner.ts 中对 teammate 强制设为 Infinity，不设上限
   inputSchema: {
     properties: {

@@ -56,6 +56,7 @@ export const leaderAgent: AgentDefinition = {
   },
   // leader 自己不要 agent / 文件工具，全部协作通过专用工具完成。
   tools: [],
+  model: 'deepseek-v4-flash',
   maxTurns: 80,
   inputSchema: {
     properties: {

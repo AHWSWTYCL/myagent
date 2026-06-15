@@ -22,6 +22,7 @@ export const generatorAgent: AgentDefinition = {
     'Legacy usage: pass task + plan inline. Returns a result summary.',
   systemPrompt: SYSTEM,
   tools: ['read_file', 'write_file', 'list_dir', 'bash'],
+  model: 'deepseek-v4-flash',
   maxTurns: 20,
   inputSchema: {
     properties: {

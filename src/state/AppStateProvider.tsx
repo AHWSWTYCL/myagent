@@ -1,4 +1,4 @@
-import React, { useContext, useState, useSyncExternalStore } from 'react'
+import React, { useContext, useState, useRef, useCallback, useSyncExternalStore } from 'react'
 import { appStateStore, getDefaultAppState, type AppState, type AppStateStore } from './appState.js'
 import { createStore } from './store.js'
 
@@ -37,7 +37,15 @@ function useAppStore(): AppStateStore {
 
 export function useAppState<T>(selector: (state: AppState) => T): T {
   const store = useAppStore()
-  const getSnapshot = () => selector(store.getState())
+  // selector 通常是内联箭头函数，用 ref 捕获最新版本
+  // getSnapshot 的引用必须稳定，否则 useSyncExternalStore 的 tearing check
+  // 可能触发额外的同步重渲染，形成无限循环
+  const selectorRef = useRef(selector)
+  selectorRef.current = selector
+  const getSnapshot = useCallback(
+    () => selectorRef.current(store.getState()),
+    [store],  // store 来自 useState，整个生命周期稳定
+  )
   return useSyncExternalStore(store.subscribe, getSnapshot, getSnapshot)
 }
 

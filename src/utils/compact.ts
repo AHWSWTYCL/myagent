@@ -27,8 +27,8 @@ function truncateToolInput(input: Record<string, unknown>): string {
 const KEEP_RECENT = 10       // 完整压缩后保留最近 N 条原始消息
 const MC_KEEP_RECENT_TURNS = 3  // microcompact 保留最近 N 轮（每轮 = 一次 user+assistant 交换）
 
-export const MICRO_COMPACT_TOKEN_THRESHOLD = 80_000
-export const COMPACT_TOKEN_THRESHOLD = 150_000
+export const MICRO_COMPACT_TOKEN_THRESHOLD = 40_000
+export const COMPACT_TOKEN_THRESHOLD = 55_000
 
 // 这些工具的 result 内容体积大但事后价值低，microcompact 时直接清除
 const CLEARABLE_TOOLS = new Set([
@@ -42,6 +42,10 @@ const CLEARED_PLACEHOLDER = '[tool result cleared by microcompact]'
  * 把历史 tool_result（来自 CLEARABLE_TOOLS）的内容替换为占位符，只保留最近 MC_KEEP_RECENT 条消息不动。
  * 直接修改传入的 messages 数组，返回释放的估算 token 数。
  */
+const ASST_TRUNC_HEAD = 500
+const ASST_TRUNC_TAIL = 200
+const ASST_TRUNC_THRESHOLD = 2_000
+
 export function microcompactMessages(messages: Anthropic.MessageParam[]): number {
   // Find the cutoff index: keep the last MC_KEEP_RECENT_TURNS user-initiated turns.
   // A "turn" starts at a user message that is NOT a tool_result.
@@ -60,21 +64,34 @@ export function microcompactMessages(messages: Anthropic.MessageParam[]): number
 
   for (let i = 0; i < cutoff; i++) {
     const m = messages[i]
-    if (m.role !== 'user' || typeof m.content === 'string') continue
+    // Clear large tool results
+    if (m.role === 'user' && Array.isArray(m.content)) {
+      for (const block of m.content) {
+        if (block.type !== 'tool_result') continue
 
-    for (const block of m.content) {
-      if (block.type !== 'tool_result') continue
+        const toolUseId = block.tool_use_id
+        const toolName = findToolName(messages, toolUseId)
+        if (!toolName || !CLEARABLE_TOOLS.has(toolName)) continue
 
-      // Find the tool name from the paired tool_use block
-      const toolUseId = block.tool_use_id
-      const toolName = findToolName(messages, toolUseId)
-      if (!toolName || !CLEARABLE_TOOLS.has(toolName)) continue
+        const before = contentLength(block.content)
+        if (before === 0) continue
 
-      const before = contentLength(block.content)
-      if (before === 0) continue
+        block.content = CLEARED_PLACEHOLDER
+        freed += before
+      }
+    }
+    // Truncate overly long assistant text blocks
+    if (m.role === 'assistant' && Array.isArray(m.content)) {
+      for (const block of m.content) {
+        if (block.type !== 'text') continue
+        if (block.text.length <= ASST_TRUNC_THRESHOLD) continue
 
-      block.content = CLEARED_PLACEHOLDER
-      freed += before
+        const before = block.text.length
+        block.text = block.text.slice(0, ASST_TRUNC_HEAD) +
+          `\n\n... [已截断 ${(before - ASST_TRUNC_HEAD - ASST_TRUNC_TAIL).toLocaleString()} 字符] ...\n\n` +
+          block.text.slice(-ASST_TRUNC_TAIL)
+        freed += before - block.text.length
+      }
     }
   }
 

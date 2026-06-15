@@ -18,5 +18,6 @@ export const generalPurposeAgent: AgentDefinition = {
     'when their description fits the task.',
   systemPrompt: SYSTEM,
   tools: ['read_file', 'write_file', 'list_dir', 'bash'],
+  model: 'deepseek-v4-flash',
   maxTurns: 20,
 }

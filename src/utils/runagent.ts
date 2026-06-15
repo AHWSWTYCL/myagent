@@ -98,6 +98,26 @@ export interface UsageAccum {
   cacheWriteTokens: number
 }
 
+// ── Tool result truncation ──────────────────────────────────────────────────
+// 防止 read_file/bash/web_fetch 返回的超大内容撑爆 context。
+// microcompact 只清理 3 轮前的，最近 3 轮不受限 — 此截断作为即时保护。
+const TRUNCATE_HEAD = 2000
+const TRUNCATE_TAIL = 500
+const TRUNCATE_TOOLS = new Set(['read_file', 'bash', 'web_fetch'])
+
+function truncateToolResult(toolName: string, result: string): string {
+  if (!TRUNCATE_TOOLS.has(toolName)) return result
+  if (result.length <= TRUNCATE_HEAD + TRUNCATE_TAIL + 100) return result
+
+  const head = result.slice(0, TRUNCATE_HEAD)
+  const tail = result.slice(-TRUNCATE_TAIL)
+  const omitted = result.length - TRUNCATE_HEAD - TRUNCATE_TAIL
+  const truncated = `${head}\n\n... [已截断 ${omitted.toLocaleString()} 字符] ...\n\n${tail}`
+
+  process.stderr.write(`[truncate] ${toolName}: ${result.length.toLocaleString()} → ${truncated.length.toLocaleString()} chars\n`)
+  return truncated
+}
+
 async function executeToolsWithParallelism(
   blocks: Anthropic.ToolUseBlock[],
   executeTool: (name: string, input: unknown) => Promise<string>,
@@ -141,7 +161,8 @@ async function executeToolsWithParallelism(
   await Promise.all(
     parallel.map(async ({ block, index }) => {
       if (!block) return
-      const result = await executeTool(block.name, block.input)
+      const raw = await executeTool(block.name, block.input)
+      const result = truncateToolResult(block.name, raw)
       onToolEnd?.(block.id, block.name, block.input, result)
       results[index] = { type: 'tool_result', tool_use_id: block.id, content: result }
     }),
@@ -150,7 +171,8 @@ async function executeToolsWithParallelism(
   // Run serial tools one at a time (preserving order).
   for (const { block, index } of serial) {
     if (!block) continue
-    const result = await executeTool(block.name, block.input)
+    const raw = await executeTool(block.name, block.input)
+    const result = truncateToolResult(block.name, raw)
     onToolEnd?.(block.id, block.name, block.input, result)
     results[index] = { type: 'tool_result', tool_use_id: block.id, content: result }
   }
@@ -226,10 +248,23 @@ export async function runAgentLoopStream(
 
     const systemParam = await resolveSystem(system)
     onLLMRequest?.(model, turn, messages)
+
+    // 给 tools 数组最后一个元素加 cache_control，使整个 tools 列表进入 prompt cache。
+    // 这样 system + tools 都被缓存，只有 messages 是新鲜的，大幅降低每请求 token 计费。
+    // 注意：cache_control 是 Anthropic 专有字段，DeepSeek 兼容层不保证支持，
+    // 仅对 Claude 模型启用此优化。
+    const isAnthropicModel = model.startsWith('claude')
+    const toolsWithCache = isAnthropicModel && tools.length > 0
+      ? [
+          ...tools.slice(0, -1),
+          { ...tools[tools.length - 1], cache_control: { type: 'ephemeral' as const } },
+        ]
+      : tools
+
     const stream = client.messages.stream({
       model,
       max_tokens: 8192,
-      tools,
+      tools: toolsWithCache,
       messages,
       system: systemParam,
     })

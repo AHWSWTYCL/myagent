@@ -30,6 +30,7 @@ export const goalVerifierAgent: AgentDefinition = {
     '只读目标验证器。评估 agent 是否达成了用户设定的 goal 条件。只能读取文件，不能修改任何代码。',
   systemPrompt: SYSTEM,
   tools: ['read_file', 'list_dir', 'grep', 'glob'],
+  model: 'deepseek-v4-flash',
   maxTurns: 5,
   inputSchema: {
     properties: {

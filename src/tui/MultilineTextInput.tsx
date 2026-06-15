@@ -10,6 +10,10 @@ interface Props {
   focus?: boolean
   showCursor?: boolean
   mask?: string
+  /** 光标位置变化时回调，用于父组件感知光标位置（如 @ 路径补全） */
+  onCursorChange?: (offset: number) => void
+  /** 外部设置光标位置（如 Tab 补齐后跳到路径末尾） */
+  cursorPosition?: number
 }
 
 export function MultilineTextInput({
@@ -20,12 +24,18 @@ export function MultilineTextInput({
   focus = true,
   showCursor = true,
   mask,
+  onCursorChange,
+  cursorPosition,
 }: Props) {
   const [state, setState] = useState({
     cursorOffset: value.length,
     cursorWidth: 0,
   })
   const { cursorOffset, cursorWidth } = state
+
+  useEffect(() => {
+    onCursorChange?.(cursorOffset)
+  }, [cursorOffset, onCursorChange])
 
   useEffect(() => {
     setState(previousState => {
@@ -41,6 +51,27 @@ export function MultilineTextInput({
       return previousState
     })
   }, [value, focus, showCursor])
+
+  // 外部设置光标位置（如 Tab 补齐后跳到路径末尾）
+  // 注意：只依赖 cursorPosition，不依赖 value.length。
+  // 如果依赖 value.length，每次击键改变 value 长度时，这个 effect
+  // 会在 onCursorChange 回调更新 cursorPosition 之前先触发，用旧的
+  // cursorPosition 覆盖内部正确的新光标位置，导致光标"左右来回跳"。
+  useEffect(() => {
+    if (cursorPosition !== undefined && cursorPosition >= 0) {
+      const target = Math.min(cursorPosition, value.length)
+      setState(prev => {
+        if (prev.cursorOffset === target && prev.cursorWidth === 0) {
+          return prev // 位置未变，跳过
+        }
+        return {
+          ...prev,
+          cursorOffset: target,
+          cursorWidth: 0,
+        }
+      })
+    }
+  }, [cursorPosition])
 
   const cursorActualWidth = cursorWidth
   const displayValue = mask ? mask.repeat(value.length) : value

@@ -17,6 +17,8 @@ interface InputBoxProps {
   attachmentErrors: string[]
   suggestions: Suggestion[]
   selectedSuggestionIndex: number
+  onCursorChange?: (offset: number) => void
+  cursorPosition?: number
 }
 
 /**
@@ -35,6 +37,7 @@ export function InputBox(props: InputBoxProps) {
     isProcessing, isQuestion, questionPrompt,
     attachments, attachmentErrors,
     suggestions, selectedSuggestionIndex,
+    onCursorChange, cursorPosition,
   } = props
 
   const isBash = inputValue.startsWith('!')
@@ -101,6 +104,8 @@ export function InputBox(props: InputBoxProps) {
             onSubmit={onSubmit}
             focus={!isQuestion && isProcessing ? true : !isProcessing || isQuestion}
             placeholder={isProcessing ? 'esc to interrupt…' : ''}
+            onCursorChange={onCursorChange}
+            cursorPosition={cursorPosition}
           />
         </Box>
       </Box>

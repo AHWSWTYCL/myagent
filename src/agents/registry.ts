@@ -1,6 +1,4 @@
 import { AgentDefinition } from './definition.js'
-import { attachmentQueue } from '../attachment/queue.js'
-import { AgentAttachment } from '../attachment/agent.js'
 
 export class AgentRegistry {
   private agents = new Map<string, AgentDefinition>()
@@ -10,7 +8,8 @@ export class AgentRegistry {
       console.error(`[agents] duplicate agent name "${def.name}", overwriting`)
     }
     this.agents.set(def.name, def)
-    attachmentQueue.enqueue(new AgentAttachment(def.name, def.description))
+    // 注意：AgentAttachment 已移除。agent 描述通过 system prompt 的
+    // describeForPrompt() 注入并随 ephemeral cache 缓存，无需在 messages 中重复。
   }
 
   registerAll(defs: AgentDefinition[]): void {

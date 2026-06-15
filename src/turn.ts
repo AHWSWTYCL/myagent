@@ -95,20 +95,25 @@ export async function runTurn(
   agentTool.setSignal(signal)
 
   try {
-    sessionState.appendMessage({ role: 'user', content: input } as Anthropic.MessageParam)
-
     // Transcript: set main agent context + record user input
     transcriptRecorder.pushAgentContext('main', null)
-    transcriptRecorder.recordUserInput(input as string | Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam | Anthropic.ToolUseBlockParam | Anthropic.ToolResultBlockParam>)
 
     // Recall once per user input (not per inner turn)
+    // memory 作为第一条 user message 注入（而非 system text），保持 system prefix 稳定，
+    // 这样 DeepSeek 的 prefix-based KV cache 不受 memory 内容变化影响
     const recallText = extractRecallText(input as string | Array<ContentBlockParam>)
     bridge.emitStatus('召回相关记忆...')
     const relevantMemory = await recallRelevantMemory(recallText)
-    if (relevantMemory) bridge.emitRecall(relevantMemory)
+    if (relevantMemory) {
+      bridge.emitRecall(relevantMemory)
+      sessionState.appendMessage({ role: 'user', content: `## 相关记忆\n${relevantMemory}` } as Anthropic.MessageParam)
+    }
     bridge.emitStatus(relevantMemory ? '找到相关记忆' : 'thinking...')
 
-    const buildSystem = (): Anthropic.TextBlockParam[] => systemSegments ?? buildSystemSegments(relevantMemory)
+    sessionState.appendMessage({ role: 'user', content: input } as Anthropic.MessageParam)
+    transcriptRecorder.recordUserInput(input as string | Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam | Anthropic.ToolUseBlockParam | Anthropic.ToolResultBlockParam>)
+
+    const buildSystem = (): Anthropic.TextBlockParam[] => systemSegments ?? buildSystemSegments()
 
     // 预拉取 VSCode 诊断（fire-and-forget，不阻塞 turn 启动）
     mcpManager.fetchVSCodeDiagnostics().catch(() => {})

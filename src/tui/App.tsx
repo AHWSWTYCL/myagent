@@ -9,6 +9,7 @@ import type { Suggestion } from '../commands/commandregistry.js'
 import type { FileAttachment } from '../utils/attachments.js'
 import type { Tool } from '../tools/tool.js'
 import { parseAttachments, buildUserContent, autoPrefixAttachments } from '../utils/attachments.js'
+import { extractAtToken, getFileSuggestions, applyFileCompletion } from './fileSuggestions.js'
 import { StreamingText } from './MarkdownRenderer.js'
 import { Banner } from './banner.js'
 import { McpStatusPanel } from './McpStatusPanel.js'
@@ -173,7 +174,14 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   // ── 命令补全相关状态 ──────────────────────────────────────────────
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0)
+  // ── @ 文件路径补全相关状态 ─────────────────────────────────────────
+  const [cursorOffset, setCursorOffset] = useState(0)
+  const cursorOffsetRef = useRef(cursorOffset)
+  cursorOffsetRef.current = cursorOffset
+  const [atToken, setAtToken] = useState<{ start: number; end: number } | null>(null)
+  const pendingFileSuggestRef = useRef<string | null>(null)
   const pendingResolveRef = useRef<((v: any) => void) | null>(null)
+  const handleCursorChange = useCallback((offset: number) => setCursorOffset(offset), [])
   const idCounter = useRef(0)
   const streamingRef = useRef('')
   const historyIndexRef = useRef(-1)
@@ -182,6 +190,33 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const isProcessingRef = useRef(false)    // 同步版 isProcessing，避免闭包过期
   const submittingRef = useRef(false)      // 防止 handleSubmit 并发
   const turnEndedRef = useRef(false)       // 防止 turnEnd 后的 text delta 复活 streaming
+
+  // ── 稳定 props 引用（防止 processQueue useCallback 每次渲染变化）──
+  // runTurn/getQueueLength/dequeueMessage 等来自父组件的 props 不是
+  // useCallback 包裹的，每次渲染都是新引用 → 如果直接作为 useCallback
+  // 依赖会导致 processQueue 每次渲染都变化 → subscribeQueue/unreadCheck
+  // 的 useEffect 频繁重订阅 → 与 useSyncExternalStore 的 tearing check
+  // 结合形成无限重渲染循环。
+  //
+  // 修复策略：所有从 props 来的函数用 ref 捕获最新引用，effect 只依赖 []。
+  // processQueue 自身也存入 ref，避免它成为其他 effect 的 deps 级联变化源。
+  const runTurnRef = useRef(runTurn)
+  runTurnRef.current = runTurn
+  const getQueueLengthRef = useRef(getQueueLength)
+  getQueueLengthRef.current = getQueueLength
+  const dequeueMessageRef = useRef(dequeueMessage)
+  dequeueMessageRef.current = dequeueMessage
+  const hasUnreadMainMailRef = useRef(hasUnreadMainMail)
+  hasUnreadMainMailRef.current = hasUnreadMainMail
+  const enqueueMainMailboxWakeRef = useRef(enqueueMainMailboxWake)
+  enqueueMainMailboxWakeRef.current = enqueueMainMailboxWake
+  const subscribeQueueRef = useRef(subscribeQueue)
+  subscribeQueueRef.current = subscribeQueue
+  const subscribeMainMailboxRef = useRef(subscribeMainMailbox)
+  subscribeMainMailboxRef.current = subscribeMainMailbox
+  // processQueueRef：避免 processQueue 进入其他 effect 的 dependency array
+  // 所有调用 processQueue 的地方都通过 processQueueRef.current() 间接调用
+  const processQueueRef = useRef<() => Promise<void>>(async () => {})
 
   const nextId = useCallback(() => String(++idCounter.current), [])
 
@@ -242,14 +277,18 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
 
   // ── activity (tool/status) elapsed seconds ────────────────────────
   const isActive = turnTools.some(t => t.isPending) || !!status
+  const activityStartedRef = useRef(false)
   useEffect(() => {
     if (!isActive) {
+      activityStartedRef.current = false
       setActivityStartedAt(null)
       setElapsedSec(0)
       return
     }
+    // 已经在计时就不要重置，防止多工具并发时重复 setState
+    if (activityStartedRef.current) return
+    activityStartedRef.current = true
     setActivityStartedAt(Date.now())
-    return
   }, [isActive])
 
   useEffect(() => {
@@ -506,7 +545,7 @@ ${memory}` }])
     }
     bgControllerRef.current?.abort()
     showHint('Task moved to background — Ctrl+O to see tool details.')
-  })
+  }, { isActive: isProcessing })
 
   // Ctrl+T: toggle Background Tasks dialog (teammate status panel).
   useInput((input, key) => {
@@ -561,7 +600,7 @@ ${memory}` }])
       }
       return
     }
-  })
+  }, { isActive: appMode === 'backgroundTasks' })
 
   // Teammate view keyboard is now handled by TeammateConversationView's own useInput
 
@@ -805,14 +844,54 @@ ${memory}` }])
   function clearSuggestions() {
     setSuggestions([])
     setSelectedSuggestionIndex(0)
+    setAtToken(null)
   }
 
   function updateSuggestions(value: string) {
     if (value.startsWith('/')) {
-      const partial = value.slice(1) // 去掉 '/'
+      const partial = value.slice(1)
       const matches = commandParser.search(partial)
       setSuggestions(matches)
       setSelectedSuggestionIndex(0)
+      setAtToken(null)
+    } else {
+      clearSuggestions()
+    }
+  }
+
+  /** 异步获取 @ 文件路径建议，用于防抖竞态控制 */
+  async function updateFileSuggestions(value: string, cursor: number) {
+    const token = extractAtToken(value, cursor)
+    if (!token || token.pathPrefix.length > 200) {
+      // No valid @token or path too long — clear file suggestions
+      if (atToken) clearSuggestions()
+      return
+    }
+
+    // Skip if the entire input starts with @ followed by space (teammate mention)
+    // and the @token is the first token
+    if (token.tokenStart === 0 && value.includes(' ', token.tokenEnd)) {
+      if (atToken) clearSuggestions()
+      return
+    }
+
+    const checkId = value + '|' + cursor
+    pendingFileSuggestRef.current = checkId
+
+    const fileResults = await getFileSuggestions(token.pathPrefix, process.cwd())
+
+    // Race condition check
+    if (pendingFileSuggestRef.current !== checkId) return
+
+    if (fileResults.length > 0) {
+      const mapped: Suggestion[] = fileResults.map(f => ({
+        name: f.name,
+        description: f.kind === 'directory' ? 'directory' : 'file',
+        usage: f.atPath,
+      }))
+      setSuggestions(mapped)
+      setSelectedSuggestionIndex(0)
+      setAtToken({ start: token.tokenStart, end: token.tokenEnd })
     } else {
       clearSuggestions()
     }
@@ -821,8 +900,24 @@ ${memory}` }])
   function acceptSuggestion() {
     const selected = suggestions[selectedSuggestionIndex]
     if (!selected) return
-    setInputValue('/' + selected.name + ' ')
-    clearSuggestions()
+
+    if (atToken) {
+      // File path completion: replace the @token with selected path
+      const newValue = applyFileCompletion(
+        inputValue,
+        atToken.start,
+        atToken.end,
+        selected.usage, // usage field holds the full @path
+      )
+      setInputValue(newValue)
+      // Set cursor after the completed path
+      setCursorOffset(atToken.start + selected.usage.length)
+      clearSuggestions()
+    } else {
+      // Command completion
+      setInputValue('/' + selected.name + ' ')
+      clearSuggestions()
+    }
   }
 
   // ── 快速预检：输入中是否包含疑似文件路径（同步，无 I/O） ────────
@@ -862,6 +957,13 @@ ${memory}` }])
     // 记录当前 value，后续异步回调据此判断是否已过期
     pendingAttachmentCheckRef.current = value
 
+    // @ 文件路径补全：异步获取建议
+    if (value.includes('@') && !value.startsWith('/') && !value.startsWith('!')) {
+      void updateFileSuggestions(value, cursorOffsetRef.current)
+    } else if (!value.includes('@') && atToken) {
+      clearSuggestions()
+    }
+
     // 快速预检：只有包含 @ 或疑似文件路径时才做异步 I/O
     if (value.includes('@') || looksLikeFilePath(value)) {
       autoPrefixAttachments(value).then(processed => {
@@ -870,6 +972,9 @@ ${memory}` }])
         if (processed !== value) {
           setInputValue(processed)
           updateSuggestions(processed)
+          if (processed.includes('@') && !processed.startsWith('/') && !processed.startsWith('!')) {
+            void updateFileSuggestions(processed, cursorOffsetRef.current)
+          }
         }
         parseAttachmentsFromInput(processed)
       })
@@ -877,7 +982,7 @@ ${memory}` }])
       setAttachments([])
       setAttachmentErrors([])
     }
-  }, [])
+  }, [atToken])
 
   const addToHistory = useCallback((text: string) => {
     setInputHistory(prev => {
@@ -1080,8 +1185,8 @@ ${memory}` }])
    *   2. mailbox polling — idle 态检测到 teammate 来信后自动触发
    */
   const processQueue = useCallback(async () => {
-    process.stderr.write(`[tui:processQueue] enter — isProcessing=${isProcessingRef.current} queueLength=${getQueueLength()}\n`)
-    if (isProcessingRef.current || getQueueLength() === 0) {
+    process.stderr.write(`[tui:processQueue] enter — isProcessing=${isProcessingRef.current} queueLength=${getQueueLengthRef.current()}\n`)
+    if (isProcessingRef.current || getQueueLengthRef.current() === 0) {
       process.stderr.write(`[tui:processQueue] exit early (isProcessing or empty queue)\n`)
       return
     }
@@ -1101,19 +1206,19 @@ ${memory}` }])
     bgControllerRef.current = bgAc
 
     try {
-      while (getQueueLength() > 0 && !ac.signal.aborted) {
-        const nextMsg = dequeueMessage()
+      while (getQueueLengthRef.current() > 0 && !ac.signal.aborted) {
+        const nextMsg = dequeueMessageRef.current()
         process.stderr.write(`[tui:processQueue] dequeueMessage returned: ${nextMsg ? `"${nextMsg.slice(0, 80)}..." (${nextMsg.length} chars)` : 'undefined'}\n`)
         if (!nextMsg) {
           // drainQueue consumed a mailbox-wake item (it only returns 'user' kind).
           // If there are actual unread mails, inject a trigger so runTurn starts
           // and drainMailbox picks them up during the runAgentLoopStream drain phase.
-          if (hasUnreadMainMail?.()) {
+          if (hasUnreadMainMailRef.current?.()) {
             process.stderr.write(`[tui:processQueue] mailbox-wake consumed, has unread mails → injecting trigger\n`)
             turnEndedRef.current = false
             streamingRef.current = ''
             setStreamingText('')
-            await runTurn('(mailbox wake — check for new messages)', ac.signal, bgAc.signal)
+            await runTurnRef.current('(mailbox wake — check for new messages)', ac.signal, bgAc.signal)
             continue
           }
           break
@@ -1125,7 +1230,7 @@ ${memory}` }])
         turnEndedRef.current = false
         streamingRef.current = ''
         setStreamingText('')
-        const result = await runTurn(nextMsg, ac.signal, bgAc.signal)
+        const result = await runTurnRef.current(nextMsg, ac.signal, bgAc.signal)
         if (result && (result as any).backgrounded) {
           process.stderr.write(`[tui:processQueue] turn backgrounded, breaking loop\n`)
           break
@@ -1151,29 +1256,31 @@ ${memory}` }])
       process.stderr.write(`[tui:processQueue] finished — isProcessing set to false\n`)
       setAppState(prev => prev.status ? { ...prev, status: '' } : prev)
     }
-  }, [runTurn, getQueueLength, dequeueMessage, hasUnreadMainMail, setMessages, setAppState, setStreamingText, nextId])
+  }, [setMessages, setAppState, setStreamingText, nextId, refreshGoalText])
+  processQueueRef.current = processQueue
 
   useEffect(() => {
-    if (subscribeMainMailbox) {
-      return subscribeMainMailbox(() => {
+    const cb = subscribeMainMailboxRef.current
+    if (cb) {
+      return cb(() => {
         process.stderr.write(`[tui:mailbox] subscribeMainMailbox fired → enqueuing mailbox-wake\n`)
-        enqueueMainMailboxWake()
+        enqueueMainMailboxWakeRef.current()
       })
     }
-  }, [subscribeMainMailbox, enqueueMainMailboxWake])
+  }, [])
 
   useEffect(() => {
-    return subscribeQueue(() => {
+    return subscribeQueueRef.current(() => {
       const allowedMode = mode === 'teammate' ? true : appMode === 'main'
       process.stderr.write(`[tui:queue] subscribeQueue fired — isProcessing=${isProcessingRef.current} inputMode=${inputMode} allowedMode=${allowedMode}\n`)
       if (!isProcessingRef.current && inputMode === 'chat' && allowedMode) {
         process.stderr.write(`[tui:queue] → calling processQueue()\n`)
-        void processQueue()
+        void processQueueRef.current()
       } else {
         process.stderr.write(`[tui:queue] → skipped (isProcessing or wrong mode)\n`)
       }
     })
-  }, [subscribeQueue, inputMode, appMode, mode, processQueue])
+  }, [inputMode, appMode])
 
   // ── unreadCheck debounce timer（防止 isProcessing 翻转时级联重入）──
   const unreadCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1187,13 +1294,13 @@ ${memory}` }])
     if (unreadCheckTimerRef.current) clearTimeout(unreadCheckTimerRef.current)
     unreadCheckTimerRef.current = setTimeout(() => {
       unreadCheckTimerRef.current = null
-      if (hasUnreadMainMail && hasUnreadMainMail()) {
+      if (hasUnreadMainMailRef.current?.()) {
         process.stderr.write(`[tui:unreadCheck] hasUnreadMainMail=true → enqueuing mailbox-wake\n`)
-        enqueueMainMailboxWake()
+        enqueueMainMailboxWakeRef.current()
       }
-      if (getQueueLength() > 0) {
-        process.stderr.write(`[tui:unreadCheck] queue not empty (${getQueueLength()} items) → calling processQueue\n`)
-        void processQueue()
+      if (getQueueLengthRef.current() > 0) {
+        process.stderr.write(`[tui:unreadCheck] queue not empty (${getQueueLengthRef.current()} items) → calling processQueue\n`)
+        void processQueueRef.current()
       }
     }, 500)
 
@@ -1203,7 +1310,7 @@ ${memory}` }])
         unreadCheckTimerRef.current = null
       }
     }
-  }, [isProcessing, inputMode, appMode, mode, hasUnreadMainMail, enqueueMainMailboxWake, getQueueLength, processQueue])
+  }, [isProcessing, inputMode, appMode])
 
   // ── Teammate mode: auto-start initial turn ───────────────────────────
   useEffect(() => {
@@ -1446,6 +1553,8 @@ ${memory}` }])
           attachmentErrors={attachmentErrors}
           suggestions={suggestions}
           selectedSuggestionIndex={selectedSuggestionIndex}
+          onCursorChange={handleCursorChange}
+          cursorPosition={cursorOffset}
         />
       )}
 

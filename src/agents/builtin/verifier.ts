@@ -25,6 +25,7 @@ export const verifierAgent: AgentDefinition = {
     'Returns APPROVED or NEEDS_REVISION (first line) followed by feedback.',
   systemPrompt: SYSTEM,
   tools: ['read_file', 'list_dir', 'bash'],
+  model: 'deepseek-v4-flash',
   maxTurns: 10,
   inputSchema: {
     properties: {
