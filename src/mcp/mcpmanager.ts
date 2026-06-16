@@ -74,6 +74,9 @@ export class MCPManager {
     endLine: number
   } | null = null
 
+  /** 扩展控制台日志缓存：每次 turn 前异步拉取 getExtensionLogs，drainAttachments 同步读取 */
+  private extensionLogsCache: string | null = null
+
   /**
    * 设置 ToolRegistrar 引用。
    * 必须在 startAll 之前调用。
@@ -422,6 +425,7 @@ export class MCPManager {
     if (!server || server.status !== 'connected') {
       this.vscodeDiagsCache = null
       this.ideSelectionCache = null
+      this.extensionLogsCache = null
       return
     }
 
@@ -462,6 +466,23 @@ export class MCPManager {
       }
     } catch {
       this.ideSelectionCache = null
+    }
+
+    // 扩展控制台日志拉取
+    try {
+      const raw = await server.callTool('getExtensionLogs', {})
+      if (raw.startsWith('Error:')) {
+        this.extensionLogsCache = null
+      } else {
+        const parsed = JSON.parse(raw)
+        if (parsed.count === 0) {
+          this.extensionLogsCache = null
+        } else {
+          this.extensionLogsCache = raw
+        }
+      }
+    } catch {
+      this.extensionLogsCache = null
     }
   }
 
@@ -554,6 +575,36 @@ export class MCPManager {
   } | null {
     return this.ideSelectionCache
   }
+
+  /**
+   * 获取并消费缓存的扩展控制台日志（同步，供 drainAttachments 使用）。
+   * 去重规则：基于 count 生成签名，相同签名跳过。
+   */
+  getExtensionLogsAndClear(): string | null {
+    const raw = this.extensionLogsCache
+    if (!raw) return null
+
+    // 生成签名（仅基于 count 去重）
+    let sig: string
+    try {
+      const parsed = JSON.parse(raw)
+      sig = `${parsed.count ?? 0}`
+    } catch {
+      sig = raw
+    }
+
+    if (sig === this.lastInjectedExtensionLogsSig) {
+      this.extensionLogsCache = null
+      return null
+    }
+
+    this.lastInjectedExtensionLogsSig = sig
+    this.extensionLogsCache = null
+    return raw
+  }
+
+  /** 上次已注入 LLM 上下文的扩展日志签名（基于 count 去重） */
+  private lastInjectedExtensionLogsSig: string | null = null
 
   /**
    * 调用指定 MCP Server 的工具（fire-and-forget 友好，不抛异常）。

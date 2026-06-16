@@ -11,7 +11,7 @@ import * as fs from 'fs'
 import { createTransport, type MCPTransport } from './transport'
 import { createMCPServer } from './server'
 import { MyAgentSidebarProvider } from './sidebar'
-import { cleanupTempFiles, getDiffSession, removeDiffSession, activeDiffTabs, closeAllDiffTabs } from './tools'
+import { cleanupTempFiles, getDiffSession, removeDiffSession, activeDiffTabs, closeAllDiffTabs, initLogCapture } from './tools'
 
 let transport: MCPTransport | null = null
 let statusBar: vscode.StatusBarItem | null = null
@@ -22,6 +22,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const version = context.extension.packageJSON?.version ?? '0.0.0'
   outputChannel = vscode.window.createOutputChannel('myagent')
   outputChannel.appendLine(`[myagent] v${version} activating...`)
+
+  // 拦截 console.error/warn 写入环形缓冲区（供 getExtensionLogs MCP 工具读取）
+  initLogCapture()
 
   try {
     transport = createTransport()

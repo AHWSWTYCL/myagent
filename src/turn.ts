@@ -40,7 +40,7 @@ import {
 } from './bootstrap.js'
 import { appStateStore } from './state/appState.js'
 import { PlanModeAttachment } from './attachment/planMode.js'
-import { IDEDiagnosticsAttachment, IDESelectionAttachment } from './attachment/ide.js'
+import { collectIDEAttachments } from './attachment/ide.js'
 
 // ── Plan mode: 控制 prompt 注入频率（每 5 次 query 注入完整版）──────
 const PLAN_MODE_FULL_PROMPT_INTERVAL = 5
@@ -115,8 +115,10 @@ export async function runTurn(
 
     const buildSystem = (): Anthropic.TextBlockParam[] => systemSegments ?? buildSystemSegments()
 
-    // 预拉取 VSCode 诊断（fire-and-forget，不阻塞 turn 启动）
-    mcpManager.fetchVSCodeDiagnostics().catch(() => {})
+    // 预拉取 VSCode 诊断 → 完成后自动 enqueue IDE Attachment（fire-and-forget）
+    mcpManager.fetchVSCodeDiagnostics()
+      .then(() => collectIDEAttachments(mcpManager, attachmentQueue))
+      .catch(() => {})
 
     // Accumulate text across inner turns for memory extraction (one pass per user input, not per inner turn)
     let fullAssistantText = ''
@@ -136,6 +138,8 @@ export async function runTurn(
       backgroundSignal,
       drainQueue: () => drainQueue(),
       drainAttachments: () => {
+        // ── PlanMode：按频率注入行为约束 prompt ──
+        // IDE 状态已在 fetchVSCodeDiagnostics().then() 中自动 enqueue，此处不再重复收集
         const currentMode = appStateStore.getState().mode
         if (currentMode === 'plan') {
           let count = appStateStore.getState().planQueryCount
@@ -150,28 +154,11 @@ export async function runTurn(
           }
         }
 
-        // VSCode 诊断 → Attachment（带去重）
-        const vscodeDiags = mcpManager.getVSCodeDiagnosticsAndClear()
-        if (vscodeDiags) {
-          attachmentQueue.enqueue(new IDEDiagnosticsAttachment(vscodeDiags))
-        }
-
-        // IDE 选中 → Attachment（带去重）
-        const ideSelection = mcpManager.getIDESelectionAndClear()
-        if (ideSelection) {
-          attachmentQueue.enqueue(new IDESelectionAttachment(
-            ideSelection.filePath,
-            ideSelection.startLine,
-            ideSelection.endLine,
-            ideSelection.text,
-          ))
-        }
-
-        // 统一 drain：队列中的 Attachment + LSP 诊断（LSP 暂保持裸文本）
+        // 统一 drain：队列中的 Attachment + LSP 诊断
         let result = attachmentQueue.formatDrain()
-        const diags = lspManager?.getDiagnostics()
-        if (diags) {
-          const diagBlock = `[lsp] diagnostics:\n${diags}`
+        const lspDiags = lspManager?.getDiagnostics()
+        if (lspDiags) {
+          const diagBlock = `[lsp] diagnostics:\n${lspDiags}`
           result = result ? `${result}\n${diagBlock}` : `[System State Changes]\n${diagBlock}`
         }
         return result

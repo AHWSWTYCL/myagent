@@ -48,6 +48,9 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activeDiffTabs = void 0;
+exports.initLogCapture = initLogCapture;
+exports.getExtensionLogs = getExtensionLogs;
+exports.clearExtensionLogs = clearExtensionLogs;
 exports.getToolDefinitions = getToolDefinitions;
 exports.executeToolAsync = executeToolAsync;
 exports.cleanupTempFiles = cleanupTempFiles;
@@ -59,6 +62,47 @@ const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const os = __importStar(require("os"));
 const cp = __importStar(require("child_process"));
+const MAX_LOG_ENTRIES = 500;
+const _logBuffer = [];
+/** 拦截 console.error / console.warn，写入环形缓冲区 */
+function initLogCapture() {
+    const original = {
+        error: console.error.bind(console),
+        warn: console.warn.bind(console),
+    };
+    function push(level, args) {
+        const message = args
+            .map(a => (typeof a === 'string' ? a : JSON.stringify(a)))
+            .join(' ');
+        _logBuffer.push({ level, message, ts: Date.now() });
+        if (_logBuffer.length > MAX_LOG_ENTRIES)
+            _logBuffer.shift();
+    }
+    console.error = (...args) => {
+        push('error', args);
+        original.error(...args);
+    };
+    console.warn = (...args) => {
+        push('warn', args);
+        original.warn(...args);
+    };
+}
+/** 获取最近 N 条日志，支持按级别和 afterTimestamp 过滤 */
+function getExtensionLogs(opts = {}) {
+    let entries = [..._logBuffer];
+    if (opts.level && opts.level !== 'all') {
+        entries = entries.filter(e => e.level === opts.level);
+    }
+    if (opts.afterTimestamp !== undefined) {
+        entries = entries.filter(e => e.ts > opts.afterTimestamp);
+    }
+    const limit = opts.limit ?? 200;
+    return entries.slice(-limit);
+}
+/** 清空日志缓冲区（relog 前调用，避免旧日志干扰） */
+function clearExtensionLogs() {
+    _logBuffer.length = 0;
+}
 function getToolDefinitions() {
     return [
         {
@@ -165,6 +209,21 @@ function getToolDefinitions() {
             },
         },
         {
+            name: 'getExtensionLogs',
+            description: 'Get captured console.error/warn logs from this VSCode extension. ' +
+                'Useful after extension reload to check for startup errors. ' +
+                'Supports filtering by level (error/warn/all) and afterTimestamp.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    level: { type: 'string', description: 'Filter by level: "error", "warn", or "all" (default: "all")' },
+                    afterTimestamp: { type: 'number', description: 'Only return logs after this Unix timestamp (ms)' },
+                    limit: { type: 'number', description: 'Max entries to return (default: 200)' },
+                },
+                required: [],
+            },
+        },
+        {
             name: 'closeAllDiffTabs',
             description: 'Close all active diff review tabs. ' +
                 'Rejects all pending interactive diffs and cleans up temp files. ' +
@@ -184,6 +243,7 @@ async function executeToolAsync(name, args) {
         case 'executeCode': return await executeCode(args);
         case 'showDiff': return await executeShowDiff(args);
         case 'showDiffInteractive': return await executeShowDiffInteractive(args);
+        case 'getExtensionLogs': return executeGetExtensionLogs(args);
         case 'closeFile': return await executeCloseFile(args);
         case 'closeAllDiffTabs': return executeCloseAllDiffTabs();
         default: return `Error: Unknown tool "${name}"`;
@@ -701,6 +761,23 @@ async function executeCloseFile(args) {
         }
     }
     return JSON.stringify({ closed, filePath: targetPath });
+}
+// ── 扩展运行时日志 ────────────────────────────────────────────────────────────
+function executeGetExtensionLogs(args) {
+    const level = args.level ?? 'all';
+    const afterTimestamp = args.afterTimestamp;
+    const limit = args.limit;
+    const entries = getExtensionLogs({ level, afterTimestamp, limit });
+    if (entries.length === 0)
+        return JSON.stringify({ entries: [], count: 0, message: 'No extension logs found.' });
+    return JSON.stringify({
+        count: entries.length,
+        entries: entries.map(e => ({
+            level: e.level,
+            message: e.message,
+            ts: e.ts,
+        })),
+    });
 }
 // ── closeAllDiffTabs 工具 ─────────────────────────────────────────────────
 function executeCloseAllDiffTabs() {

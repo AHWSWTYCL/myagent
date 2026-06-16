@@ -19,6 +19,62 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as cp from 'child_process'
 
+// ── 扩展运行时日志捕获 ────────────────────────────────────────────────────────
+
+interface LogEntry {
+  level: 'error' | 'warn'
+  message: string
+  ts: number
+}
+
+const MAX_LOG_ENTRIES = 500
+const _logBuffer: LogEntry[] = []
+
+/** 拦截 console.error / console.warn，写入环形缓冲区 */
+export function initLogCapture(): void {
+  const original = {
+    error: console.error.bind(console),
+    warn: console.warn.bind(console),
+  }
+
+  function push(level: 'error' | 'warn', args: unknown[]): void {
+    const message = args
+      .map(a => (typeof a === 'string' ? a : JSON.stringify(a)))
+      .join(' ')
+    _logBuffer.push({ level, message, ts: Date.now() })
+    if (_logBuffer.length > MAX_LOG_ENTRIES) _logBuffer.shift()
+  }
+
+  console.error = (...args: unknown[]) => {
+    push('error', args)
+    original.error(...args)
+  }
+  console.warn = (...args: unknown[]) => {
+    push('warn', args)
+    original.warn(...args)
+  }
+}
+
+/** 获取最近 N 条日志，支持按级别和 afterTimestamp 过滤 */
+export function getExtensionLogs(
+  opts: { level?: 'error' | 'warn' | 'all'; afterTimestamp?: number; limit?: number } = {},
+): LogEntry[] {
+  let entries = [..._logBuffer]
+  if (opts.level && opts.level !== 'all') {
+    entries = entries.filter(e => e.level === opts.level)
+  }
+  if (opts.afterTimestamp !== undefined) {
+    entries = entries.filter(e => e.ts > opts.afterTimestamp!)
+  }
+  const limit = opts.limit ?? 200
+  return entries.slice(-limit)
+}
+
+/** 清空日志缓冲区（relog 前调用，避免旧日志干扰） */
+export function clearExtensionLogs(): void {
+  _logBuffer.length = 0
+}
+
 // ── 工具定义（供 tools/list 使用）─────────────────────────────────────────────
 
 export interface MCPToolDef {
@@ -146,6 +202,22 @@ export function getToolDefinitions(): MCPToolDef[] {
       },
     },
     {
+      name: 'getExtensionLogs',
+      description:
+        'Get captured console.error/warn logs from this VSCode extension. ' +
+        'Useful after extension reload to check for startup errors. ' +
+        'Supports filtering by level (error/warn/all) and afterTimestamp.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          level: { type: 'string', description: 'Filter by level: "error", "warn", or "all" (default: "all")' },
+          afterTimestamp: { type: 'number', description: 'Only return logs after this Unix timestamp (ms)' },
+          limit: { type: 'number', description: 'Max entries to return (default: 200)' },
+        },
+        required: [],
+      },
+    },
+    {
       name: 'closeAllDiffTabs',
       description:
         'Close all active diff review tabs. ' +
@@ -168,6 +240,7 @@ export async function executeToolAsync(name: string, args: Record<string, unknow
     case 'executeCode':    return await executeCode(args)
     case 'showDiff':            return await executeShowDiff(args)
     case 'showDiffInteractive': return await executeShowDiffInteractive(args)
+    case 'getExtensionLogs':    return executeGetExtensionLogs(args)
     case 'closeFile':           return await executeCloseFile(args)
     case 'closeAllDiffTabs':    return executeCloseAllDiffTabs()
     default:                    return `Error: Unknown tool "${name}"`
@@ -692,6 +765,24 @@ async function executeCloseFile(args: Record<string, unknown>): Promise<string> 
   }
 
   return JSON.stringify({ closed, filePath: targetPath })
+}
+
+// ── 扩展运行时日志 ────────────────────────────────────────────────────────────
+
+function executeGetExtensionLogs(args: Record<string, unknown>): string {
+  const level = (args.level as 'error' | 'warn' | 'all') ?? 'all'
+  const afterTimestamp = args.afterTimestamp as number | undefined
+  const limit = args.limit as number | undefined
+  const entries = getExtensionLogs({ level, afterTimestamp, limit })
+  if (entries.length === 0) return JSON.stringify({ entries: [], count: 0, message: 'No extension logs found.' })
+  return JSON.stringify({
+    count: entries.length,
+    entries: entries.map(e => ({
+      level: e.level,
+      message: e.message,
+      ts: e.ts,
+    })),
+  })
 }
 
 // ── closeAllDiffTabs 工具 ─────────────────────────────────────────────────

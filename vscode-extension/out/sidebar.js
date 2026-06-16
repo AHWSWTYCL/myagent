@@ -79,7 +79,7 @@ class MyAgentSidebarProvider {
         };
         items.push(configHint);
         // 工具列表
-        const tools = new vscode.TreeItem(`$(tools) 8 MCP Tools`, vscode.TreeItemCollapsibleState.Collapsed);
+        const tools = new vscode.TreeItem(`$(tools) 9 MCP Tools`, vscode.TreeItemCollapsibleState.Collapsed);
         items.push(tools);
         return items;
     }
@@ -90,6 +90,7 @@ class MyAgentSidebarProvider {
             { label: 'getActiveFile', description: 'IDE — active file' },
             { label: 'openFile', description: 'IDE — open file' },
             { label: 'getDiagnostics', description: 'IDE — errors/warnings' },
+            { label: 'getExtensionLogs', description: 'IDE — console errors' },
             { label: 'executeCode', description: 'IDE — run command' },
             { label: 'showDiff', description: 'IDE — show file diff' },
             { label: 'showDiffInteractive', description: 'IDE — interactive diff' },

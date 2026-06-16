@@ -56,6 +56,8 @@ async function activate(context) {
     const version = context.extension.packageJSON?.version ?? '0.0.0';
     outputChannel = vscode.window.createOutputChannel('myagent');
     outputChannel.appendLine(`[myagent] v${version} activating...`);
+    // 拦截 console.error/warn 写入环形缓冲区（供 getExtensionLogs MCP 工具读取）
+    (0, tools_1.initLogCapture)();
     try {
         transport = (0, transport_1.createTransport)();
         const server = (0, server_1.createMCPServer)(transport);

@@ -363,25 +363,26 @@ export async function runAgentLoopStream(
 
     // ── 统一 DRAIN（每次 LLM 调用结束后都执行）──────────────────────
     // 放在 for 循环底部，tool_use / end_turn 都会走到这里。
-    // drain 到任何内容 → push 到 messages → continue 下一轮 LLM 及时处理
-    if (drainQueue) {
-      const nextMsg = drainQueue()
-      if (nextMsg) {
-        messages.push({ role: 'user', content: nextMsg })
-        continue
+    // 三个 drain 源并行收集，避免串行 continue 导致后续源被跳过（时序 bug）。
+    // 收集到任何内容 → push 到 messages → continue 下一轮 LLM 及时处理。
+    {
+      const drained: string[] = []
+      if (drainQueue) {
+        const m = drainQueue()
+        if (m) drained.push(m)
       }
-    }
-    if (drainAttachments) {
-      const attText = drainAttachments()
-      if (attText) {
-        messages.push({ role: 'user', content: attText })
-        continue
+      if (drainAttachments) {
+        const a = drainAttachments()
+        if (a) drained.push(a)
       }
-    }
-    if (drainMailbox) {
-      const mailText = drainMailbox()
-      if (mailText) {
-        messages.push({ role: 'user', content: mailText })
+      if (drainMailbox) {
+        const m = drainMailbox()
+        if (m) drained.push(m)
+      }
+      if (drained.length > 0) {
+        for (const msg of drained) {
+          messages.push({ role: 'user', content: msg })
+        }
         continue
       }
     }
