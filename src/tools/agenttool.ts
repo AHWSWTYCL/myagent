@@ -179,7 +179,7 @@ export class AgentTool extends Tool {
       for (const [k, v] of Object.entries(a.inputSchema.properties)) {
         if (k in properties) continue
         // 只保留 type 信息，去掉 description — LLM 从 system prompt 已知各 agent 能力
-        properties[k] = { type: v.type }
+        properties[k] = { type: (v as any).type }
       }
     }
     this._schemaCache = {

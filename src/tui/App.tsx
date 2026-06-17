@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Box, Text, useInput, useApp } from 'ink'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
-import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent } from './types.js'
+import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent, QuestionSuggestion } from './types.js'
 import type { TuiBridge } from './bridge.js'
 import type { DiffLine } from '../tools/edittool.js'
 import type { CommandParser } from '../commands/commandparser.js'
@@ -32,6 +32,7 @@ import { Mailbox } from '../mailbox/mailbox.js'
 import { goalManager } from '../goal/goalManager.js'
 import { useAppState, useSetAppState } from '../state/AppStateProvider.js'
 import { setStdioLogSink } from '../mcp/mcptransport.js'
+import { QuestionAutofillManager } from './QuestionAutofillManager.js'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 type AppMode = 'main' | 'backgroundTasks' | 'teammateView'
@@ -152,6 +153,14 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const [choiceCustomActive, setChoiceCustomActive] = useState<number | null>(null) // 正在输入的问题索引
   const [choiceCustomInput, setChoiceCustomInput] = useState('') // 输入草稿
   const [choiceCustomValues, setChoiceCustomValues] = useState<Record<number, string>>({}) // 已提交的自定义值
+  // ── Ghost text 输入建议 ────────────────────────────────────────────
+  const [ghostText, setGhostText] = useState<string | null>(null)
+  const [autofillEnabled, setAutofillEnabled] = useState(false)
+  const autofillManagerRef = useRef(new QuestionAutofillManager())
+  const autofillGenRef = useRef(0)
+  const autofillEnabledRef = useRef(false)
+  const inputModeRef = useRef<InputMode>("chat")
+  // ── prompt 等 ──────────────────────────────────────────────────────
   const [promptText, setPromptText] = useState('')
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
@@ -299,6 +308,12 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
     return () => clearInterval(t)
   }, [activityStartedAt])
 
+  // 同步 autofillEnabled 到 ref，供事件闭包读取最新值
+  useEffect(() => { autofillEnabledRef.current = autofillEnabled }, [autofillEnabled])
+  useEffect(() => { inputModeRef.current = inputMode }, [inputMode])
+
+  // ── Ghost text：ask_user / ask_user_choice 中镇压 ──────────────────
+
   const showHint = useCallback((text: string, ms = 2000) => {
     setTransientHint(text)
     if (transientHintTimerRef.current) clearTimeout(transientHintTimerRef.current)
@@ -330,11 +345,31 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
         pendingTodoSnapshotRef.current = null
       }
       setMessages(prev => [...prev, ...entries])
+      // Ghost text suggestion: 检测 agent 回复中是否包含问句
+      if (autofillEnabledRef.current && inputModeRef.current === 'chat') {
+        const genId = ++autofillGenRef.current
+        const contextStr = messagesRef.current.slice(-6).map(m => `[${m.role}]: ${m.content.slice(0, 200)}`).join("\n")
+        autofillManagerRef.current.generateSuggestion(text, contextStr).then(suggestion => {
+          if (suggestion && genId === autofillGenRef.current) {
+            setGhostText(suggestion.text)
+          }
+        }).catch(() => {})
+      }
     })
 
     on('message', ({ role, content }: { role: ChatMessage['role']; content: string }) => {
       setMessages(prev => [...prev, { id: nextId(), role, content }])
       refreshGoalText()
+      // Ghost text suggestion: agent 回复后尝试生成输入建议
+      if (role === 'agent' && autofillEnabledRef.current && inputModeRef.current === 'chat') {
+        const genId = ++autofillGenRef.current
+        const contextStr = messagesRef.current.slice(-6).map(m => `[${m.role}]: ${m.content.slice(0, 200)}`).join('\n')
+        autofillManagerRef.current.generateSuggestion(content, contextStr).then(suggestion => {
+          if (suggestion && genId === autofillGenRef.current) {
+            setGhostText(suggestion.text)
+          }
+        }).catch(() => {})
+      }
     })
 
     on('toolStart', ({ callId, name, input }: { callId: string; name: string; input: unknown }) => {
@@ -461,9 +496,13 @@ ${memory}` }])
       setPromptText(prompt)
       setInputMode('question')
       pendingResolveRef.current = resolve
+      // ask_user 中镇压 ghost text suggestion
+      setGhostText(null)
     })
 
     on('choice', ({ questions, resolve }: ChoiceEvent) => {
+      // ask_user_choice 中镇压 ghost text suggestion
+      setGhostText(null)
       setChoiceQuestions(questions)
       setChoiceSelections(questions.map(() => 0))
       setChoiceFocus(0)
@@ -834,6 +873,26 @@ ${memory}` }])
       clearSuggestions()
       return
     }
+
+    // Ctrl+G: toggle ghost text autofill
+    if (key.ctrl && _input === 'g') {
+      const enabled = autofillManagerRef.current.toggle()
+      setAutofillEnabled(enabled)
+      if (!enabled) {
+        setGhostText(null)
+        showHint('Ghost text: OFF')
+      } else {
+        showHint('Ghost text: ON (Tab to accept)')
+      }
+      return
+    }
+
+    // Tab: 接受 ghost text 建议
+    if (key.tab && ghostText) {
+      setInputValue(ghostText)
+      setGhostText(null)
+      return
+    }
   }, { isActive: inputMode === 'chat' && !isProcessing })
 
   // Sub-agent panel keyboard nav has been removed — the compact single-line
@@ -953,6 +1012,8 @@ ${memory}` }])
   const handleInputChange = useCallback((value: string) => {
     setInputValue(value)
     updateSuggestions(value)
+    // 用户开始输入 → 清除 ghost text
+    if (value && ghostText) setGhostText(null)
 
     // 记录当前 value，后续异步回调据此判断是否已过期
     pendingAttachmentCheckRef.current = value
@@ -982,7 +1043,7 @@ ${memory}` }])
       setAttachments([])
       setAttachmentErrors([])
     }
-  }, [atToken])
+  }, [atToken, ghostText])
 
   const addToHistory = useCallback((text: string) => {
     setInputHistory(prev => {
@@ -1002,6 +1063,7 @@ ${memory}` }])
       setInputMode('chat')
       setPromptText('')
       setInputValue('')
+      setGhostText(null)
       return
     }
 
@@ -1553,6 +1615,7 @@ ${memory}` }])
           attachmentErrors={attachmentErrors}
           suggestions={suggestions}
           selectedSuggestionIndex={selectedSuggestionIndex}
+          ghostText={ghostText ?? undefined}
           onCursorChange={handleCursorChange}
           cursorPosition={cursorOffset}
         />

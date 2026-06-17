@@ -13,6 +13,8 @@ interface InputBoxProps {
   isProcessing: boolean
   isQuestion: boolean
   questionPrompt: string
+  /** Ghost text 建议 — LLM 提问时显示在输入框中的灰色预览文本 */
+  ghostText?: string
   attachments: FileAttachment[]
   attachmentErrors: string[]
   suggestions: Suggestion[]
@@ -34,7 +36,7 @@ interface InputBoxProps {
 export function InputBox(props: InputBoxProps) {
   const {
     inputValue, onChange, onSubmit,
-    isProcessing, isQuestion, questionPrompt,
+    isProcessing, isQuestion, questionPrompt, ghostText,
     attachments, attachmentErrors,
     suggestions, selectedSuggestionIndex,
     onCursorChange, cursorPosition,
@@ -107,6 +109,9 @@ export function InputBox(props: InputBoxProps) {
             onCursorChange={onCursorChange}
             cursorPosition={cursorPosition}
           />
+          {(!isQuestion && ghostText && !inputValue) ? (
+            <Text color="gray" dimColor>{ghostText}</Text>
+          ) : null}
         </Box>
       </Box>
 
@@ -215,7 +220,7 @@ export function Footer({
     ? '↑↓ navigate · tab/→ accept · esc close · enter run'
     : isProcessing
       ? 'esc interrupt · ctrl+e stop tts · ctrl+b background · / commands · @ files'
-      : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · shift+enter newline · ctrl+o ${expanded ? 'collapse' : 'expand'} · ctrl+l logs`
+      : `? for shortcuts · / cmd · @ file · ! shell · shift+tab auto · shift+enter newline · ctrl+o ${expanded ? 'collapse' : 'expand'} · ctrl+l logs · ctrl+g autofill`
 
   // Only show sub-agent summary in Footer when >=2 parallel agents.
   // With a single agent, the tool card header (e.g. "⏺ Task(explore)") is sufficient.

@@ -60,6 +60,11 @@ export interface ChoiceEvent {
   resolve: (result: ChoiceResult) => void
 }
 
+/** LLM ask_user 时的输入建议（Ghost text）。sub-agent 根据上下文生成。 */
+export interface QuestionSuggestion {
+  text: string
+}
+
 export interface UsageStats {
   inputTokens: number
   outputTokens: number
