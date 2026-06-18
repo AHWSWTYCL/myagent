@@ -33,6 +33,9 @@ import { goalManager } from '../goal/goalManager.js'
 import { useAppState, useSetAppState } from '../state/AppStateProvider.js'
 import { setStdioLogSink } from '../mcp/mcptransport.js'
 import { QuestionAutofillManager } from './QuestionAutofillManager.js'
+import { speculativeRunner } from '../speculative/speculativeRunner.js'
+import { sessionState } from '../state/sessionState.js'
+import type Anthropic from '@anthropic-ai/sdk'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
 type AppMode = 'main' | 'backgroundTasks' | 'teammateView'
@@ -52,6 +55,8 @@ interface Props {
   getQueueLength: () => number
   dequeueMessage: () => string | undefined
   initialMessages?: ChatMessage[]
+  /** 构建 system prompt（用于 speculative execution 等需要复用 prompt 的场景） */
+  buildSystemSegments?: () => Anthropic.TextBlockParam[]
   /** Teammate mode props */
   mode?: RunMode
   teammateAgentId?: string
@@ -121,7 +126,7 @@ function buildRenderPlan(turnTools: TurnToolItem[]): RenderPlanItem[] {
   return plan
 }
 
-export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueUserMessage, enqueueMainMailboxWake, subscribeQueue, subscribeMainMailbox, hasUnreadMainMail, getQueueLength, dequeueMessage, initialMessages = [], mode = 'main', teammateAgentId, teammateLeaderId }: Props) {
+export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueUserMessage, enqueueMainMailboxWake, subscribeQueue, subscribeMainMailbox, hasUnreadMainMail, getQueueLength, dequeueMessage, initialMessages = [], buildSystemSegments, mode = 'main', teammateAgentId, teammateLeaderId }: Props) {
   const { exit } = useApp()
   const setAppState = useSetAppState()
   const [messages, rawSetMessages] = useState<ChatMessage[]>(() => initialMessages)
@@ -199,6 +204,7 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const isProcessingRef = useRef(false)    // 同步版 isProcessing，避免闭包过期
   const submittingRef = useRef(false)      // 防止 handleSubmit 并发
   const turnEndedRef = useRef(false)       // 防止 turnEnd 后的 text delta 复活 streaming
+  const lastSpeculationTextRef = useRef<string | null>(null)  // 追踪上次预测文本，用于 submit 时匹配
 
   // ── 稳定 props 引用（防止 processQueue useCallback 每次渲染变化）──
   // runTurn/getQueueLength/dequeueMessage 等来自父组件的 props 不是
@@ -352,6 +358,16 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
         autofillManagerRef.current.generateSuggestion(text, contextStr).then(suggestion => {
           if (suggestion && genId === autofillGenRef.current) {
             setGhostText(suggestion.text)
+            // 投机执行：后台 fork 只读 sub-agent 预执行预测输入
+            if (buildSystemSegments) {
+              lastSpeculationTextRef.current = suggestion.text
+              speculativeRunner.startSpeculation(suggestion.text, {
+                tools: toolMap,
+                buildSystemSegments,
+                canUseTool: (toolName, input, isWrite) =>
+                  speculativeRunner.defaultCanUseTool(toolName, input, isWrite),
+              })
+            }
           }
         }).catch(() => {})
       }
@@ -367,6 +383,8 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
         autofillManagerRef.current.generateSuggestion(content, contextStr).then(suggestion => {
           if (suggestion && genId === autofillGenRef.current) {
             setGhostText(suggestion.text)
+            // 注意：speculation 不在此处触发，由 turnEnd 事件统一触发，
+            // 避免 turnEnd + message 双重触发导致竞态。
           }
         }).catch(() => {})
       }
@@ -498,11 +516,15 @@ ${memory}` }])
       pendingResolveRef.current = resolve
       // ask_user 中镇压 ghost text suggestion
       setGhostText(null)
+      speculativeRunner.discard()
+      lastSpeculationTextRef.current = null
     })
 
     on('choice', ({ questions, resolve }: ChoiceEvent) => {
       // ask_user_choice 中镇压 ghost text suggestion
       setGhostText(null)
+      speculativeRunner.discard()
+      lastSpeculationTextRef.current = null
       setChoiceQuestions(questions)
       setChoiceSelections(questions.map(() => 0))
       setChoiceFocus(0)
@@ -880,6 +902,8 @@ ${memory}` }])
       setAutofillEnabled(enabled)
       if (!enabled) {
         setGhostText(null)
+        speculativeRunner.discard()
+        lastSpeculationTextRef.current = null
         showHint('Ghost text: OFF')
       } else {
         showHint('Ghost text: ON (Tab to accept)')
@@ -1012,8 +1036,15 @@ ${memory}` }])
   const handleInputChange = useCallback((value: string) => {
     setInputValue(value)
     updateSuggestions(value)
+    // 用户输入与上次 speculation 不同 → 丢弃投机执行
+    if (value && lastSpeculationTextRef.current && value !== lastSpeculationTextRef.current) {
+      speculativeRunner.discard()
+      lastSpeculationTextRef.current = null
+    }
     // 用户开始输入 → 清除 ghost text
-    if (value && ghostText) setGhostText(null)
+    if (value && ghostText) {
+      setGhostText(null)
+    }
 
     // 记录当前 value，后续异步回调据此判断是否已过期
     pendingAttachmentCheckRef.current = value
@@ -1188,6 +1219,45 @@ ${memory}` }])
       }
 
       addToHistory(trimmed)
+
+    // ── 投机执行：检查是否匹配上次预测 ──────────────────────────────
+      const specText = lastSpeculationTextRef.current
+      if (specText && trimmed === specText) {
+        lastSpeculationTextRef.current = null
+        const specResult = await speculativeRunner.accept()
+        if (specResult) {
+          const isComplete = specResult.boundary?.type === 'complete'
+          if (isComplete) {
+            // 投机执行已完成 → 替换 sessionState，添加结果到 TUI，跳过 LLM 调用
+            sessionState.replaceMessages(specResult.messages)
+            const lastAssistant = [...specResult.messages].reverse().find(m => m.role === 'assistant')
+            if (lastAssistant) {
+              const text = typeof lastAssistant.content === 'string'
+                ? lastAssistant.content
+                : lastAssistant.content.map(c => (c as any).text ?? '').join('')
+              setMessages(prev => [
+                ...prev,
+                { id: nextId(), role: 'user', content: trimmed },
+                { id: nextId(), role: 'agent', content: text || '(speculative result)' },
+              ])
+            } else {
+              setMessages(prev => [...prev, { id: nextId(), role: 'user', content: trimmed }])
+            }
+            submittingRef.current = false
+            setGhostText(null)
+            return
+          }
+          // 未完成 → 切换 sub-agent 上下文到主 agent 继续执行
+          // specResult.messages 已去掉 ghostText user message + 裁剪末尾，
+          // 末尾是 assistant → runTurn 追加 user 是合法交替。
+          sessionState.replaceMessages(specResult.messages)
+          setMessages(prev => [...prev, { id: nextId(), role: 'user', content: trimmed }])
+          enqueueUserMessage(trimmed)
+          submittingRef.current = false
+          processQueue()
+          return
+        }
+      }
 
       // ── 处理附件 ──────────────────────────────────────────────────────
       // 兜底：确保裸文件路径已被 @ 前缀（防止用户在异步检测完成前按 Enter）

@@ -19,6 +19,7 @@ import {
   subscribeQueue,
   getQueueLength,
   drainQueue,
+  buildSystemSegments,
 } from './bootstrap.js'
 import { runTurn, runBash } from './turn.js'
 import { Scheduler } from './scheduler/scheduler.js'
@@ -135,6 +136,7 @@ if (teammateOpts) {
       getQueueLength,
       dequeueMessage: drainQueue,
       initialMessages: initialTuiMessages,
+      buildSystemSegments,
     }),
   ))
 } else {
@@ -278,6 +280,7 @@ if (teammateOpts) {
       getQueueLength,
       dequeueMessage: drainQueue,
       initialMessages: initialTuiMessages,
+      buildSystemSegments,
     }),
   ))
 }
