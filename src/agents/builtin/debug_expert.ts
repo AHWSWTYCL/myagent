@@ -100,6 +100,7 @@ export const debugExpertAgent: AgentDefinition = {
     'web_fetch',
   ],
   maxTurns: 40,
+  maxOutputTokens: 16000, // 诊断报告可能很长
   inputSchema: {
     properties: {
       task: {

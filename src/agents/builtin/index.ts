@@ -13,6 +13,7 @@ import { advisorAgent } from './advisor.js'
 import { leaderAgent } from './leader.js'
 import { teammateAgent } from './teammate.js'
 import { goalVerifierAgent } from './goal_verifier.js'
+import { claudeCodeAgent } from './claude_code.js'
 
 export const builtinAgents: AgentDefinition[] = [
   analystAgent,
@@ -29,4 +30,5 @@ export const builtinAgents: AgentDefinition[] = [
   advisorAgent,
   leaderAgent,
   teammateAgent,
+  claudeCodeAgent,
 ]

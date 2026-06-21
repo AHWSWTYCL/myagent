@@ -35,6 +35,7 @@ export const advisorAgent: AgentDefinition = {
   // advisor 动态使用 advisorConfig 的当前模型（支持运行时 /advisor 切换）
   model: () => advisorConfig.getCurrent(),
   maxTurns: 15,
+  maxOutputTokens: 16000, // 深度分析报告可能很长
   formatUserMessage: args => {
     const task = String(args.task ?? '')
     const context = args.context ? `\n\n## 背景上下文\n${args.context}` : ''

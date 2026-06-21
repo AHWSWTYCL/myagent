@@ -10,6 +10,164 @@ import { bgManager } from '../utils/backgroundManager.js'
 import { saveBackgroundResult } from '../utils/backgroundStorage.js'
 import { taskRegistry } from '../team/taskRegistry.js'
 import path from 'path'
+import { spawn } from 'child_process'
+
+// ── Claude Code 外部进程配置 ───────────────────────────────────────────
+/** Claude Code 外部进程超时（毫秒） */
+const EXTERNAL_PROCESS_TIMEOUT_MS = 600_000 // 10 分钟
+/** SIGTERM 后等待 SIGKILL 的宽限期（毫秒） */
+const SIGKILL_GRACE_MS = 5_000
+/** prompt 最大长度（字符数） */
+const MAX_PROMPT_LENGTH = 100_000
+/** stdout/stderr 最大累积字节数 */
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024 // 10MB
+
+// ── Claude Code binary 路径缓存 ───────────────────────────────────────
+let cachedClaudeBinary: string | null | undefined = undefined
+
+// ── 结构化返回类型，替代 startsWith('Error') 脆弱判断 ──────────────
+type ClaudeCodeResult =
+  | { ok: true; output: string }
+  | { ok: false; error: string }
+
+// ── 辅助函数 ─────────────────────────────────────────────────────────
+
+/**
+ * 查找 claude CLI 是否可用。返回 binary 路径，失败返回 null。
+ * 结果会被缓存（进程生命周期内不变）。
+ */
+async function findClaudeBinary(): Promise<string | null> {
+  if (cachedClaudeBinary !== undefined) return cachedClaudeBinary
+
+  return new Promise(resolve => {
+    let settled = false
+    const done = (val: string | null) => {
+      if (!settled) { settled = true; cachedClaudeBinary = val; resolve(val) }
+    }
+    const child = spawn('which', ['claude'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    child.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
+    child.on('close', () => done(stdout.trim() || null))
+    child.on('error', () => done(null))
+    setTimeout(() => { child.kill(); done(null) }, 5000)
+  })
+}
+
+/**
+ * 通过 `claude -p` 非交互模式执行任务。
+ *
+ * @param prompt  任务描述（纯文本，将被传给 `claude -p`）
+ * @param cwd     工作目录
+ * @param signal  可选的 AbortSignal，触发时杀死子进程
+ * @returns       结构化结果 { ok, output } | { ok, error }
+ */
+async function runClaudeCode(
+  prompt: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<ClaudeCodeResult> {
+  // ── 输入校验 ─────────────────────────────────────────────────
+  if (prompt.length > MAX_PROMPT_LENGTH) {
+    return { ok: false, error: `Task description too long (${prompt.length} chars, max ${MAX_PROMPT_LENGTH})` }
+  }
+  if (prompt.includes('\0')) {
+    return { ok: false, error: 'Task description contains invalid characters (null bytes)' }
+  }
+
+  const binary = await findClaudeBinary()
+  if (!binary) {
+    return { ok: false, error: 'Claude Code CLI ("claude") not found. Please install Claude Code first: https://docs.anthropic.com/en/docs/claude-code' }
+  }
+
+  // 如果外部 signal 已经触发，直接返回
+  if (signal?.aborted) {
+    return { ok: false, error: 'Claude Code was cancelled.' }
+  }
+
+  return new Promise(resolve => {
+    let settled = false
+    const done = (result: ClaudeCodeResult) => {
+      if (!settled) { settled = true; resolve(result) }
+    }
+
+    const child = spawn(binary, ['-p', prompt], {
+      cwd,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    // ── AbortSignal 接入 ─────────────────────────────────────
+    const onAbort = () => {
+      child.kill('SIGTERM')
+      // 宽限期后 SIGKILL 兜底
+      setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* 进程可能已退出 */ }
+      }, SIGKILL_GRACE_MS)
+      done({ ok: false, error: 'Claude Code was cancelled.' })
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    // ── 输出收集（带上限） ─────────────────────────────────
+    const chunks: Buffer[] = []
+    let totalBytes = 0
+    const onData = (d: Buffer) => {
+      if (totalBytes < MAX_OUTPUT_BYTES) {
+        chunks.push(d)
+        totalBytes += d.length
+      } else if (totalBytes >= MAX_OUTPUT_BYTES) {
+        child.kill('SIGTERM')
+        setTimeout(() => {
+          try { child.kill('SIGKILL') } catch { /* 可能已退出 */ }
+        }, SIGKILL_GRACE_MS)
+        done({ ok: false, error: `Claude Code output exceeded ${MAX_OUTPUT_BYTES / 1024 / 1024}MB limit, killed.` })
+      }
+    }
+
+    let stderr = ''
+    child.stdout.on('data', onData)
+    child.stderr.on('data', (d: Buffer) => { stderr += d.toString() })
+
+    // ── 超时处理 ────────────────────────────────────────────
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* 可能已退出 */ }
+      }, SIGKILL_GRACE_MS)
+      done({ ok: false, error: `Claude Code timed out after ${EXTERNAL_PROCESS_TIMEOUT_MS / 1000}s. Consider simplifying the task.` })
+    }, EXTERNAL_PROCESS_TIMEOUT_MS)
+
+    // ── 进程结束 ─────────────────────────────────────────────
+    child.on('close', code => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+
+      const out = Buffer.concat(chunks).toString('utf8').trim()
+      const err = stderr.trim()
+
+      if (code !== 0 && code !== null) {
+        const msg = out || err || `exit code ${code}`
+        done({ ok: false, error: `Claude Code exited with code ${code}:\n${msg}` })
+        return
+      }
+
+      let output = out
+      if (!output && err) {
+        output = `[Claude Code output on stderr]\n${err}`
+      } else if (err) {
+        output += `\n\n[stderr]\n${err}`
+      }
+
+      done({ ok: true, output: output || '(Claude Code produced no output)' })
+    })
+
+    // ── spawn 错误（如 binary 不存在、权限不足） ────────────
+    child.on('error', err => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      done({ ok: false, error: `Claude Code spawn failed: ${err.message}` })
+    })
+  })
+}
 
 interface AgentToolInput {
   agent: string
@@ -206,6 +364,31 @@ export class AgentTool extends Tool {
 
     const agentName = def.name
     const agentDescription = String(args.task ?? '')
+
+    // ── 外部进程型 agent ──────────────────────────────────────────────
+    // 不走 LLM 循环，直接 spawn 外部 CLI 进程并返回结果。
+    if (def.agentType === 'external-process') {
+      if (!agentDescription) {
+        return `Error: agent "${agentName}" requires a task description`
+      }
+      const cwd = process.cwd()
+      this.emitLineFn?.(`[external] spawning ${agentName} (cwd: ${cwd})...`)
+      this.onSubAgentStartFn?.(def.name, agentDescription, def.agentType)
+
+      // Transcript 记录
+      this.transcriptRecorder?.recordSubAgentStart(def.name, agentDescription)
+
+      const result = await runClaudeCode(agentDescription, cwd, this.currentSignal)
+
+      const status = result.ok ? 'completed' : 'failed'
+      this.onSubAgentDoneFn?.(def.name, status)
+      this.transcriptRecorder?.recordSubAgentEnd(
+        def.name,
+        result.ok ? undefined : result.error,
+      )
+
+      return result.ok ? result.output : `Error: ${result.error}`
+    }
 
     // ── 显式后台模式 ──────────────────────────────────────────────────
     if (args.background === true) {

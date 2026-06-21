@@ -24,6 +24,7 @@ export const generatorAgent: AgentDefinition = {
   tools: ['read_file', 'write_file', 'list_dir', 'bash'],
   model: 'deepseek-v4-flash',
   maxTurns: 20,
+  maxOutputTokens: 12000, // 代码改动 + 说明
   inputSchema: {
     properties: {
       task_id: { type: 'string', description: 'Kanban task id created by planner. Preferred.' },

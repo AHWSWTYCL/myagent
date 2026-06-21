@@ -119,6 +119,7 @@ export const plannerAgent: AgentDefinition = {
   },
   tools: [],
   maxTurns: 10,
+  maxOutputTokens: 12000, // 任务 DAG + 自包含描述
   inputSchema: {
     properties: {
       task: { type: 'string', description: 'The high-level task to plan' },

@@ -27,6 +27,7 @@ export const verifierAgent: AgentDefinition = {
   tools: ['read_file', 'list_dir', 'bash'],
   model: 'deepseek-v4-flash',
   maxTurns: 10,
+  maxOutputTokens: 4096, // APPROVED/NEEDS_REVISION + 简短反馈
   inputSchema: {
     properties: {
       task_id: { type: 'string', description: 'Kanban id of the subtask being verified. Preferred.' },

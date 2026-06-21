@@ -64,6 +64,13 @@ export interface AgentDefinition {
   /** 使用的模型名。支持静态字符串或动态函数（如 advisor 运行时切换模型） */
   model?: string | (() => string)
   maxTurns?: number
+  /**
+   * LLM 输出的最大 token 数（max_tokens）。
+   * 不同 agent 的输出量差异很大：analyst 产出完整需求文档可能需要 16000+，
+   * verifier 只需输出 APPROVED/NEEDS_REVISION 用 4096 就够。
+   * 默认 8192，兼顾大多数场景。
+   */
+  maxOutputTokens?: number
   /** 默认 schema：{ task: string }。Agent 需要更复杂入参时可以覆盖 */
   inputSchema?: AgentInputSchema
   /** 把入参拼成 user message。默认：直接用 args.task */
@@ -78,6 +85,9 @@ export interface AgentDefinition {
     args: Record<string, unknown>,
   ) => string | Promise<string>
 }
+
+/** 默认 maxOutputTokens：8192，兼顾输出质量和上下文占用 */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
 export const DEFAULT_AGENT_INPUT_SCHEMA: AgentInputSchema = {
   properties: {

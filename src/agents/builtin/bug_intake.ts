@@ -188,6 +188,7 @@ export const bugIntakeAgent: AgentDefinition = {
     'write_file',
   ],
   maxTurns: 30,
+  maxOutputTokens: 16000, // 产出完整 bug 报告
   inputSchema: {
     properties: {
       task: {

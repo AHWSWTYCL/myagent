@@ -18,6 +18,8 @@ export interface RunAgentOptions {
   tools: Anthropic.Tool[]
   messages: Anthropic.MessageParam[]
   maxTurns?: number
+  /** 每次 LLM 调用的 max_tokens。默认 8192。长输出 agent 可设更高。 */
+  maxOutputTokens?: number
   executeTool: (name: string, input: unknown) => Promise<string>
   /** Names of tools that are safe to execute concurrently (no side effects, no permission prompts). */
   parallelSafeTools?: Set<string>
@@ -205,6 +207,7 @@ export async function runAgentLoopStream(
 ): Promise<RunAgentLoopResult> {
   const {
     client, model, system, tools, messages, maxTurns = 20,
+    maxOutputTokens,
     executeTool, onText, onTurnEnd, onToolStart, onToolEnd, onUsage, signal, parallelSafeTools,
     onTurnToolReset, drainQueue, drainAttachments, drainMailbox, backgroundSignal,
     keepAlive, waitForEvent, onLLMRequest,
@@ -263,7 +266,7 @@ export async function runAgentLoopStream(
 
     const stream = client.messages.stream({
       model,
-      max_tokens: 8192,
+      max_tokens: maxOutputTokens ?? 8192,
       tools: toolsWithCache,
       messages,
       system: systemParam,

@@ -30,6 +30,7 @@ export const exploreAgent: AgentDefinition = {
   tools: ['read_file', 'list_dir', 'bash'],
   model: 'deepseek-v4-flash',
   maxTurns: 10,
+  maxOutputTokens: 12000, // 结构化调研报告
   formatUserMessage: args =>
     `请调研代码库，为以下任务提供上下文报告：\n\n${args.task}`,
 }

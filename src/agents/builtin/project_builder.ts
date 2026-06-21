@@ -469,6 +469,7 @@ export const projectBuilderAgent: AgentDefinition = {
     'ask_user_choice',
   ],
   maxTurns: 40,
+  maxOutputTokens: 16000, // 构建输出可能很长
   inputSchema: {
     properties: {
       task: {

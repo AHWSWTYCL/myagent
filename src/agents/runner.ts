@@ -3,7 +3,7 @@ import { runAgentLoopStream, type UsageAccum } from '../utils/runagent.js'
 import { ToolRegistrar } from '../tools/toolregistrar.js'
 import { Tool } from '../tools/tool.js'
 import { extractLastText } from '../utils/agentutils.js'
-import { AgentDefinition, AgentRunContext } from './definition.js'
+import { AgentDefinition, AgentRunContext, DEFAULT_MAX_OUTPUT_TOKENS } from './definition.js'
 import { modelConfig } from '../llm/model-config.js'
 import { Mailbox, type Mail } from '../mailbox/mailbox.js'
 
@@ -154,6 +154,7 @@ export async function runAgent(
       tools: subRegistrar.getAllTools(),
       messages,
       maxTurns: isTeammate ? Infinity : (def.maxTurns ?? DEFAULT_MAX_TURNS),
+      maxOutputTokens: def.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       executeTool: subExecuteTool,
       parallelSafeTools: subRegistrar.getParallelSafeNames(),
       onText,

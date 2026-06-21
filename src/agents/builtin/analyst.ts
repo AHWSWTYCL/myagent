@@ -186,6 +186,7 @@ export const analystAgent: AgentDefinition = {
     'write_file',
   ],
   maxTurns: 30,
+  maxOutputTokens: 16000, // 产出完整需求文档
   inputSchema: {
     properties: {
       task: {
