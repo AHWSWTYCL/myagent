@@ -68,6 +68,7 @@ import { RetrospectiveCommand } from './commands/retrospectivecommand.js'
 import { TokenStatsCommand } from './commands/tokenstatscommand.js'
 import { SchedulerTool } from './scheduler/schedulertool.js'
 import { BgCommand } from './commands/bgcommand.js'
+import { WorkflowsCommand } from './commands/workflowscommand.js'
 import { VoiceCommand } from './commands/voicecommand.js'
 import { ModelCommand } from './commands/modelcommand.js'
 import { advisorConfig } from './llm/advisor-config.js'
@@ -416,6 +417,23 @@ agentTool.setExecutionContext({
     // 触发新 turn 处理邮件。此处若 eager drain 会导致邮件被消费但无 turn 处理。
   },
 })
+// ── WorkflowTool ──────────────────────────────────────────────────────────────
+const workflowTool = new (await import('./tools/workflowtool.js')).WorkflowTool()
+workflowTool.inject({
+  source: 'main',
+  client,
+  advisorClient: advisorConfig.available ? advisorConfig.client! : undefined,
+  toolRegistrar,
+  executeTool: (name, input) => executeTool(name, input),
+  emitLine: line => bridge.emitMessage('system', line),
+  onSubAgentDelta: (name, delta) => bridge.emitSubAgentDelta(name, delta),
+  onSubAgentHeartbeat: (name, elapsedMs) => bridge.emitSubAgentHeartbeat(name, elapsedMs),
+  onSubAgentStart: (name, description, agentType) => bridge.emitSubAgentStart(name, description, agentType),
+  onSubAgentProgress: (name, toolUseCount, tokenCount, lastActivity) => bridge.emitSubAgentProgress(name, toolUseCount, tokenCount, lastActivity),
+  transcriptRecorder,
+})
+toolRegistrar.registerTool(workflowTool)
+
 const hookManager = new HookManager()
 hookManager.register(new LoggerHook(bridge))
 const permissionHook = new PermissionHook(prompt => bridge.askPermission(prompt), toolRegistrar)
@@ -591,6 +609,7 @@ commandRegistry.register(new RetrospectiveCommand(client, () => sessionState.mes
 // TokenStatsCommand 需要访问 lastUsage 和 messages，传 getter 函数
 commandRegistry.register(new TokenStatsCommand(() => sessionState.lastUsage, () => sessionState.messages))
 commandRegistry.register(new BgCommand())
+commandRegistry.register(new WorkflowsCommand())
 commandRegistry.register(new SchedulerCommand())
 commandRegistry.register(new VoiceCommand())
 commandRegistry.register(new ModelCommand(qs => bridge.askChoice(qs)))

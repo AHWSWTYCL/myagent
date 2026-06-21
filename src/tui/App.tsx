@@ -27,6 +27,8 @@ import { TodoPanel } from './TodoPanel.js'
 import { TODO_STATUS_ICON, type TodoPlanSnapshot } from '../todos/todo.js'
 import { ttsService } from '../voice/tts.js'
 import { BackgroundTasksDialog } from './BackgroundTasksDialog.js'
+import { WorkflowsDialog, type WorkflowsDialogView } from './WorkflowsDialog.js'
+import { workflowRegistry } from '../workflow/registry.js'
 import { TeammateConversationView } from './TeammateConversationView.js'
 import { Mailbox } from '../mailbox/mailbox.js'
 import { goalManager } from '../goal/goalManager.js'
@@ -38,7 +40,7 @@ import { sessionState } from '../state/sessionState.js'
 import type Anthropic from '@anthropic-ai/sdk'
 
 type InputMode = 'chat' | 'permission' | 'question' | 'choice'
-type AppMode = 'main' | 'backgroundTasks' | 'teammateView'
+type AppMode = 'main' | 'backgroundTasks' | 'teammateView' | 'workflowsDialog'
 type RunMode = 'main' | 'teammate'
 
 interface Props {
@@ -277,6 +279,18 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
   const [dialogSelectedIndex, setDialogSelectedIndex] = useState(0)
   const [selectedTeammateId, setSelectedTeammateId] = useState<string | null>(null)
 
+  // ── Workflows Dialog state ────────────────────────────────────────────
+  const [workflowSelectedIndex, setWorkflowSelectedIndex] = useState(0)
+  const [workflowDialogView, setWorkflowDialogView] = useState<WorkflowsDialogView>('list')
+  const [workflowRuns, setWorkflowRuns] = useState(() => workflowRegistry.list())
+
+  // 每秒刷新 workflow 数据（dialog 打开时）
+  useEffect(() => {
+    if (appMode !== 'workflowsDialog') return
+    const t = setInterval(() => setWorkflowRuns(workflowRegistry.list()), 1000)
+    return () => clearInterval(t)
+  }, [appMode])
+
   // ── Todo plan 完成态跃迁跟踪（防重复发射静态消息） ────────────────
   const todoSnapshotEmittedRef = useRef(false)
   /** 暂存 todo snapshot 内容，待到 turnEnd 时插入（确保在所有 tool 结果之后、LLM 总结之前） */
@@ -464,16 +478,24 @@ ${memory}` }])
     })
 
     on('subAgentDelta', ({ name, delta }: { name: string; delta: string }) => {
-      setTurnTools(prev => prev.map(p =>
-        p.name === 'agent' && (p.input as Record<string, unknown>)?.agent === name
-          ? { ...p, liveOutput: (p.liveOutput ?? '') + delta, isHeartbeating: false }
-          : p
-      ))
+      setTurnTools(prev => prev.map(p => {
+        if (p.name === 'agent' && (p.input as Record<string, unknown>)?.agent === name)
+          return { ...p, liveOutput: (p.liveOutput ?? '') + delta, isHeartbeating: false }
+        if (p.name === 'run_workflow' && p.isPending) {
+          // workflow:wf_xxx → phase/log 进度（已格式化，直接追加）
+          // workflow:label  → 子 agent 流式输出（加缩进区分）
+          const isPhaseLog = name.match(/^workflow:wf_/)
+          const line = isPhaseLog ? delta : `  ${delta}`
+          return { ...p, liveOutput: (p.liveOutput ?? '') + line, isHeartbeating: false }
+        }
+        return p
+      }))
     })
 
     on('subAgentHeartbeat', ({ name }: { name: string; elapsedMs: number }) => {
       setTurnTools(prev => prev.map(p =>
-        p.name === 'agent' && (p.input as Record<string, unknown>)?.agent === name
+        (p.name === 'agent' && (p.input as Record<string, unknown>)?.agent === name) ||
+        (p.name === 'run_workflow' && p.isPending)
           ? { ...p, isHeartbeating: true }
           : p
       ))
@@ -619,6 +641,39 @@ ${memory}` }])
     }
     // teammateView 模式下 Ctrl+T 无操作
   })
+
+  // Ctrl+W: toggle Workflows dialog
+  useInput((input, key) => {
+    if (!key.ctrl || input !== 'w') return
+    if (appMode === 'main') {
+      setWorkflowRuns(workflowRegistry.list())
+      setWorkflowSelectedIndex(0)
+      setWorkflowDialogView('list')
+      setAppMode('workflowsDialog')
+    } else if (appMode === 'workflowsDialog') {
+      setAppMode('main')
+    }
+  })
+
+  // Workflows dialog navigation (↑/↓/Enter/←/Esc)
+  useInput((input, key) => {
+    if (appMode !== 'workflowsDialog') return
+    // 刷新数据
+    setWorkflowRuns(workflowRegistry.list())
+    if (key.escape || key.leftArrow || (key.ctrl && input === 'w')) {
+      if (workflowDialogView === 'detail') {
+        setWorkflowDialogView('list')
+      } else {
+        setAppMode('main')
+      }
+    } else if (key.upArrow) {
+      setWorkflowSelectedIndex(i => Math.max(0, i - 1))
+    } else if (key.downArrow) {
+      setWorkflowSelectedIndex(i => Math.min(workflowRuns.length - 1, i + 1))
+    } else if (key.return && workflowDialogView === 'list' && workflowRuns.length > 0) {
+      setWorkflowDialogView('detail')
+    }
+  }, { isActive: appMode === 'workflowsDialog' })
 
   // Background Tasks dialog navigation (↑/↓/Enter/f/x/Esc/←)
   useInput((input, key) => {
@@ -1207,8 +1262,12 @@ ${memory}` }])
       }
 
       if (commandParser.isCommand(trimmed)) {
-        // / 命令处理中不允许执行
-        if (isProcessingRef.current) {
+        // 只读命令（状态查看类）在处理中也允许执行
+        const READ_ONLY_COMMANDS = ['workflows', 'bg', 'help', 'model', 'advisor']
+        const cmdName = trimmed.slice(1).split(' ')[0]
+        const isReadOnly = READ_ONLY_COMMANDS.includes(cmdName)
+
+        if (isProcessingRef.current && !isReadOnly) {
           submittingRef.current = false
           return
         }
@@ -1653,6 +1712,16 @@ ${memory}` }])
           task={teammateTasks.find(t => t.agentId === selectedTeammateId)}
           userId="main"
           onBack={() => setAppMode('backgroundTasks')}
+        />
+      )}
+
+      {/* Workflows Dialog (Ctrl+W) — modal overlay for workflow status */}
+      {appMode === 'workflowsDialog' && (
+        <WorkflowsDialog
+          runs={workflowRuns}
+          selectedIndex={workflowSelectedIndex}
+          view={workflowDialogView}
+          onClose={() => setAppMode('main')}
         />
       )}
 
