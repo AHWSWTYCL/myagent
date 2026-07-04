@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Box, Text, useInput, useApp } from 'ink'
+import { Box, Text, Static, useInput, useApp } from 'ink'
 import type { PermissionAnswer } from '../hooks/permissionhook.js'
 import type { ChatMessage, ChoiceEvent, ChoiceQuestion, ChoiceResult, PermissionEvent, QuestionEvent, QuestionSuggestion } from './types.js'
 import type { TuiBridge } from './bridge.js'
@@ -1566,12 +1566,13 @@ ${memory}` }])
   return (
     <ToolRenderProvider toolMap={toolMap}>
     <Box flexDirection="column">
-      {/* 历史消息 + Banner，全部在动态 ink 树中渲染（对齐 Claude Code 非
-          fullscreen 路径：Messages.tsx 的 renderableMessages.flatMap）。
-          不使用 <Static>，因为 Static 会把内容写入终端 scrollback，与动态
-          区超视口部分留下的残影一起造成"同段内容打印两次"。React.memo 在
-          MessageRow 内部保证未变化的消息不重复 render。 */}
-      <Banner />
+      {/* Banner 使用 <Static> 单独渲染，写入终端 scrollback 且不参与
+          ink 动态 diff。只将 Banner 放入 Static（历史消息留在动态树），避免：
+          ① 全量 Static 造成的「同段内容打印两次」；
+          ② 纯动态树 Banner 在初始帧 diff 偏移时留下的 2 行残影。 */}
+      <Static items={[{ key: '__banner__' }]}>
+        {() => <Banner />}
+      </Static>
       {staticMessages.map(msg => (
         <MessageRow key={msg.id} msg={msg} diffs={editDiffs} expanded={expandAll} />
       ))}

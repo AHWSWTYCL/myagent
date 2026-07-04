@@ -10,6 +10,7 @@ import { render } from 'ink'
 const bridge = new TuiBridge()
 const originalConsoleLog = console.log.bind(console)
 const originalConsoleError = console.error.bind(console)
+const originalConsoleWarn = console.warn.bind(console)
 console.log = (...args: unknown[]) => {
   bridge.emitMessage('system', args.map(String).join(' '))
 }
@@ -18,6 +19,29 @@ console.error = (...args: unknown[]) => {
     if (arg instanceof Error) return `${arg.name}: ${arg.message}`
     return String(arg)
   }).join(' '))
+}
+// console.warn 在 MCP 子进程 stderr 处理中被使用（mcptransport.ts）。
+// 在 App mount 之前 MCP 服务器就已启动，其 stderr 走 console.warn → 终端。
+// 覆盖为 bridge 消息，配合 App 中的 setStdioLogSink 实现 Ctrl+L 可控显示。
+console.warn = (...args: unknown[]) => {
+  bridge.emitMessage('system', args.map(String).join(' '))
+}
+
+// React 在 ESM 模块解析阶段就捕获了原始 console.error，导致 React 开发模式
+// 警告（如 key 重复）绕过我们的 override 直接输出到 stderr。这里在 stderr 层
+// 过滤已知无害的噪声，避免它们污染 TUI 画面。
+const originalStderrWrite = process.stderr.write.bind(process.stderr)
+process.stderr.write = (chunk: any, encodingOrCb?: any, cb?: any): boolean => {
+  const str: string = typeof chunk === 'string' ? chunk
+    : Buffer.isBuffer(chunk) ? chunk.toString()
+    : String(chunk)
+  // 过滤 React 开发模式噪声
+  if (str.includes('Each child in a list should have a unique') ||
+      str.includes('Check the render method of') ||
+      str.includes('Encountered two children with the same key')) {
+    return true
+  }
+  return originalStderrWrite(chunk, encodingOrCb, cb) as boolean
 }
 
 // ── 全局错误处理器：防止 unhandledRejection / uncaughtException 静默退出 ──

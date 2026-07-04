@@ -13,6 +13,7 @@ import {
   mcpManager,
   bgManager,
   commandParser,
+  messageQueue,
   initialTuiMessages,
   enqueueUserMessage,
   enqueueMainMailboxWake,
@@ -21,6 +22,7 @@ import {
   drainQueue,
   buildSystemSegments,
 } from './bootstrap.js'
+import { RemoteServer } from './remote/RemoteServer.js'
 import { runTurn, runBash } from './turn.js'
 import { Scheduler } from './scheduler/scheduler.js'
 import { Mailbox } from './mailbox/mailbox.js'
@@ -78,6 +80,31 @@ if (worktreeName !== null && !teammateOpts) {
   process.on('SIGINT', cleanup)
   process.on('SIGTERM', cleanup)
 }
+
+// ── --remote / --remote-port: 启动 HTTP + SSE server，让外部 app 控制 myagent ──
+function parseRemotePort(): number | null {
+  const args = process.argv
+  for (let i = 2; i < args.length; i++) {
+    if (args[i] === '--remote-port') {
+      const raw = args[i + 1]
+      const port = raw ? parseInt(raw, 10) : NaN
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.error(`[remote] Invalid port: ${raw}. Usage: --remote-port <1-65535>`)
+        return null
+      }
+      args.splice(i, 2)
+      return port
+    }
+    if (args[i] === '--remote') {
+      // --remote (无参数) → 使用默认端口 3099
+      args.splice(i, 1)
+      return 3099
+    }
+  }
+  return null
+}
+
+const remotePort = parseRemotePort()
 
 if (teammateOpts) {
   // ════════════════════════════════════════════════════════════════════════
@@ -254,6 +281,15 @@ if (teammateOpts) {
   // 启动主 agent 邮箱监听（轮询模式），使 background teammate 的跨进程邮件
   // 能被及时感知，通过 Mailbox.subscribe → MessageQueue → processQueue 链路自动处理
   Mailbox.startWatching('main')
+
+  // ── Remote server（HTTP + SSE），让外部 app 可以控制 myagent ──────────
+  let remoteServer: RemoteServer | null = null
+  if (remotePort !== null) {
+    remoteServer = new RemoteServer({ port: remotePort, bridge, messageQueue })
+    remoteServer.start().catch(err => {
+      console.error(`[remote] Failed to start: ${err.message}`)
+    })
+  }
 
   // subscribeMainMailbox — 桥接 Mailbox 事件到 TUI 的消息队列。
   // Mailbox.startWatching 负责跨进程轮询，Mailbox.subscribe 负责进程内/跨进程事件监听。

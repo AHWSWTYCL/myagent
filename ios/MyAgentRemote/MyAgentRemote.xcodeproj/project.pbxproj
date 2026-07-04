@@ -1,0 +1,205 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		FA2CF10151BF4E60AEFD3646 /* MyAgentRemoteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18CB4BF52666467EB11BF574 /* MyAgentRemoteApp.swift */; };
+		81CE17DEF3C548BFAD077AEF /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 307A41EF8CDC4CE59E33DA51 /* ContentView.swift */; };
+		E297AF839D474DC997AF9777 /* RemoteClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C702B2AEE5E4AAEBC3B8751 /* RemoteClient.swift */; };
+		ED5244C459D3461AA27E6135 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27346285C81B4E4DB4605CB2 /* Models.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		18CB4BF52666467EB11BF574 /* MyAgentRemoteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MyAgentRemoteApp.swift"; sourceTree = "<group>"; };
+		307A41EF8CDC4CE59E33DA51 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView.swift"; sourceTree = "<group>"; };
+		4C702B2AEE5E4AAEBC3B8751 /* RemoteClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RemoteClient.swift"; sourceTree = "<group>"; };
+		27346285C81B4E4DB4605CB2 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models.swift"; sourceTree = "<group>"; };
+		DE6770D52FB842079B0D4DB6 /* MyAgentRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "MyAgentRemote.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		371CDD0B2C8542C0974FDB3C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		3BC8BAEF13754AB7991EDF74 = {
+			isa = PBXGroup;
+			children = (
+				E682F162D6E641BCAF4112B4 /* MyAgentRemote */,
+				332099873BB64445A97192DF /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E682F162D6E641BCAF4112B4 /* MyAgentRemote */ = {
+			isa = PBXGroup;
+			children = (
+				18CB4BF52666467EB11BF574 /* MyAgentRemoteApp.swift */,
+				307A41EF8CDC4CE59E33DA51 /* ContentView.swift */,
+				4C702B2AEE5E4AAEBC3B8751 /* RemoteClient.swift */,
+				27346285C81B4E4DB4605CB2 /* Models.swift */,
+			);
+			path = MyAgentRemote;
+			sourceTree = "<group>";
+		};
+		332099873BB64445A97192DF /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				DE6770D52FB842079B0D4DB6 /* MyAgentRemote.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1BD292A0A8F74FEC8C1888F6 /* MyAgentRemote */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D0628DC473314091ADEF778C /* Build configuration list for PBXNativeTarget "MyAgentRemote" */;
+			buildPhases = (
+				6F5AC919D3DF41C2A99F8402 /* Sources */,
+				371CDD0B2C8542C0974FDB3C /* Frameworks */,
+				716B099279EF44F189AF9432 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MyAgentRemote;
+			productName = MyAgentRemote;
+			productReference = DE6770D52FB842079B0D4DB6 /* MyAgentRemote.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		835DF2FD191F469AA37D9BBC /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					1BD292A0A8F74FEC8C1888F6 = { CreatedOnToolsVersion = 16.0; };
+				};
+			};
+			buildConfigurationList = D0628DC473314091ADEF778C /* Build configuration list for PBXProject "MyAgentRemote" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = 3BC8BAEF13754AB7991EDF74;
+			productRefGroup = 332099873BB64445A97192DF /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1BD292A0A8F74FEC8C1888F6 /* MyAgentRemote */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		716B099279EF44F189AF9432 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6F5AC919D3DF41C2A99F8402 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FA2CF10151BF4E60AEFD3646 /* MyAgentRemoteApp.swift in Sources */,
+				81CE17DEF3C548BFAD077AEF /* ContentView.swift in Sources */,
+				E297AF839D474DC997AF9777 /* RemoteClient.swift in Sources */,
+				ED5244C459D3461AA27E6135 /* Models.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		3D0B42C1EE6F4269966E2896 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSAppTransportSecurity = "<dict><key>NSAllowsArbitraryLoads</key><true/></dict>";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = ("\$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.myagent.remote;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		BA9C4DAE752545D48C789400 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSAppTransportSecurity = "<dict><key>NSAllowsArbitraryLoads</key><true/></dict>";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = ("\$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.myagent.remote;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		D0628DC473314091ADEF778C /* Build configuration list for PBXNativeTarget "MyAgentRemote" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3D0B42C1EE6F4269966E2896 /* Debug */,
+				BA9C4DAE752545D48C789400 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = 835DF2FD191F469AA37D9BBC /* Project object */;
+}

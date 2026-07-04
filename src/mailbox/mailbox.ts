@@ -209,8 +209,6 @@ export class Mailbox {
 
     const intervalMs = options.intervalMs ?? 1000
 
-    process.stderr.write(`[mailbox:watch] starting poll for agent="${agentId}" (interval=${intervalMs}ms)\n`)
-
     // 注意：不在启动时立即扫描。原因是 Mailbox.startWatching 在 render(App)
     // 之前调用，而 App 的 useEffect 才注册 subscribe 回调。如果此时扫描到旧邮件，
     // deliverIfNew 会将 mail.id 加入 deliveredMailIds 全局去重集合，但此时零 listener，
