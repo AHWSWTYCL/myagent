@@ -353,6 +353,13 @@ export function App({ bridge, commandParser, runTurn, runBash, toolMap, enqueueU
       setStreamingText(streamingRef.current)
     })
 
+    // 远程客户端（如 iOS app）请求中断当前 turn — 与 Esc 键行为一致
+    on('abortRequested', () => {
+      if (isProcessingRef.current) {
+        abortControllerRef.current?.abort()
+      }
+    })
+
     on('turnEnd', (text: string) => {
       if (!text) return
       // 先标记 turnEnd + 清除动态 streaming，防止与 Static 中 agent 消息「同框双显」

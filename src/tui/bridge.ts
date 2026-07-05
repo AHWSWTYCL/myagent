@@ -136,6 +136,11 @@ export class TuiBridge extends EventEmitter {
     this.emit('status', msg)
   }
 
+  /** Requests that the current turn be aborted — mirrors what pressing Esc does in the TUI. */
+  emitAbortRequested() {
+    this.emit('abortRequested')
+  }
+
   emitText(delta: string) {
     this.emit('text', delta)
   }

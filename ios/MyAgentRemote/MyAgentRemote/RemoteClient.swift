@@ -16,14 +16,57 @@ final class RemoteClient: ObservableObject {
     @Published private(set) var isConnected = false
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var statusText: String = "Disconnected"
+    @Published private(set) var isGenerating = false
 
     // MARK: - Configuration
 
     private(set) var baseURL: String
-    private var session: URLSession!       // for HTTP POST (sendMessage)
+    private var session: URLSession!       // for HTTP POST (sendMessage/abort)
     private var sseSession: URLSession?    // for SSE streaming (delegate-based)
     private var sseTask: URLSessionDataTask?
     private var sseBuffer = ""
+
+    /// Last received SSE event id — sent as Last-Event-Id on reconnect so the
+    /// server can replay from its ring buffer instead of losing history.
+    private var lastEventId: Int = 0
+
+    /// Reconnect backoff in seconds: 1 → 2 → 4 → ... → 30 max.
+    private var reconnectDelay: Int = 0
+    private var reconnectTimer: Timer?
+
+    /// Maps an in-flight tool call's id to its index in `messages`, so the
+    /// matching toolEnd event updates the same card instead of appending a new one.
+    private var toolCallIndex: [String: Int] = [:]
+
+    // MARK: - Persistence
+
+    private static let persistenceURL: URL = {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("chat_history.json")
+    }()
+
+    private var saveTask: Task<Void, Never>?
+
+    private static func loadPersistedMessages() -> [ChatMessage] {
+        guard let data = try? Data(contentsOf: persistenceURL),
+              let decoded = try? JSONDecoder().decode([ChatMessage].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    /// Debounced write-to-disk — avoids hammering the filesystem while text streams in.
+    private func scheduleSave() {
+        saveTask?.cancel()
+        let snapshot = messages
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: Self.persistenceURL, options: .atomic)
+            _ = self
+        }
+    }
 
     // MARK: - Init
 
@@ -32,6 +75,7 @@ final class RemoteClient: ObservableObject {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 300
         session = URLSession(configuration: config, delegate: nil, delegateQueue: nil)
+        messages = Self.loadPersistedMessages()
     }
 
     // MARK: - Public API
@@ -45,6 +89,9 @@ final class RemoteClient: ObservableObject {
             return
         }
 
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+
         sseDelegate = SSEDelegate(client: self)
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 300
@@ -54,11 +101,21 @@ final class RemoteClient: ObservableObject {
             delegateQueue: nil
         )
 
-        sseTask = sseSession!.dataTask(with: url)
+        // Resume from last received event after a disconnect instead of
+        // silently dropping whatever the server broadcast while we were down.
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 300
+        if lastEventId > 0 {
+            request.setValue("\(lastEventId)", forHTTPHeaderField: "Last-Event-Id")
+        }
+
+        sseTask = sseSession!.dataTask(with: request)
         sseTask?.resume()
     }
 
     func disconnect() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
         sseTask?.cancel()
         sseTask = nil
         sseSession?.invalidateAndCancel()
@@ -71,6 +128,9 @@ final class RemoteClient: ObservableObject {
         disconnect()
         baseURL = newURL
         messages = []
+        toolCallIndex = [:]
+        lastEventId = 0
+        reconnectDelay = 0
         connect()
     }
 
@@ -81,6 +141,8 @@ final class RemoteClient: ObservableObject {
         // Optimistic UI: show user message immediately
         let userMsg = ChatMessage(role: "user", content: trimmed)
         messages.append(userMsg)
+        isGenerating = true
+        scheduleSave()
 
         // POST to /api/message
         guard let url = URL(string: "\(baseURL)/api/message") else { return }
@@ -96,19 +158,31 @@ final class RemoteClient: ObservableObject {
 
         session.dataTask(with: request) { [weak self] data, response, error in
             Task { @MainActor [weak self] in
-                if let error = error {
-                    let errMsg = ChatMessage(role: "system", content: "Send failed: \(error.localizedDescription)")
-                    self?.messages.append(errMsg)
-                    self?.statusText = "Send error"
-                } else if let data = data,
-                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          json["ok"] as? Bool == true {
-                    self?.statusText = "Sent ✓"
+                guard let self else { return }
+                let ok = error == nil
+                    && data != nil
+                    && (try? JSONSerialization.jsonObject(with: data!) as? [String: Any])?["ok"] as? Bool == true
+
+                if ok {
+                    self.statusText = "Sent ✓"
                 } else {
-                    self?.statusText = "Unexpected response"
+                    let reason = error?.localizedDescription ?? "Unexpected response"
+                    let errMsg = ChatMessage(role: "system", content: "Send failed: \(reason)", failedRetryText: trimmed)
+                    self.messages.append(errMsg)
+                    self.statusText = "Send error"
+                    self.isGenerating = false
+                    self.scheduleSave()
                 }
             }
         }.resume()
+    }
+
+    /// Interrupts the current turn — mirrors pressing Esc in the TUI.
+    func abort() {
+        guard let url = URL(string: "\(baseURL)/api/abort") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        session.dataTask(with: request) { _, _, _ in }.resume()
     }
 
     // MARK: - SSE via delegate-based URLSession
@@ -125,8 +199,13 @@ final class RemoteClient: ObservableObject {
             let raw = String(sseBuffer[..<range.lowerBound])
             sseBuffer = String(sseBuffer[range.upperBound...])
 
-            // Parse "data: {json}" lines
+            // Each message is "id: N\ndata: {json}" — track id for Last-Event-Id resumption
             for line in raw.components(separatedBy: "\n") {
+                if line.hasPrefix("id: "), let id = Int(line.dropFirst(4)) {
+                    lastEventId = id
+                    continue
+                }
+
                 guard line.hasPrefix("data: "),
                       let jsonData = line.dropFirst(6).data(using: .utf8) else { continue }
 
@@ -147,6 +226,7 @@ final class RemoteClient: ObservableObject {
         case "connected":
             isConnected = true
             statusText = "Connected ✓"
+            reconnectDelay = 0
 
         case "message":
             if let msgData = data as? [String: Any],
@@ -157,6 +237,7 @@ final class RemoteClient: ObservableObject {
                     break
                 }
                 messages.append(ChatMessage(role: role, content: content))
+                scheduleSave()
             }
 
         case "status":
@@ -166,35 +247,43 @@ final class RemoteClient: ObservableObject {
 
         case "toolStart":
             if let toolData = data as? [String: Any],
+               let callId = toolData["callId"] as? String,
                let name = toolData["name"] as? String {
-                let toolMsg = ChatMessage(role: "tool", content: "🔧 Calling \(name)...")
+                let toolMsg = ChatMessage(role: "tool", content: "", toolName: name, toolStatus: .running)
                 messages.append(toolMsg)
+                toolCallIndex[callId] = messages.count - 1
+                scheduleSave()
             }
 
         case "toolEnd":
             if let toolData = data as? [String: Any],
+               let callId = toolData["callId"] as? String,
                let name = toolData["name"] as? String {
                 let output = toolData["output"] as? String ?? ""
-                let preview = String(output.prefix(200))
-                let toolMsg = ChatMessage(role: "tool", content: "✅ \(name): \(preview)\(output.count > 200 ? "..." : "")")
-                messages.append(toolMsg)
+                if let idx = toolCallIndex[callId], idx < messages.count {
+                    messages[idx].toolStatus = .done
+                    messages[idx].toolOutput = output
+                } else {
+                    // toolStart was missed (e.g. reconnect mid-call) — show a completed card anyway
+                    messages.append(ChatMessage(role: "tool", content: "", toolName: name, toolStatus: .done, toolOutput: output))
+                }
+                toolCallIndex.removeValue(forKey: callId)
+                scheduleSave()
             }
 
         case "text":
             // Streaming text delta — append to last agent message or create new
             if let delta = data as? String {
                 if let last = messages.last, last.role == "agent" {
-                    messages[messages.count - 1] = ChatMessage(
-                        id: last.id, role: "agent", content: last.content + delta
-                    )
+                    messages[messages.count - 1].content += delta
                 } else {
                     messages.append(ChatMessage(role: "agent", content: delta))
                 }
+                scheduleSave()
             }
 
         case "turnEnd":
-            // Mark turn end — could add separator
-            break
+            isGenerating = false
 
         default:
             break
@@ -216,12 +305,21 @@ final class RemoteClient: ObservableObject {
         } else {
             reason = nsError.localizedDescription
         }
-        statusText = "Connection lost: \(reason)"
         isConnected = false
-        // Auto-reconnect after 2 seconds (demo)
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            self?.connect()
+        sseTask = nil
+        sseSession?.invalidateAndCancel()
+        sseSession = nil
+
+        // Exponential backoff: 1s → 2s → 4s → ... → 30s max
+        let delay = reconnectDelay == 0 ? 1 : min(reconnectDelay * 2, 30)
+        reconnectDelay = delay
+        statusText = "Connection lost: \(reason). Reconnecting in \(delay)s..."
+
+        reconnectTimer?.invalidate()
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(delay), repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.connect()
+            }
         }
     }
 }

@@ -3,6 +3,7 @@
  *
  * 架构：
  *   POST /api/message  →  MessageQueue.enqueue()（和 TUI InputBox 走同一条路径）
+ *   POST /api/abort     →  中断当前 turn（与 TUI Esc 键行为一致）
  *   GET  /api/events    →  SSE stream（TuiBridge 事件 → JSON）
  *                         - 每个事件带 id:N 前缀，支持断线重连
  *                         - 客户端发 Last-Event-Id 头可从中断点续传
@@ -122,6 +123,8 @@ export class RemoteServer {
 
     if (req.method === 'POST' && url.pathname === '/api/message') {
       this.handlePostMessage(req, res)
+    } else if (req.method === 'POST' && url.pathname === '/api/abort') {
+      this.handleAbort(res)
     } else if (req.method === 'GET' && url.pathname === '/api/events') {
       this.handleSSE(req, res)
     } else if (req.method === 'GET' && url.pathname === '/api/health') {
@@ -182,6 +185,15 @@ export class RemoteServer {
         res.end(JSON.stringify({ error: 'Invalid JSON body' }))
       }
     })
+  }
+
+  // ── POST /api/abort ────────────────────────────────────────────────────
+
+  /** 中断当前正在进行的 turn — 与 TUI 中 Esc 键行为一致 */
+  private handleAbort(res: http.ServerResponse): void {
+    this.bridge.emitAbortRequested()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
   }
 
   // ── GET /api/events (SSE) ─────────────────────────────────────────────
